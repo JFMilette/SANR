@@ -7,6 +7,11 @@ Each file holds one channel (R+, R-, R++, R+-, R-+ or R--) as columns
 Importing opens the file text in a dialog with line numbers; the user picks
 the line where the data start and which channel the file is.
 
+The "+ Simulation" button adds a live dataset holding the simulation tab's
+lab channels (R++, R+-, R-+, R--, background included) on its Q grid.  It is
+recomputed whenever the simulation changes, drawn as lines without error
+bars, and can be frozen into a static copy from its context menu.
+
 Asymmetries combine channels measured on different Q grids: every channel is
 linearly interpolated (value and error) onto the Q points of the first
 channel in the formula, over the range they share.  Errors are propagated
@@ -348,6 +353,15 @@ def dataset_series(D, k):
     return [(name, None) + res], ''
 
 
+def simulation_channels(Q, R):
+    """Channels dict of a simulated reflectance (calc_reflectance output):
+    the lab channels, zero errors."""
+    zero = np.zeros_like(Q)
+    return {ch: dict(Q=Q, R=R[:, 4 + j], dR=zero, dQ=zero,
+                     theta=np.full_like(Q, np.nan), path='simulation')
+            for j, ch in enumerate(['++', '+-', '-+', '--'])}
+
+
 # ------------------------------------------------------- data tree ----
 ROLE = QtCore.Qt.ItemDataRole.UserRole          # (set index, channel or None)
 SYMBOLS = ['o', 's', 't', 'd', 'star', 't1', 'p', 'h', '+', 'x']
@@ -401,10 +415,12 @@ class DataTree(QtWidgets.QTreeWidget):
 # ------------------------------------------------- experimental tab ----
 class ExperimentalTab(QtWidgets.QWidget):
 
-    def __init__(self, parent=None):
+    def __init__(self, simulation=None, parent=None):
         super().__init__(parent)
-        # [dict(name, visible, channels={channel: dict(Q, R, dR, dQ, ...)})]
+        # [dict(name, visible, channels={channel: dict(Q, R, dR, dQ, ...)},
+        #       live)]; live sets mirror the simulation tab
         self.sets = []
+        self.simulation = simulation
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_controls())
@@ -416,6 +432,8 @@ class ExperimentalTab(QtWidgets.QWidget):
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(splitter)
+        if simulation is not None:
+            simulation.reflectanceChanged.connect(self._update_live)
         self.refresh_tree()
         self.redraw()
 
@@ -441,12 +459,18 @@ class ExperimentalTab(QtWidgets.QWidget):
         row = QtWidgets.QHBoxLayout()
         self.btn_import = QtWidgets.QPushButton('Import…')
         self.btn_new = QtWidgets.QPushButton('+ Dataset')
+        self.btn_sim = QtWidgets.QPushButton('+ Simulation')
+        self.btn_sim.setToolTip('Add a dataset that follows the reflectance '
+                                'of the Simulation tab')
+        self.btn_sim.setEnabled(self.simulation is not None)
         self.btn_remove = QtWidgets.QPushButton('− Remove')
-        for b in (self.btn_import, self.btn_new, self.btn_remove):
+        for b in (self.btn_import, self.btn_new, self.btn_sim,
+                  self.btn_remove):
             row.addWidget(b)
         bv.addLayout(row)
         self.btn_import.clicked.connect(self.import_data)
         self.btn_new.clicked.connect(lambda: self.new_set())
+        self.btn_sim.clicked.connect(self.add_simulation)
         self.btn_remove.clicked.connect(self.remove_selected)
         v.addWidget(box, 1)
 
@@ -511,14 +535,20 @@ class ExperimentalTab(QtWidgets.QWidget):
             top = QtWidgets.QTreeWidgetItem([s['name']])
             top.setIcon(0, glyph_icon(SYMBOL_GLYPH[SYMBOLS[i % len(SYMBOLS)]]))
             top.setData(0, ROLE, (i, None))
-            top.setFlags((top.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable
-                          | QtCore.Qt.ItemFlag.ItemIsEditable
-                          | QtCore.Qt.ItemFlag.ItemIsDropEnabled)
-                         & ~QtCore.Qt.ItemFlag.ItemIsDragEnabled)
+            live = s.get('live', False)
+            flags = (top.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable
+                     | QtCore.Qt.ItemFlag.ItemIsEditable
+                     | QtCore.Qt.ItemFlag.ItemIsDropEnabled) \
+                & ~QtCore.Qt.ItemFlag.ItemIsDragEnabled
+            if live:                          # its channels come from the model
+                flags &= ~QtCore.Qt.ItemFlag.ItemIsDropEnabled
+                top.setToolTip(0, 'Live: follows the Simulation tab')
+            top.setFlags(flags)
             top.setCheckState(0, QtCore.Qt.CheckState.Checked if s['visible']
                               else QtCore.Qt.CheckState.Unchecked)
             font = top.font(0)
             font.setBold(True)
+            font.setItalic(live)
             top.setFont(0, font)
             t.addTopLevelItem(top)
             if select == (i, None):
@@ -532,6 +562,8 @@ class ExperimentalTab(QtWidgets.QWidget):
                 it.setData(0, ROLE, (i, ch))
                 it.setFlags((it.flags() | QtCore.Qt.ItemFlag.ItemIsDragEnabled)
                             & ~QtCore.Qt.ItemFlag.ItemIsDropEnabled)
+                if live:
+                    it.setFlags(it.flags() & ~QtCore.Qt.ItemFlag.ItemIsDragEnabled)
                 it.setForeground(0, QtGui.QColor(CHANNEL_COLOURS[ch]))
                 it.setToolTip(0, d['path'])
                 top.addChild(it)
@@ -548,7 +580,9 @@ class ExperimentalTab(QtWidgets.QWidget):
         return it.data(0, ROLE) if it is not None else None
 
     def _update_buttons(self, *_):
-        self.btn_remove.setEnabled(self._selected() is not None)
+        sel = self._selected()
+        self.btn_remove.setEnabled(sel is not None and not (
+            sel[1] is not None and self.sets[sel[0]].get('live')))
 
     def _on_item_changed(self, item, _col):
         i, ch = item.data(0, ROLE)
@@ -569,11 +603,16 @@ class ExperimentalTab(QtWidgets.QWidget):
             return
         i, ch = it.data(0, ROLE)
         menu = QtWidgets.QMenu(self)
+        live = self.sets[i].get('live', False)
         if ch is None:
             menu.addAction('Rename', lambda: self.tree.editItem(it, 0))
-            menu.addAction('Import into this dataset…',
-                           lambda: self.import_data(self.sets[i]['name']))
-        else:
+            if live:
+                menu.addAction('Freeze as static copy',
+                               lambda: self.freeze_simulation(i))
+            else:
+                menu.addAction('Import into this dataset…',
+                               lambda: self.import_data(self.sets[i]['name']))
+        elif not live:
             move = menu.addMenu('Move to')
             for j, s in enumerate(self.sets):
                 if j != i:
@@ -599,10 +638,58 @@ class ExperimentalTab(QtWidgets.QWidget):
         return len(self.sets) - 1
 
     def _set_index(self, name):
+        """Index of the static (non-live) dataset called `name`."""
         for i, s in enumerate(self.sets):
-            if s['name'] == name:
+            if s['name'] == name and not s.get('live'):
                 return i
         return None
+
+    def _unique_name(self, base):
+        names = {s['name'] for s in self.sets}
+        name, n = base, 2
+        while name in names:
+            name, n = '%s %d' % (base, n), n + 1
+        return name
+
+    def add_simulation(self):
+        """Add a live dataset mirroring the simulation tab's reflectance."""
+        sim = self.simulation
+        if sim is None:
+            return
+        if sim.last_R is None:
+            sim.recompute()
+        if sim.last_R is None:
+            QtWidgets.QMessageBox.warning(
+                self, 'Simulation', 'The simulation has no valid '
+                'reflectance yet:\n%s' % sim.status.text())
+            return
+        self.sets.append(dict(name=self._unique_name('Simulation'),
+                              visible=True, live=True,
+                              channels=simulation_channels(sim.last_Q,
+                                                           sim.last_R)))
+        self.refresh_tree((len(self.sets) - 1, None))
+        self.redraw()
+
+    def freeze_simulation(self, i):
+        """Static copy of live dataset i, e.g. to compare two models."""
+        s = self.sets[i]
+        self.sets.append(dict(
+            name=self._unique_name(s['name'] + ' (frozen)'), visible=True,
+            channels={ch: dict(d, path='simulation (frozen)')
+                      for ch, d in s['channels'].items()}))
+        self.refresh_tree((len(self.sets) - 1, None))
+        self.redraw()
+
+    def _update_live(self):
+        sim = self.simulation
+        live = [s for s in self.sets if s.get('live')]
+        if not live or sim.last_R is None:
+            return
+        for s in live:
+            s['channels'] = simulation_channels(sim.last_Q, sim.last_R)
+        sel = self._selected()
+        self.refresh_tree(sel)                # point counts may have changed
+        self.redraw()
 
     def import_data(self, dataset=None):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -614,9 +701,12 @@ class ExperimentalTab(QtWidgets.QWidget):
             sel = self._selected()
             dataset = self.sets[sel[0]]['name'] if sel else None
         try:
+            static = [s for s in self.sets if not s.get('live')]
+            if dataset not in {s['name'] for s in static}:
+                dataset = None
             dlg = ImportDialog(
-                path, self, [s['name'] for s in self.sets], dataset,
-                {s['name']: set(s['channels']) for s in self.sets})
+                path, self, [s['name'] for s in static], dataset,
+                {s['name']: set(s['channels']) for s in static})
         except OSError as exc:
             QtWidgets.QMessageBox.critical(
                 self, 'Import', 'Could not read %s:\n%s' % (path, exc))
@@ -645,6 +735,9 @@ class ExperimentalTab(QtWidgets.QWidget):
             == QtWidgets.QMessageBox.StandardButton.Yes
 
     def move_channel(self, src, ch, dst):
+        if self.sets[src].get('live') or self.sets[dst].get('live'):
+            self.refresh_tree((src, ch))
+            return
         if src == dst or not self._confirm_replace(dst, ch):
             self.refresh_tree((src, ch))
             return
@@ -657,6 +750,8 @@ class ExperimentalTab(QtWidgets.QWidget):
         if sel is None:
             return
         i, ch = sel
+        if ch is not None and self.sets[i].get('live'):
+            return                       # the simulation would restore it
         if ch is not None:
             del self.sets[i]['channels'][ch]
             self.refresh_tree((i, None))
@@ -677,7 +772,8 @@ class ExperimentalTab(QtWidgets.QWidget):
         p = self.plot
         for curve, err in self._items:
             p.removeItem(curve)
-            p.removeItem(err)
+            if err is not None:
+                p.removeItem(err)
         self._items, self._shown = [], []
         p.legend.clear()
 
@@ -716,7 +812,8 @@ class ExperimentalTab(QtWidgets.QWidget):
                 if rq4:
                     y, dy = y * Q**4, dy * Q**4
                 lab = '%s — %s' % (s['name'], sname) if prefix else sname
-                self._add_series(lab, col, symbol, Q, y, dy, dQ, log)
+                self._add_series(lab, col, symbol, Q, y, dy, dQ, log,
+                                 line=s.get('live', False))
 
         n = sum(len(s['channels']) for s in self.sets)
         if not n:
@@ -730,7 +827,20 @@ class ExperimentalTab(QtWidgets.QWidget):
         p.enableAutoRange()
         self.cursor.refresh()
 
-    def _add_series(self, name, col, symbol, Q, y, dy, dQ, log):
+    def _add_series(self, name, col, symbol, Q, y, dy, dQ, log, line=False):
+        """Markers with error bars, or a plain line (simulated data)."""
+        if line:
+            # keep gaps (NaN) as breaks in the line
+            yy = np.where(np.isfinite(y) & ((y > 0) if log else True), y, np.nan)
+            curve = pg.PlotDataItem(Q, yy, pen=pg.mkPen(col, width=1.8),
+                                    connect='finite')
+            self.plot.addItem(curve)
+            self.plot.legend.addItem(curve, name)
+            self._items.append((curve, None))
+            ok = np.isfinite(yy)
+            self._shown.append((curve, name, Q[ok], yy[ok],
+                                np.zeros(ok.sum())))
+            return
         ok = np.isfinite(y) & (y > 0 if log else True)
         Q, y, dy, dQ = Q[ok], y[ok], dy[ok], dQ[ok]
         dy = np.where(np.isfinite(dy), np.abs(dy), 0.0)
@@ -771,7 +881,9 @@ class ExperimentalTab(QtWidgets.QWidget):
                 continue
             i = int(np.argmin(np.abs(Q - x)))
             yv = np.log10(y[i]) if self._log else y[i]
-            col = curve.opts['symbolPen'].color().name()
+            pen = curve.opts['symbolPen'] if curve.opts['symbol'] else \
+                curve.opts['pen']
+            col = pg.mkPen(pen).color().name()
             rows.append(('%s @ %.5g' % (name, Q[i]),
                          '%s ± %s' % (fmt(y[i]), fmt(dy[i])),
                          col, yv, self.plot.vb))

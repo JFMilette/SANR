@@ -3,7 +3,7 @@ Plot the depth profile of a Stack: the exact continuous profile and the
 sublayer slabs that the transfer matrix actually sees.
 
 Three panels, sharing a depth axis:
-    NSLD real   /   MSLD rho   /   MSLD phi
+    NSLD real   /   MSLD rho   /   MSLD theta
 
 The solid line is Stack.profile(z), the exact additive-interface profile.
 The shaded rectangles are Stack.build_sublayers(), each drawn across its own
@@ -22,15 +22,15 @@ def make_stack():
     vacuum = Layer('vacuum')
 
     L1 = Layer('L1', thickness=80.0, NSLD_real=4.0e-6,
-               MSLD_rho=1.5e-6, MSLD_phi=0.0,
+               MSLD_rho=1.5e-6, MSLD_theta=0.0,
                roughness_sigma=8.0, roughness_model='tanh', roughness_sublayer=20)
 
     L2 = Layer('L2', thickness=120.0, NSLD_real=1.5e-6, NSLD_img=-2.0e-8,
-               MSLD_rho=0.8e-6, MSLD_phi=0.0,
+               MSLD_rho=0.8e-6, MSLD_theta=0.0,
                roughness_sigma=5.0, roughness_model='tanh', roughness_sublayer=20)
 
     L3 = Layer('L3', thickness=60.0, NSLD_real=6.0e-6,
-               MSLD_rho=0.0, MSLD_phi=0.0,
+               MSLD_rho=0.0, MSLD_theta=0.0,
                roughness_sigma=8.0, roughness_model='tanh', roughness_sublayer=20)
 
     substrate = Layer('substrate', NSLD_real=2.07e-6,
@@ -55,7 +55,7 @@ def draw(stack, scale=1e-6, unit=r'$10^{-6}\,\AA^{-2}$'):
 
     pad = 0.35 * max(Z[-1], 1.0)
     z = np.linspace(min(e[0], Z[0] - pad) - 10, max(e[-1], Z[-1] + pad) + 10, 4000)
-    nsld, rho, phi = stack.profile(z)
+    nsld, rho, theta = stack.profile(z)
 
     fig, ax = plt.subplots(3, 1, figsize=(9.5, 8.2), sharex=True)
     fig.subplots_adjust(hspace=0.12, left=0.11, right=0.97, top=0.94, bottom=0.08)
@@ -65,8 +65,8 @@ def draw(stack, scale=1e-6, unit=r'$10^{-6}\,\AA^{-2}$'):
          'NSLD real  (%s)' % unit, '#1f4e79'),
         (rho / scale, [s.MSLD_rho / scale for s in stack.sublayers],
          'MSLD rho  (%s)' % unit, '#2a7f62'),
-        (phi * 360, [s.MSLD_phi * 360 for s in stack.sublayers],
-         'MSLD phi  (deg)', '#8b5a2b'),
+        (theta * 360, [s.MSLD_theta * 360 for s in stack.sublayers],
+         'MSLD theta  (deg)', '#8b5a2b'),
     ]
 
     for a, (curve, slabvals, label, colour) in zip(ax, panels):

@@ -1,8 +1,8 @@
 """
 Simulation tab: build a Stack by hand and look at its profile and reflectivity.
 
-    left  : general parameters, layer list (add / remove / reorder),
-            property editor of the selected layer
+    left  : general parameters beside the layer list (add / remove /
+            reorder), property editor of the selected layer below
     right : depth profile on top, reflectivity below, both wide.
             The profile overlays NSLD / MSLD (left axis) and the magnetic
             angle (right axis), each toggled by a checkbox:
@@ -20,7 +20,7 @@ import re
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6 import QtCore, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 
 from model.stack import Layer, Stack
 
@@ -34,7 +34,7 @@ HP_COLOURS = ['#1f77b4', '#ff7f0e']    # half-polarized R↑, R↓
 PROFILE_QUANTITIES = [
     ('NSLD', 'NSLD real (10⁻⁶ Å⁻²)', '#1f4e79'),
     ('MSLD', 'MSLD ρ (10⁻⁶ Å⁻²)', '#2a7f62'),
-    ('Magnetic angle', 'MSLD φ (deg)', '#8b5a2b'),
+    ('Magnetic angle', 'MSLD θ (deg)', '#8b5a2b'),
 ]
 # combo label, axis label (None = raw reflectivities), formula beside the combo.
 # Channels indexed 0..3 = ↑↑ ↑↓ ↓↑ ↓↓ in the chosen basis.
@@ -76,15 +76,15 @@ def make_stack():
     vacuum = Layer('vacuum')
 
     L1 = Layer('L1', thickness=80.0, NSLD_real=4.0e-6,
-               MSLD_rho=1.5e-6, MSLD_phi=0.75,
+               MSLD_rho=1.5e-6, MSLD_theta=0.75,
                roughness_sigma=8.0, roughness_model='tanh', roughness_sublayer=20)
 
     L2 = Layer('L2', thickness=120.0, NSLD_real=1.5e-6, NSLD_img=-2.0e-8,
-               MSLD_rho=0.8e-6, MSLD_phi=0.5,
+               MSLD_rho=0.8e-6, MSLD_theta=0.5,
                roughness_sigma=5.0, roughness_model='tanh', roughness_sublayer=20)
 
     L3 = Layer('L3', thickness=60.0, NSLD_real=6.0e-6,
-               MSLD_rho=0.0, MSLD_phi=0.0,
+               MSLD_rho=0.0, MSLD_theta=0.0,
                roughness_sigma=8.0, roughness_model='tanh', roughness_sublayer=20)
 
     substrate = Layer('substrate', NSLD_real=2.07e-6,
@@ -102,6 +102,59 @@ def dspin(lo, hi, dec, step, suffix=''):
     w.setSuffix(suffix)
     w.setKeyboardTracking(False)
     return w
+
+
+class SciSpinBox(QtWidgets.QDoubleSpinBox):
+    """Non-negative spin box shown in %g notation (e.g. 1e-07); the arrows
+    step logarithmically, 10 steps per decade, and down from the smallest
+    step goes to 0."""
+
+    MIN_STEP = 1e-10
+
+    def __init__(self, hi=1.0):
+        super().__init__()
+        self.setDecimals(20)             # keep full precision internally
+        self.setRange(0.0, hi)
+        self.setKeyboardTracking(False)
+
+    def textFromValue(self, v):
+        return '%g' % v
+
+    def sizeHint(self):
+        # Qt sizes from textFromValue(min / max) = '0' / '1'; size for the
+        # widest text actually shown instead
+        h = super().sizeHint()
+        extra = self.fontMetrics().horizontalAdvance('-8.88888e-88') - \
+            self.fontMetrics().horizontalAdvance('%g' % self.maximum())
+        return QtCore.QSize(h.width() + max(extra, 0), h.height())
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
+
+    def valueFromText(self, text):
+        return float(text)
+
+    def validate(self, text, pos):
+        State = QtGui.QValidator.State
+        t = text.strip()
+        try:
+            v = float(t)
+        except ValueError:
+            # partial input such as '1e' or '1e-' is still being typed
+            ok = re.fullmatch(r'[0-9]*\.?[0-9]*([eE][+-]?)?', t) is not None
+            return State.Intermediate if ok else State.Invalid, text, pos
+        ok = self.minimum() <= v <= self.maximum()
+        return State.Acceptable if ok else State.Intermediate, text, pos
+
+    def stepBy(self, n):
+        v = self.value()
+        if v <= 0:
+            v = self.MIN_STEP if n > 0 else 0.0
+        else:
+            v *= 10 ** (0.1 * n)
+            if v < self.MIN_STEP:
+                v = 0.0
+        self.setValue(min(v, self.maximum()))
 
 
 def plot_widget(xlabel, ylabel):
@@ -216,8 +269,28 @@ def fmt(v):
 
 
 # ------------------------------------------------------- layer editor ----
+# attr, label, lo, hi, decimals, step, suffix, display = stored * scale
+EDITOR_PARAMS = [
+    ('thickness', 'Thickness (Å)', 0.0, 1e5, 2, 1.0, '', 1.0),
+    ('NSLD_real', 'NSLD real', -100, 100, 4, 0.1, '', 1 / SLD_SCALE),
+    ('NSLD_img', 'NSLD imag', -100, 100, 5, 0.001, '', 1 / SLD_SCALE),
+    ('MSLD_rho', 'MSLD ρ', 0, 100, 4, 0.1, '', 1 / SLD_SCALE),
+    ('MSLD_theta', 'MSLD θ', -360, 360, 2, 5.0, ' °', 360.0),
+    ('roughness_sigma', 'Roughness σ', 0.0, 1e4, 2, 0.5, ' Å', 1.0),
+]
+OUT_OF_BOUNDS = 'QDoubleSpinBox { background: #ffd6d6 }'
+SLIDER_STEPS = 1000             # slider resolution across [Min, Max]
+NSUB_MAX = 1000                 # largest sublayer count
+NSUB_DEFAULT_MAX = 200          # default top of the sublayer slider
+
+
 class LayerEditor(QtWidgets.QGroupBox):
-    """Form bound to one Layer; emits `changed` after writing into it."""
+    """Form bound to one Layer; emits `changed` after writing into it.
+
+    Each fittable parameter has its value, fit bounds and a Fit check box
+    (Layer.fit); the bounds are only editable while Fit is checked, and a
+    varied value outside its bounds is shown in red. The slider under each
+    row sweeps the value between Min and Max."""
 
     changed = QtCore.pyqtSignal()
 
@@ -225,36 +298,89 @@ class LayerEditor(QtWidgets.QGroupBox):
         super().__init__('Layer properties')
         self.layer = None
         self._loading = False
+        self._sliding = False           # value change coming from a slider
 
         self.name = QtWidgets.QLineEdit()
-        self.thickness = dspin(0.0, 1e5, 2, 1.0, ' Å')
-        self.nsld_re = dspin(-100, 100, 4, 0.1)
-        self.nsld_im = dspin(-100, 100, 5, 0.001)
-        self.msld_rho = dspin(0, 100, 4, 0.1)
-        self.msld_deg = dspin(-360, 360, 2, 5.0, ' °')
-        self.sigma = dspin(0.0, 1e4, 2, 0.5, ' Å')
         self.model = QtWidgets.QComboBox()
         self.model.addItems(['tanh', 'erf'])
         self.nsub = QtWidgets.QSpinBox()
-        self.nsub.setRange(1, 1000)
+        self.nsub.setRange(1, NSUB_MAX)
         self.nsub.setKeyboardTracking(False)
+        # slider span only: an integer count is never fitted
+        self.nsub_min, self.nsub_max = QtWidgets.QSpinBox(), QtWidgets.QSpinBox()
+        for b in (self.nsub_min, self.nsub_max):
+            b.setRange(1, NSUB_MAX)
+            b.setKeyboardTracking(False)
+            b.setButtonSymbols(
+                QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
+            b.valueChanged.connect(self._sync_nsub_slider)
+        self.nsub_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.nsub_slider.setToolTip('Sweep the sublayer count between Min '
+                                    'and Max')
+        self.nsub_slider.valueChanged.connect(self.nsub.setValue)
+        self.nsub.valueChanged.connect(self._sync_nsub_slider)
 
-        unit = '(10⁻⁶ Å⁻²)'
-        form = QtWidgets.QFormLayout(self)
-        form.addRow('Name', self.name)
-        form.addRow('Thickness', self.thickness)
-        form.addRow('NSLD real %s' % unit, self.nsld_re)
-        form.addRow('NSLD imag %s' % unit, self.nsld_im)
-        form.addRow('MSLD ρ %s' % unit, self.msld_rho)
-        form.addRow('MSLD φ', self.msld_deg)
-        form.addRow(QtWidgets.QLabel('<i>Interface at top of this layer</i>'))
-        form.addRow('Roughness σ', self.sigma)
-        form.addRow('Roughness model', self.model)
-        form.addRow('Sublayers', self.nsub)
+        # attr -> (value, min, max, fit check box, row label)
+        self.rows = {}
+        for attr, label, lo, hi, dec, step, suffix, scale in EDITOR_PARAMS:
+            val = dspin(lo, hi, dec, step, suffix)
+            bmin, bmax = dspin(lo, hi, dec, step), dspin(lo, hi, dec, step)
+            for b in (bmin, bmax):   # bounds rarely need arrows; save width
+                b.setButtonSymbols(
+                    QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
+            cb = QtWidgets.QCheckBox()
+            cb.setToolTip('Vary %s in the fit, between Min and Max' % label)
+            self.rows[attr] = (val, bmin, bmax, cb, QtWidgets.QLabel(label))
+        self.sliders = {}
+        for attr, *_ in EDITOR_PARAMS:
+            sl = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+            sl.setRange(0, SLIDER_STEPS)
+            sl.setToolTip('Sweep the value between Min and Max')
+            sl.valueChanged.connect(
+                lambda pos, a=attr: self._slider_moved(a, pos))
+            self.sliders[attr] = sl
+        self.rows['MSLD_theta'][4].setToolTip(
+            'θ_M: in-plane angle of M from the sample x axis towards y '
+            '(Majkrzak Fig. 1.14)')
+
+        g = QtWidgets.QGridLayout(self)
+        g.setColumnStretch(1, 1)
+        g.setVerticalSpacing(2)
+        g.addWidget(QtWidgets.QLabel('Name'), 0, 0)
+        g.addWidget(self.name, 0, 1, 1, 4)
+        for c, h in enumerate(['', 'Value', 'Min', 'Max', 'Fit']):
+            lab = QtWidgets.QLabel('<b>%s</b>' % h)
+            lab.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            g.addWidget(lab, 1, c)
+        g.addWidget(QtWidgets.QLabel('<i>SLDs in 10⁻⁶ Å⁻²</i>'), 2, 0, 1, 5)
+        r = 3
+        for attr, *_ in EDITOR_PARAMS:
+            if attr == 'roughness_sigma':
+                g.addWidget(QtWidgets.QLabel(
+                    '<i>Interface at top of this layer</i>'), r, 0, 1, 5)
+                r += 1
+            val, bmin, bmax, cb, lab = self.rows[attr]
+            for c, w in enumerate((lab, val, bmin, bmax)):
+                g.addWidget(w, r, c)
+            g.addWidget(cb, r, 4, alignment=QtCore.Qt.AlignmentFlag.AlignCenter)
+            g.addWidget(self.sliders[attr], r + 1, 1, 1, 3)
+            r += 2
+        g.addWidget(QtWidgets.QLabel('Roughness model'), r, 0)
+        g.addWidget(self.model, r, 1)
+        g.addWidget(QtWidgets.QLabel('Sublayers'), r + 1, 0)
+        g.addWidget(self.nsub, r + 1, 1)
+        g.addWidget(self.nsub_min, r + 1, 2)
+        g.addWidget(self.nsub_max, r + 1, 3)
+        g.addWidget(self.nsub_slider, r + 2, 1, 1, 3)
 
         self.name.editingFinished.connect(self._store)
-        for w in (self.thickness, self.nsld_re, self.nsld_im, self.msld_rho,
-                  self.msld_deg, self.sigma, self.nsub):
+        for attr, (val, bmin, bmax, cb, _) in self.rows.items():
+            for w in (val, bmin, bmax):
+                w.valueChanged.connect(self._store)
+                w.valueChanged.connect(
+                    lambda _, a=attr: self._sync_slider(a))
+            cb.toggled.connect(self._store)
+        for w in (self.nsub, self.nsub_min, self.nsub_max):
             w.valueChanged.connect(self._store)
         self.model.currentIndexChanged.connect(self._store)
         self.setEnabled(False)
@@ -266,42 +392,111 @@ class LayerEditor(QtWidgets.QGroupBox):
             return
         self._loading = True
         self.name.setText(layer.name)
-        self.thickness.setValue(layer.thickness)
-        self.nsld_re.setValue(layer.NSLD_real / SLD_SCALE)
-        self.nsld_im.setValue(layer.NSLD_img / SLD_SCALE)
-        self.msld_rho.setValue(layer.MSLD_rho / SLD_SCALE)
-        self.msld_deg.setValue(layer.MSLD_phi * 360.0)
-        self.sigma.setValue(layer.roughness_sigma)
+        for attr, *_, scale in EDITOR_PARAMS:
+            val, bmin, bmax, cb, _ = self.rows[attr]
+            e = layer.fit_entry(attr)
+            val.setValue(getattr(layer, attr) * scale)
+            bmin.setValue(e['min'] * scale)
+            bmax.setValue(e['max'] * scale)
+            cb.setChecked(e['vary'])
         self.model.setCurrentText(layer.roughness_model)
-        self.nsub.setValue(int(layer.roughness_sublayer))
+        n = int(layer.roughness_sublayer)
+        e = layer.fit.get('roughness_sublayer') or \
+            {'min': 1, 'max': max(NSUB_DEFAULT_MAX, n)}
+        self.nsub_min.setValue(int(e['min']))
+        self.nsub_max.setValue(int(e['max']))
+        self.nsub.setValue(n)
+        self._sync_nsub_slider()
         self._loading = False
+        for attr in self.sliders:
+            self._sync_slider(attr)
         # semi-infinite media have no thickness; fronting has no top interface
-        self.thickness.setEnabled(not (is_fronting or is_backing))
-        for w in (self.sigma, self.model, self.nsub):
+        self._set_row_enabled('thickness', not (is_fronting or is_backing))
+        self._set_row_enabled('roughness_sigma', not is_fronting)
+        for w in (self.model, self.nsub, self.nsub_min, self.nsub_max,
+                  self.nsub_slider):
             w.setEnabled(not is_fronting)
+        self._check_bounds()
+
+    def _set_row_enabled(self, attr, on):
+        for w in self.rows[attr]:
+            w.setEnabled(on)
+
+    def _sync_nsub_slider(self, *_):
+        """Span the sublayer slider over [Min, Max] and place it at the
+        count, clamped to the ends."""
+        sl = self.nsub_slider
+        sl.blockSignals(True)
+        sl.setRange(self.nsub_min.value(),
+                    max(self.nsub_min.value(), self.nsub_max.value()))
+        sl.setValue(self.nsub.value())
+        sl.blockSignals(False)
+
+    def _slider_moved(self, attr, pos):
+        val, bmin, bmax, *_ = self.rows[attr]
+        self._sliding = True
+        val.setValue(bmin.value() + pos / SLIDER_STEPS *
+                     (bmax.value() - bmin.value()))
+        self._sliding = False
+
+    def _sync_slider(self, attr):
+        """Put the slider of `attr` where its value sits in [Min, Max]."""
+        if self._sliding:
+            return
+        val, bmin, bmax, *_ = self.rows[attr]
+        span = bmax.value() - bmin.value()
+        pos = (val.value() - bmin.value()) / span if span > 0 else 0.0
+        sl = self.sliders[attr]
+        sl.blockSignals(True)
+        sl.setValue(round(min(max(pos, 0.0), 1.0) * SLIDER_STEPS))
+        sl.blockSignals(False)
+
+    def _check_bounds(self):
+        """Grey out the bounds of fixed parameters; flag varied values that
+        lie outside [Min, Max] or an empty range."""
+        for attr, (val, bmin, bmax, cb, lab) in self.rows.items():
+            row_on = lab.isEnabled()
+            vary = cb.isChecked()
+            bmin.setEnabled(row_on and vary)
+            bmax.setEnabled(row_on and vary)
+            self.sliders[attr].setEnabled(
+                row_on and bmin.value() < bmax.value())
+            bad = row_on and vary and not (
+                bmin.value() <= val.value() <= bmax.value()
+                and bmin.value() < bmax.value())
+            val.setStyleSheet(OUT_OF_BOUNDS if bad else '')
+            val.setToolTip('Outside the fit bounds' if bad else '')
 
     def _store(self):
         if self._loading or self.layer is None:
             return
         L = self.layer
         L.name = self.name.text()
-        L.thickness = self.thickness.value()
-        L.NSLD_real = self.nsld_re.value() * SLD_SCALE
-        L.NSLD_img = self.nsld_im.value() * SLD_SCALE
-        L.MSLD_rho = self.msld_rho.value() * SLD_SCALE
-        L.MSLD_phi = self.msld_deg.value() / 360.0
-        L.roughness_sigma = self.sigma.value()
+        for attr, *_, scale in EDITOR_PARAMS:
+            val, bmin, bmax, cb, _ = self.rows[attr]
+            setattr(L, attr, val.value() / scale)
+            L.fit[attr] = {'vary': cb.isChecked(),
+                           'min': bmin.value() / scale,
+                           'max': bmax.value() / scale}
         L.roughness_model = self.model.currentText()
         L.roughness_sublayer = self.nsub.value()
+        L.fit['roughness_sublayer'] = {'vary': False,
+                                       'min': self.nsub_min.value(),
+                                       'max': self.nsub_max.value()}
+        self._check_bounds()
         self.changed.emit()
 
 
 # ----------------------------------------------------- simulation tab ----
 class SimulationTab(QtWidgets.QWidget):
 
+    # emitted after every successful recompute; read last_Q / last_R
+    reflectanceChanged = QtCore.pyqtSignal()
+
     def __init__(self, stack=None, parent=None):
         super().__init__(parent)
         self.stack = stack if stack is not None else make_stack()
+        self.last_Q = self.last_R = None     # latest calc_reflectance result
         self._profile = None        # (z, edges, [curves], [slab values])
 
         self._timer = QtCore.QTimer(self, singleShot=True, interval=120)
@@ -317,7 +512,7 @@ class SimulationTab(QtWidgets.QWidget):
         splitter.addWidget(plots)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([330, 1270])
+        splitter.setSizes([460, 1140])
 
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -334,8 +529,8 @@ class SimulationTab(QtWidgets.QWidget):
         # general parameters
         gen = QtWidgets.QGroupBox('General parameters')
         f = QtWidgets.QFormLayout(gen)
-        self.qmin = dspin(1e-5, 10, 5, 0.001, ' Å⁻¹')
-        self.qmax = dspin(1e-4, 10, 4, 0.01, ' Å⁻¹')
+        self.qmin = dspin(1e-5, 10, 5, 0.001)
+        self.qmax = dspin(1e-4, 10, 4, 0.01)
         self.nq = QtWidgets.QSpinBox()
         self.nq.setRange(2, 100000)
         self.nq.setKeyboardTracking(False)
@@ -346,55 +541,85 @@ class SimulationTab(QtWidgets.QWidget):
         self.tail.setValue(self.stack.tail)
         self.alpha = dspin(-360, 360, 2, 5.0, ' °')
         self.alpha.setValue(np.degrees(self.stack.alpha))
-        self.alpha.setToolTip('Polarisation angle α mixing the spin channels '
-                              'into the lab channels (++ +- -+ --)')
+        self.alpha.setToolTip('In-plane polarisation azimuth α from sample x '
+                              '(Majkrzak Fig. 1.14 axes) defining the lab '
+                              'channels (++ +- -+ --).\nα = 90° is P ∥ y '
+                              '(GEPORE EPS = 3π/2); ignored when the fronting '
+                              'is magnetic.')
+
+        self.background = SciSpinBox()
+        self.background.setValue(self.stack.background)
+        self.background.setToolTip('Constant background added to every '
+                                   'reflectivity channel (e.g. 1e-7)')
+
+        self.q_fronting = QtWidgets.QCheckBox('Q in fronting')
+        self.q_fronting.setChecked(self.stack.q_in_fronting)
+        self.q_fronting.setToolTip(
+            'Checked: Q is measured inside the fronting medium (beam enters '
+            'through the substrate side), so each incident spin has its own '
+            'vacuum Q.\nUnchecked: Q is the vacuum-referenced 2k0z, common to '
+            'both spins.')
 
         self.basis = QtWidgets.QComboBox()
         self.basis.addItems(['lab (++ +- -+ --)', 'spin (uu ud du dd)'])
-        self.logy = QtWidgets.QCheckBox('log R')
-        self.logy.setChecked(True)
-        self.rq4 = QtWidgets.QCheckBox('R·Q⁴')
 
-        f.addRow('Q min', self.qmin)
-        f.addRow('Q max', self.qmax)
+        f.setVerticalSpacing(3)
+        qrange = QtWidgets.QHBoxLayout()
+        qrange.addWidget(self.qmin, 1)
+        qrange.addWidget(QtWidgets.QLabel('–'))
+        qrange.addWidget(self.qmax, 1)
+        f.addRow('Q (Å⁻¹)', qrange)
         f.addRow('Q points', self.nq)
         f.addRow('Window tail', self.tail)
+        f.addRow('Background', self.background)
+        f.addRow('Q reference', self.q_fronting)
         f.addRow('Basis', self.basis)
         f.addRow('Polarisation α', self.alpha)
-        opts = QtWidgets.QHBoxLayout()
-        opts.addWidget(self.logy)
-        opts.addWidget(self.rq4)
-        f.addRow('Display', opts)
-        for w in (self.qmin, self.qmax, self.tail, self.alpha):
+        for w in (self.qmin, self.qmax, self.tail, self.alpha,
+                  self.background):
             w.valueChanged.connect(self.schedule)
         self.nq.valueChanged.connect(self.schedule)
         self.basis.currentIndexChanged.connect(self.schedule)
-        self.logy.toggled.connect(self.schedule)
-        self.rq4.toggled.connect(self.schedule)
-        v.addWidget(gen)
+        self.q_fronting.toggled.connect(self.schedule)
+
+        # general parameters and layer list side by side
+        top = QtWidgets.QHBoxLayout()
+        top.addWidget(gen)
+        v.addLayout(top)
 
         # layer list
-        lay = QtWidgets.QGroupBox('Layers  (top → bottom)')
+        lay = QtWidgets.QGroupBox('Layers (top → bottom)')
         lv = QtWidgets.QVBoxLayout(lay)
         self.list = QtWidgets.QListWidget()
+        # take the height of the general box beside it, not its own default
+        self.list.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
+                                QtWidgets.QSizePolicy.Policy.Ignored)
+        self.list.setMinimumHeight(80)
         self.list.currentRowChanged.connect(self._on_select)
         self.list.setDragDropMode(
             QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
         self.list.model().rowsMoved.connect(self._on_rows_moved)
         lv.addWidget(self.list)
         row = QtWidgets.QHBoxLayout()
-        self.btn_add = QtWidgets.QPushButton('+ Add')
-        self.btn_del = QtWidgets.QPushButton('− Remove')
+        self.btn_add = QtWidgets.QPushButton('+')
+        self.btn_del = QtWidgets.QPushButton('−')
         self.btn_up = QtWidgets.QPushButton('▲')
         self.btn_dn = QtWidgets.QPushButton('▼')
-        for b in (self.btn_add, self.btn_del, self.btn_up, self.btn_dn):
+        for b, tip in ((self.btn_add, 'Add layer'),
+                       (self.btn_del, 'Remove layer'),
+                       (self.btn_up, 'Move layer up'),
+                       (self.btn_dn, 'Move layer down')):
+            b.setToolTip(tip)
+            b.setMinimumWidth(0)
+            b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
+                            QtWidgets.QSizePolicy.Policy.Fixed)
             row.addWidget(b)
         self.btn_add.clicked.connect(self.add_layer)
         self.btn_del.clicked.connect(self.remove_layer)
         self.btn_up.clicked.connect(lambda: self.move_layer(-1))
         self.btn_dn.clicked.connect(lambda: self.move_layer(+1))
         lv.addLayout(row)
-        v.addWidget(lay, 1)
+        top.addWidget(lay, 1)
 
         self.editor = LayerEditor()
         self.editor.changed.connect(self._on_layer_edit)
@@ -403,6 +628,7 @@ class SimulationTab(QtWidgets.QWidget):
         self.status = QtWidgets.QLabel()
         self.status.setWordWrap(True)
         v.addWidget(self.status)
+        v.addStretch(1)
         return panel
 
     # -- plots --------------------------------------------------------------
@@ -487,6 +713,15 @@ class SimulationTab(QtWidgets.QWidget):
         self.refl_formula.setStyleSheet('color: #555555')
         bar.addWidget(self.refl_formula)
         bar.addStretch(1)
+        self.logy = QtWidgets.QCheckBox('log R')
+        self.logy.setChecked(True)
+        self.rq4 = QtWidgets.QCheckBox('R·Q⁴')
+        self.freeze_y = QtWidgets.QCheckBox('Freeze Y')
+        self.freeze_y.setToolTip('Keep the current y range when the model '
+                                 'changes (e.g. while dragging a slider)')
+        for cb in (self.logy, self.rq4, self.freeze_y):
+            cb.toggled.connect(self.schedule)
+            bar.addWidget(cb)
         v.addLayout(bar)
 
         w, self.refl_plot = plot_widget('Q (Å⁻¹)', 'Reflectivity')
@@ -504,6 +739,7 @@ class SimulationTab(QtWidgets.QWidget):
         self.refl_plot.addItem(self.asym_zero)
         self._refl_shown = []               # [(curve, name, Q, y)] on screen
         self._refl_log = False
+        self._refl_ykey = None              # what the y axis currently shows
         self.refl_cursor = Crosshair(w, self.refl_plot, self._refl_readout)
         v.addWidget(w)
         return box
@@ -593,12 +829,16 @@ class SimulationTab(QtWidgets.QWidget):
 
     # -- computation --------------------------------------------------------
     def schedule(self, *_):
-        self._timer.start()
+        # throttle, not debounce: a dragged slider still redraws as it moves
+        if not self._timer.isActive():
+            self._timer.start()
 
     def recompute(self):
         try:
             self.stack.tail = self.tail.value()
             self.stack.alpha = np.radians(self.alpha.value())
+            self.stack.background = self.background.value()
+            self.stack.q_in_fronting = self.q_fronting.isChecked()
             self.stack.build_sublayers()
             self._compute_profile()
             self._show_profile()
@@ -608,6 +848,7 @@ class SimulationTab(QtWidgets.QWidget):
             self.status.setStyleSheet('')
             self.prof_cursor.refresh()
             self.refl_cursor.refresh()
+            self.reflectanceChanged.emit()
         except Exception as exc:                      # keep the UI alive
             self.status.setText('Error: %s' % exc)
             self.status.setStyleSheet('color: #b00020')
@@ -621,15 +862,15 @@ class SimulationTab(QtWidgets.QWidget):
         pad = 0.35 * max(Z[-1], 1.0)
         z = np.linspace(min(e[0], Z[0] - pad) - 10,
                         max(e[-1], Z[-1] + pad) + 10, 4000)
-        nsld, rho, phi = st.profile(z)
-        curves = [nsld.real / SLD_SCALE, rho / SLD_SCALE, phi * 360.0]
+        nsld, rho, theta = st.profile(z)
+        curves = [nsld.real / SLD_SCALE, rho / SLD_SCALE, theta * 360.0]
         # fronting and backing are semi-infinite: draw them as one bar each
         # out to the edges of the plotted range
         e = np.concatenate([[z[0]], e, [z[-1]]])
         slabs_all = [st.fronting] + list(st.sublayers) + [st.backing]
         slabs = [np.array([s.NSLD_real / SLD_SCALE for s in slabs_all]),
                  np.array([s.MSLD_rho / SLD_SCALE for s in slabs_all]),
-                 np.array([s.MSLD_phi * 360.0 for s in slabs_all])]
+                 np.array([s.MSLD_theta * 360.0 for s in slabs_all])]
         self._profile = (z, Z, e, curves, slabs)
 
     def _show_profile(self, *_):
@@ -752,8 +993,10 @@ class SimulationTab(QtWidgets.QWidget):
             raise ValueError('Q max must exceed Q min')
         Q = np.linspace(qmin, qmax, self.nq.value())
         R = self.stack.calc_reflectance(Q)
+        self.last_Q, self.last_R = Q, R
         off = 4 if self.basis.currentIndex() == 0 else 0
-        self.alpha.setEnabled(bool(off))            # α only mixes lab channels
+        # α only mixes lab channels; a magnetic fronting fixes the lab axis
+        self.alpha.setEnabled(bool(off) and self.stack.fronting.MSLD_rho == 0)
         k = self.refl_quantity.currentIndex()
         name, label, formula = REFL_QUANTITIES[k]
         is_refl = label is None
@@ -793,6 +1036,15 @@ class SimulationTab(QtWidgets.QWidget):
         else:
             log = False
             p.setLabel('left', label)
+        # a frozen y range only makes sense for the same plotted quantity;
+        # set before setData, which autoranges straight away
+        ykey = (self.refl_quantity.currentIndex(), log, self.rq4.isChecked())
+        if self.freeze_y.isChecked() and ykey == self._refl_ykey:
+            p.disableAutoRange(axis='y')
+            p.enableAutoRange(axis='x')
+        else:
+            p.enableAutoRange()
+        self._refl_ykey = ykey
         p.setLogMode(x=False, y=log)
         self._refl_log = log
         self._refl_shown = []
@@ -805,7 +1057,6 @@ class SimulationTab(QtWidgets.QWidget):
             curve.setData(Q, y)
             legend.addItem(curve, cname)
             self._refl_shown.append((curve, cname, Q, y))
-        p.enableAutoRange()
 
     # -- save / load --------------------------------------------------------
     def save_model(self, path):
@@ -822,9 +1073,11 @@ class SimulationTab(QtWidgets.QWidget):
         new = Stack.from_dict(d)                 # validate before touching UI
         self.stack.layers = new.layers
         self.stack.tail, self.stack.alpha = new.tail, new.alpha
+        self.stack.background = new.background
+        self.stack.q_in_fronting = new.q_in_fronting
         sim = d.get('simulation', {})
         widgets = [self.qmin, self.qmax, self.nq, self.tail, self.alpha,
-                   self.basis]
+                   self.background, self.basis, self.q_fronting]
         for w in widgets:
             w.blockSignals(True)
         self.qmin.setValue(sim.get('qmin', self.qmin.value()))
@@ -833,6 +1086,8 @@ class SimulationTab(QtWidgets.QWidget):
         self.basis.setCurrentIndex(sim.get('basis', self.basis.currentIndex()))
         self.tail.setValue(new.tail)
         self.alpha.setValue(np.degrees(new.alpha))
+        self.background.setValue(new.background)
+        self.q_fronting.setChecked(new.q_in_fronting)
         for w in widgets:
             w.blockSignals(False)
         self.refresh_list(select=1)

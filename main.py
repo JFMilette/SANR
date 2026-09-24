@@ -27,7 +27,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.simulation = SimulationTab()
         self.tabs.addTab(self.simulation, 'Simulation')
-        self.experimental = ExperimentalTab()
+        self.experimental = ExperimentalTab(simulation=self.simulation)
         self.tabs.addTab(self.experimental, 'Experimental data')
 
         menu = self.menuBar().addMenu('&File')
