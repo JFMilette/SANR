@@ -1,0 +1,56 @@
+{
+  "tail": 3.0,
+  "alpha": 0.0,
+  "layers": [
+    {
+      "name": "vacuum",
+      "thickness": 0.0,
+      "NSLD_real": 0.0,
+      "NSLD_img": 0.0,
+      "MSLD_rho": 0.0,
+      "MSLD_phi": 0.0,
+      "roughness_sigma": 0.0,
+      "roughness_model": "tanh",
+      "roughness_sublayer": 5
+    },
+    {
+      "name": "L1",
+      "thickness": 24.0,
+      "NSLD_real": 2.2360000000000003e-06,
+      "NSLD_img": 0.0,
+      "MSLD_rho": 9.7e-07,
+      "MSLD_phi": 0.0,
+      "roughness_sigma": 2.0,
+      "roughness_model": "tanh",
+      "roughness_sublayer": 6
+    },
+    {
+      "name": "L2",
+      "thickness": 70.0,
+      "NSLD_real": 1.659e-06,
+      "NSLD_img": 0.0,
+      "MSLD_rho": 0.0,
+      "MSLD_phi": 0.0,
+      "roughness_sigma": 2.0,
+      "roughness_model": "tanh",
+      "roughness_sublayer": 6
+    },
+    {
+      "name": "substrate",
+      "thickness": 0.0,
+      "NSLD_real": 5.719e-06,
+      "NSLD_img": 0.0,
+      "MSLD_rho": 0.0,
+      "MSLD_phi": 0.0,
+      "roughness_sigma": 2.0,
+      "roughness_model": "tanh",
+      "roughness_sublayer": 6
+    }
+  ],
+  "simulation": {
+    "qmin": 0.0001,
+    "qmax": 0.25,
+    "nq": 1000,
+    "basis": 0
+  }
+}
