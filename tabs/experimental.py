@@ -3,31 +3,45 @@ Experimental tab: import measured reflectivity channels and plot them with
 the same quantities as the simulation tab, with error bars.
 
 Each file holds one channel (R+, R-, R++, R+-, R-+ or R--) as columns
-    Qz (1/A)   R (a.u.)   dR (a.u.)   dQz (1/A)   [theta]
+    Qz (1/A)   R (a.u.)   [dR (a.u.)   dQz (1/A)   theta]
+or, when the Q values are kept in a separate file (one Q per line, e.g.
+q.dat next to rexp1.dat / rtheory1.dat), as columns
+    R (a.u.)   [dR (a.u.)   dQz (1/A)   theta]
+with one row per Q value.  Missing dR / dQz are taken as zero.
 Importing opens the file text in a dialog with line numbers; the user picks
-the line where the data start and which channel the file is.
+the line where the data start, where Q comes from and which channel the file
+is.
 
 The "+ Simulation" button adds a live dataset holding the simulation tab's
 lab channels (R++, R+-, R-+, R--, background included) on its Q grid.  It is
 recomputed whenever the simulation changes, drawn as lines without error
-bars, and can be frozen into a static copy from its context menu.
+bars, and can be frozen into a static copy from its context menu; the
+frozen copy is still drawn as lines.
 
 Asymmetries combine channels measured on different Q grids: every channel is
 linearly interpolated (value and error) onto the Q points of the first
 channel in the formula, over the range they share.  Errors are propagated
 assuming independent channels.  R+ / R- are used as imported when present,
 otherwise built as R+ = R++ + R+-, R- = R-- + R-+.
+
+The Fit box fits the Simulation tab's model to every channel of one dataset
+with differential evolution (model.fit), varying the parameters ticked Fit
+in the Simulation tab within their bounds.  It runs in a background thread;
+the best parameters so far are written into the model after every
+generation, so a live simulation dataset follows the fit.
 """
 
 import os
 import re
+from html import escape as html_escape
 
 import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from .simulation import (CH_COLOURS, HP_COLOURS, ASYM_COLOUR,
-                         REFL_QUANTITIES, Crosshair, fmt, plot_widget)
+from model.fit import FitProblem, run_de
+from .simulation import (CH_COLOURS, HP_COLOURS, ASYM_COLOUR, EDITOR_PARAMS,
+                         REFL_QUANTITIES, Crosshair, dspin, fmt, plot_widget)
 
 
 DATA_FILTER = 'Data files (*.dat *.txt *.csv *.refl);;All files (*)'
@@ -39,6 +53,10 @@ CHANNEL_COLOURS = {'++': CH_COLOURS[0], '+-': CH_COLOURS[1],
                    '+': HP_COLOURS[0], '-': HP_COLOURS[1]}
 PLOT_ORDER = ['++', '+-', '-+', '--', '+', '-']
 SPLIT = re.compile(r'[\s,;]+')
+# where the Q values of an imported file come from
+Q_IN_FILE, Q_SEPARATE = 0, 1
+# a separate Q file found next to the data file is used automatically
+Q_FILE_NAMES = ('q.dat', 'q.txt', 'Q.dat', 'Q.txt')
 
 
 def parse_row(line):
@@ -50,34 +68,91 @@ def parse_row(line):
         return None
 
 
-def guess_start(lines):
-    """First line (0-based) that parses as at least 4 numbers."""
-    for i, line in enumerate(lines):
-        row = parse_row(line)
-        if row is not None and len(row) >= 4:
-            return i
+def guess_start(lines, ncols=(4,)):
+    """First line (0-based) that parses as at least ncols[0] numbers, else
+    ncols[1], ...; comment lines are never chosen."""
+    for n in ncols:
+        for i, line in enumerate(lines):
+            if line.lstrip().startswith('#'):
+                continue
+            row = parse_row(line)
+            if row is not None and len(row) >= n:
+                return i
     return 0
 
 
-def parse_data(lines, start):
+def first_row(lines, start):
+    """Numbers of the first data line at or after `start`, or None."""
+    for line in lines[start:]:
+        s = line.strip()
+        if s and not s.startswith('#'):
+            return parse_row(s)
+    return None
+
+
+def read_q_file(path):
+    """Q values of a separate Q file: first number of each numeric line,
+    comment / text lines skipped."""
+    with open(path, errors='replace') as f:
+        lines = f.read().splitlines()
+    Q = []
+    for line in lines:
+        s = line.strip()
+        if not s or s.startswith('#'):
+            continue
+        row = parse_row(s)
+        if row:
+            Q.append(row[0])
+    if not Q:
+        raise ValueError('no numeric values in %s' % os.path.basename(path))
+    return np.array(Q, dtype=float)
+
+
+def find_q_file(path):
+    """A Q file next to the data file `path`, or None."""
+    folder = os.path.dirname(path)
+    for name in Q_FILE_NAMES:
+        q = os.path.join(folder, name)
+        if os.path.isfile(q) and not os.path.samefile(q, path):
+            return q
+    return None
+
+
+def parse_data(lines, start, Q=None):
     """Parse lines[start:] into a dict of Q, R, dR, dQ, theta arrays, sorted
-    by Q.  Blank / comment lines are skipped; returns (data, n_skipped)."""
+    by Q.  With Q=None the columns are Q R [dR dQ theta]; otherwise they are
+    R [dR dQ theta] and row i belongs to Q[i].  Missing dR / dQ are zero.
+    Blank / comment lines are skipped; returns (data, n_skipped)."""
+    keys = ['Q', 'R', 'dR', 'dQ', 'theta']
+    if Q is not None:
+        keys = keys[1:]
+    need = 2 if Q is None else 1
     rows, skipped = [], 0
     for line in lines[start:]:
         s = line.strip()
         if not s or s.startswith('#'):
             continue
         row = parse_row(s)
-        if row is None or len(row) < 4:
+        if row is None or len(row) < need:
             skipped += 1
             continue
-        rows.append(row[:5] + [np.nan] * (5 - len(row[:5])))
+        row = row[:len(keys)]
+        rows.append(row + [np.nan] * (len(keys) - len(row)))
     if not rows:
-        raise ValueError('no data rows with at least 4 numeric columns')
+        raise ValueError('no data rows with at least %d numeric column%s'
+                         % (need, 's' if need > 1 else ''))
     a = np.array(rows, dtype=float)
+    if Q is not None:
+        if len(Q) != len(a):
+            raise ValueError('%d data rows but %d Q values in the Q file'
+                             % (len(a), len(Q)))
+        a = np.column_stack([Q, a])
+    # absent errors / resolution count as zero, absent theta stays NaN
+    for j in (2, 3):
+        a[:, j] = np.where(np.isnan(a[:, j]), 0.0, a[:, j])
     a = a[np.argsort(a[:, 0])]
-    keys = ['Q', 'R', 'dR', 'dQ', 'theta']
-    return {k: a[:, i] for i, k in enumerate(keys)}, skipped
+    return {k: a[:, i] for i, k in enumerate(['Q', 'R', 'dR', 'dQ',
+                                              'theta'])}, skipped
 
 
 def on_grid(Q, d):
@@ -198,16 +273,20 @@ class NumberedText(QtWidgets.QPlainTextEdit):
 
 
 class ImportDialog(QtWidgets.QDialog):
-    """Show a data file, let the user pick the first data line and the
-    channel; `data` / `channel` hold the result after accept()."""
+    """Show a data file, let the user pick the first data line, where Q comes
+    from and the channel; `data` / `q_path` hold the result after accept()."""
 
-    def __init__(self, path, parent=None, sets=(), current=None, taken=None):
+    def __init__(self, path, parent=None, sets=(), current=None, taken=None,
+                 q_path=None):
         super().__init__(parent)
         self.setWindowTitle('Import — %s' % os.path.basename(path))
         with open(path, errors='replace') as f:
             text = f.read()
         self.lines = text.splitlines()
+        self.path = path
         self.data = None
+        self.q_path = None
+        self._q_cache = (None, None)        # (path, Q array or error str)
 
         self.view = NumberedText(text)
         self.start = QtWidgets.QSpinBox()
@@ -225,13 +304,24 @@ class ImportDialog(QtWidgets.QDialog):
         self.preview = QtWidgets.QLabel()
         self.preview.setWordWrap(True)
 
+        # Q source: first column of this file, or a separate one-column file
+        self.q_mode = QtWidgets.QComboBox()
+        self.q_mode.addItems(['Column 1 of this file', 'Separate Q file'])
+        self.q_edit = QtWidgets.QLineEdit()
+        self.q_edit.setPlaceholderText('file with one Q value per line')
+        self.q_browse = QtWidgets.QPushButton('Browse…')
+        q_row = QtWidgets.QHBoxLayout()
+        q_row.addWidget(self.q_mode)
+        q_row.addWidget(self.q_edit, 1)
+        q_row.addWidget(self.q_browse)
+        self.columns = QtWidgets.QLabel()
+
         form = QtWidgets.QFormLayout()
         form.addRow('Data start at line', self.start)
+        form.addRow('Q values', q_row)
         form.addRow('Dataset', self.dataset)
         form.addRow('Channel', self.channel)
-        form.addRow(QtWidgets.QLabel(
-            '<i>Columns: Qz (Å⁻¹), R (a.u.), dR (a.u.), dQz (Å⁻¹), '
-            '[θ]. Click a line in the text to start the data there.</i>'))
+        form.addRow(self.columns)
         form.addRow(self.preview)
 
         buttons = QtWidgets.QDialogButtonBox(
@@ -246,25 +336,75 @@ class ImportDialog(QtWidgets.QDialog):
         v.addLayout(form)
         v.addWidget(buttons)
 
+        start = guess_start(self.lines, (4, 1))
+        # one or two columns (R [dR]) means Q lives elsewhere: use the Q file
+        # next to the data, else the one used for the previous import
+        row = first_row(self.lines, start)
+        sibling = find_q_file(path)
+        if row is not None and len(row) <= 2 and (sibling or q_path):
+            self.q_mode.setCurrentIndex(Q_SEPARATE)
+        self.q_edit.setText(sibling or q_path or '')
+
         self.start.valueChanged.connect(self._on_start)
         self.view.lineClicked.connect(lambda n: self.start.setValue(n + 1))
-        self.start.setValue(guess_start(self.lines) + 1)
+        self.q_mode.currentIndexChanged.connect(self._on_start)
+        self.q_edit.editingFinished.connect(self._on_start)
+        self.q_browse.clicked.connect(self._browse_q)
+        self.start.setValue(start + 1)
         self._on_start()
-        self.resize(820, 680)
+        self.resize(820, 700)
+
+    def _browse_q(self):
+        folder = os.path.dirname(self.q_edit.text() or self.path)
+        q, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, 'Q values', folder, DATA_FILTER, options=DIALOG_OPTIONS)
+        if q:
+            self.q_edit.setText(q)
+            self.q_mode.setCurrentIndex(Q_SEPARATE)
+            self._on_start()
+
+    def _load_q(self):
+        """Q array of the chosen Q file (cached), or an error message."""
+        q = self.q_edit.text().strip()
+        if not q:
+            return 'choose the file holding the Q values'
+        if self._q_cache[0] != q:
+            try:
+                self._q_cache = (q, read_q_file(q))
+            except (OSError, ValueError) as exc:
+                self._q_cache = (q, 'Q file: %s' % exc)
+        return self._q_cache[1]
 
     def _on_start(self, *_):
         line = self.start.value() - 1
         self.view.set_start(line)
+        separate = self.q_mode.currentIndex() == Q_SEPARATE
+        self.q_edit.setEnabled(separate)
+        self.columns.setText(
+            '<i>Columns: %sR (a.u.), [dR (a.u.), dQz (Å⁻¹), θ]%s. Click a '
+            'line in the text to start the data there.</i>'
+            % ('' if separate else 'Qz (Å⁻¹), ',
+               ' — one row per Q value' if separate else ''))
+        self.data = self.q_path = None
         try:
-            self.data, skipped = parse_data(self.lines, line)
+            Q = None
+            if separate:
+                Q = self._load_q()
+                if isinstance(Q, str):
+                    raise ValueError(Q)
+            self.data, skipped = parse_data(self.lines, line, Q)
         except ValueError as exc:
             self.data = None
             self.preview.setText('<span style="color:#b00020">%s</span>' % exc)
             self.ok.setEnabled(False)
             return
+        if separate:
+            self.q_path = self.q_edit.text().strip()
         d = self.data
         msg = '%d points, Q = %.4g … %.4g Å⁻¹' % (len(d['Q']), d['Q'][0],
                                                    d['Q'][-1])
+        if not np.any(d['dR']):
+            msg += ', no dR column (errors = 0)'
         if skipped:
             msg += ('  <span style="color:#b00020">(%d non-numeric lines '
                     'skipped)</span>' % skipped)
@@ -362,6 +502,41 @@ def simulation_channels(Q, R):
             for j, ch in enumerate(['++', '+-', '-+', '--'])}
 
 
+# ------------------------------------------------------------- fit ----
+# attr -> (label, display scale, unit) for the parameter table
+PARAM_DISPLAY = {attr: (label.split(' (')[0], scale,
+                        suffix.strip() or ('Å' if attr == 'thickness' else
+                                           '10⁻⁶ Å⁻²'))
+                 for attr, label, *_, suffix, scale in EDITOR_PARAMS}
+FIT_COSTS = [('chi2', 'χ² (weighted by dR)'), ('log', 'log R (per decade)')]
+
+
+class FitThread(QtCore.QThread):
+    """Runs model.fit.run_de on a FitProblem off the GUI thread."""
+
+    progress = QtCore.pyqtSignal(object, float, int)      # x, cost, generation
+    finished_fit = QtCore.pyqtSignal(object, float, int, str)
+    failed = QtCore.pyqtSignal(str)
+
+    def __init__(self, problem, **options):
+        super().__init__()
+        self.problem, self.options = problem, options
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        try:
+            x, cost, gen, msg = run_de(
+                self.problem, callback=self.progress.emit,
+                cancelled=lambda: self._stop, **self.options)
+        except Exception as exc:                  # report, don't kill the app
+            self.failed.emit('%s: %s' % (type(exc).__name__, exc))
+            return
+        self.finished_fit.emit(x, cost, gen, str(msg))
+
+
 # ------------------------------------------------------- data tree ----
 ROLE = QtCore.Qt.ItemDataRole.UserRole          # (set index, channel or None)
 SYMBOLS = ['o', 's', 't', 'd', 'star', 't1', 'p', 'h', '+', 'x']
@@ -418,9 +593,11 @@ class ExperimentalTab(QtWidgets.QWidget):
     def __init__(self, simulation=None, parent=None):
         super().__init__(parent)
         # [dict(name, visible, channels={channel: dict(Q, R, dR, dQ, ...)},
-        #       live)]; live sets mirror the simulation tab
+        #       live, line)]; live sets mirror the simulation tab, line sets
+        #       (live or frozen simulations) are drawn as lines
         self.sets = []
         self.simulation = simulation
+        self.last_q_path = None       # separate Q file of the last import
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_controls())
@@ -489,11 +666,87 @@ class ExperimentalTab(QtWidgets.QWidget):
         for w in (self.logy, self.rq4, self.show_err):
             w.toggled.connect(self.redraw)
         v.addWidget(disp)
+        v.addWidget(self._build_fit_box())
 
         self.status = QtWidgets.QLabel()
         self.status.setWordWrap(True)
         v.addWidget(self.status)
         return panel
+
+    def _build_fit_box(self):
+        box = QtWidgets.QGroupBox('Fit (differential evolution)')
+        f = QtWidgets.QFormLayout(box)
+        f.setVerticalSpacing(3)
+        self.fit_set = QtWidgets.QComboBox()
+        self.fit_set.setToolTip('Every channel of this dataset is fitted')
+        self.fit_cost = QtWidgets.QComboBox()
+        self.fit_cost.addItems([c[1] for c in FIT_COSTS])
+        self.fit_cost.setToolTip(
+            'χ²: residuals divided by dR (points without dR use a relative '
+            'residual).\nlog R: residuals of log10 R, every decade weighted '
+            'equally.')
+        self.fit_qmin = dspin(0, 10, 4, 0.005, ' Å⁻¹')
+        self.fit_qmax = dspin(0, 10, 4, 0.005, ' Å⁻¹')
+        self.fit_qmax.setValue(10)
+        self.fit_qmin.setToolTip('Only points with Q in [min, max] are fitted')
+        self.fit_qmax.setToolTip(self.fit_qmin.toolTip())
+        self.fit_maxiter = QtWidgets.QSpinBox()
+        self.fit_maxiter.setRange(1, 100000)
+        self.fit_maxiter.setValue(200)
+        self.fit_maxiter.setToolTip('Maximum number of generations')
+        self.fit_pop = QtWidgets.QSpinBox()
+        self.fit_pop.setRange(5, 200)
+        self.fit_pop.setValue(15)
+        self.fit_pop.setToolTip('Population = this × number of free '
+                                'parameters')
+        self.fit_tol = dspin(0, 1, 4, 0.001)
+        self.fit_tol.setValue(0.01)
+        self.fit_tol.setToolTip('Stop when the spread of the population\'s '
+                                'cost falls below tol × its mean')
+        self.fit_polish = QtWidgets.QCheckBox('polish (L-BFGS-B)')
+        self.fit_polish.setChecked(True)
+        self.fit_polish.setToolTip('Refine the best member with a local '
+                                   'gradient minimiser at the end')
+
+        qrow = QtWidgets.QHBoxLayout()
+        qrow.addWidget(self.fit_qmin, 1)
+        qrow.addWidget(QtWidgets.QLabel('–'))
+        qrow.addWidget(self.fit_qmax, 1)
+        orow = QtWidgets.QHBoxLayout()
+        for lab, w in (('gen', self.fit_maxiter), ('pop', self.fit_pop),
+                       ('tol', self.fit_tol)):
+            orow.addWidget(QtWidgets.QLabel(lab))
+            orow.addWidget(w, 1)
+        f.addRow('Dataset', self.fit_set)
+        f.addRow('Cost', self.fit_cost)
+        f.addRow('Q range', qrow)
+        f.addRow('Options', orow)
+        f.addRow('', self.fit_polish)
+
+        row = QtWidgets.QHBoxLayout()
+        self.btn_fit = QtWidgets.QPushButton('Fit')
+        self.btn_stop = QtWidgets.QPushButton('Stop')
+        self.btn_revert = QtWidgets.QPushButton('Revert')
+        self.btn_revert.setToolTip('Restore the parameters from before the '
+                                   'last fit')
+        for b in (self.btn_fit, self.btn_stop, self.btn_revert):
+            row.addWidget(b)
+        f.addRow(row)
+        self.btn_fit.clicked.connect(self.start_fit)
+        self.btn_stop.clicked.connect(self.stop_fit)
+        self.btn_revert.clicked.connect(self.revert_fit)
+        self.btn_stop.setEnabled(False)
+        self.btn_revert.setEnabled(False)
+        box.setEnabled(self.simulation is not None)
+
+        self.fit_report = QtWidgets.QLabel()
+        self.fit_report.setWordWrap(True)
+        self.fit_report.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        f.addRow(self.fit_report)
+        self._fit = None               # running FitThread
+        self._fit_start = None         # (params, x) before the last fit
+        return box
 
     def _build_plot(self):
         box = QtWidgets.QWidget()
@@ -565,7 +818,8 @@ class ExperimentalTab(QtWidgets.QWidget):
                 if live:
                     it.setFlags(it.flags() & ~QtCore.Qt.ItemFlag.ItemIsDragEnabled)
                 it.setForeground(0, QtGui.QColor(CHANNEL_COLOURS[ch]))
-                it.setToolTip(0, d['path'])
+                it.setToolTip(0, d['path'] if not d.get('q_path') else
+                              '%s\nQ: %s' % (d['path'], d['q_path']))
                 top.addChild(it)
                 if select == (i, ch):
                     current = it
@@ -574,6 +828,20 @@ class ExperimentalTab(QtWidgets.QWidget):
         if current is not None:
             t.setCurrentItem(current)
         self._update_buttons()
+        self._refresh_fit_sets()
+
+    def _refresh_fit_sets(self):
+        """Datasets that can be fitted: static ones holding channels."""
+        c = self.fit_set
+        keep = c.currentText()
+        c.blockSignals(True)
+        c.clear()
+        for s in self.sets:
+            if s['channels'] and not s.get('line'):
+                c.addItem(s['name'])
+        i = c.findText(keep)
+        c.setCurrentIndex(max(i, 0))
+        c.blockSignals(False)
 
     def _selected(self):
         it = self.tree.currentItem()
@@ -664,7 +932,7 @@ class ExperimentalTab(QtWidgets.QWidget):
                 'reflectance yet:\n%s' % sim.status.text())
             return
         self.sets.append(dict(name=self._unique_name('Simulation'),
-                              visible=True, live=True,
+                              visible=True, live=True, line=True,
                               channels=simulation_channels(sim.last_Q,
                                                            sim.last_R)))
         self.refresh_tree((len(self.sets) - 1, None))
@@ -675,6 +943,7 @@ class ExperimentalTab(QtWidgets.QWidget):
         s = self.sets[i]
         self.sets.append(dict(
             name=self._unique_name(s['name'] + ' (frozen)'), visible=True,
+            line=True,
             channels={ch: dict(d, path='simulation (frozen)')
                       for ch, d in s['channels'].items()}))
         self.refresh_tree((len(self.sets) - 1, None))
@@ -706,7 +975,8 @@ class ExperimentalTab(QtWidgets.QWidget):
                 dataset = None
             dlg = ImportDialog(
                 path, self, [s['name'] for s in static], dataset,
-                {s['name']: set(s['channels']) for s in static})
+                {s['name']: set(s['channels']) for s in static},
+                self.last_q_path)
         except OSError as exc:
             QtWidgets.QMessageBox.critical(
                 self, 'Import', 'Could not read %s:\n%s' % (path, exc))
@@ -720,7 +990,10 @@ class ExperimentalTab(QtWidgets.QWidget):
             return
         if i is None:
             i = self.new_set(name, refresh=False)
-        self.sets[i]['channels'][ch] = dict(dlg.data, path=path)
+        self.sets[i]['channels'][ch] = dict(dlg.data, path=path,
+                                            q_path=dlg.q_path)
+        if dlg.q_path:
+            self.last_q_path = dlg.q_path
         self.refresh_tree((i, ch))
         self.redraw()
 
@@ -766,6 +1039,108 @@ class ExperimentalTab(QtWidgets.QWidget):
             del self.sets[i]
             self.refresh_tree((min(i, len(self.sets) - 1), None))
         self.redraw()
+
+    # -- fitting ------------------------------------------------------------
+    def start_fit(self):
+        sim = self.simulation
+        if sim is None or self._fit is not None:
+            return
+        i = self._set_index(self.fit_set.currentText())
+        if i is None:
+            self.fit_report.setText(self._error('Import data to fit first.'))
+            return
+        sim.recompute()                 # push the tab's settings into the stack
+        data = [(ch, d['Q'], d['R'], d['dR'])
+                for ch, d in self.sets[i]['channels'].items()]
+        try:
+            problem = FitProblem(sim.stack, data,
+                                 FIT_COSTS[self.fit_cost.currentIndex()][0],
+                                 self.fit_qmin.value(), self.fit_qmax.value())
+        except ValueError as exc:
+            self.fit_report.setText(self._error(exc))
+            return
+        self._fit_problem = problem
+        self._fit_start = (problem.params, [p[2] for p in problem.params])
+        # follow the fit with a live simulation dataset
+        if not any(s.get('live') for s in self.sets):
+            self.add_simulation()
+        self._fit = FitThread(problem, maxiter=self.fit_maxiter.value(),
+                              popsize=self.fit_pop.value(),
+                              tol=self.fit_tol.value(),
+                              polish=self.fit_polish.isChecked())
+        self._fit.progress.connect(self._fit_progress)
+        self._fit.finished_fit.connect(self._fit_done)
+        self._fit.failed.connect(self._fit_failed)
+        self._fit.finished.connect(self._fit_cleanup)
+        # edits in the Simulation tab would be overwritten by the fit
+        sim.setEnabled(False)
+        self.btn_fit.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        self.btn_revert.setEnabled(False)
+        self.fit_report.setText('Fitting %d parameter(s) to %d points of %s…'
+                                % (len(problem.params), problem.npoints,
+                                   self.sets[i]['name']))
+        self._fit.start()
+
+    def stop_fit(self):
+        if self._fit is not None:
+            self._fit.stop()
+            self.btn_stop.setEnabled(False)
+
+    def revert_fit(self):
+        if self._fit_start is not None and self._fit is None:
+            self.simulation.set_parameters(*self._fit_start)
+            self.fit_report.setText('Parameters restored to their values '
+                                    'before the fit.')
+            self.btn_revert.setEnabled(False)
+
+    def _fit_progress(self, x, cost, gen):
+        self.simulation.set_parameters(self._fit_problem.params, x)
+        self.fit_report.setText(self._fit_table(
+            'Generation %d — cost %.5g' % (gen, cost), x))
+
+    def _fit_done(self, x, cost, gen, msg):
+        self.simulation.set_parameters(self._fit_problem.params, x)
+        self.fit_report.setText(self._fit_table(
+            '<b>%s</b> after %d generation(s) — cost %.5g<br><i>%s</i>'
+            % ('Stopped' if msg == 'stopped' else 'Done', gen, cost,
+               html_escape(msg)), x))
+
+    def _fit_failed(self, msg):
+        self.fit_report.setText(self._error('Fit failed: %s' % msg))
+
+    def _fit_cleanup(self):
+        self._fit.deleteLater()
+        self._fit = None
+        self.simulation.setEnabled(True)
+        self.btn_fit.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        self.btn_revert.setEnabled(self._fit_start is not None)
+
+    def _fit_table(self, header, x):
+        """Header above a table of the fitted parameters in display units."""
+        rows = []
+        layers = self.simulation.stack.layers
+        for (i, attr, _, lo, hi), v in zip(self._fit_problem.params, x):
+            label, scale, unit = PARAM_DISPLAY[attr]
+            # a value pinned at a bound usually means the bound is too tight
+            edge = min(v - lo, hi - v) < 1e-3 * (hi - lo)
+            rows.append('<tr><td>%s</td><td>%s</td><td align="right">%s%.5g'
+                        '%s</td><td>%s</td></tr>' % (
+                            html_escape(layers[i].name), label,
+                            '<span style="color:#b00020">' if edge else '',
+                            v * scale, '</span>' if edge else '', unit))
+        return '%s<table cellspacing="4">%s</table>' % (header, ''.join(rows))
+
+    @staticmethod
+    def _error(msg):
+        return '<span style="color:#b00020">%s</span>' % html_escape(str(msg))
+
+    def shutdown(self):
+        """Stop a running fit; call before the application quits."""
+        if self._fit is not None:
+            self._fit.stop()
+            self._fit.wait()
 
     # -- drawing ------------------------------------------------------------
     def redraw(self, *_):
@@ -813,7 +1188,7 @@ class ExperimentalTab(QtWidgets.QWidget):
                     y, dy = y * Q**4, dy * Q**4
                 lab = '%s — %s' % (s['name'], sname) if prefix else sname
                 self._add_series(lab, col, symbol, Q, y, dy, dQ, log,
-                                 line=s.get('live', False))
+                                 line=s.get('line', s.get('live', False)))
 
         n = sum(len(s['channels']) for s in self.sets)
         if not n:

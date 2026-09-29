@@ -40,6 +40,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.resize(1600, 950)
 
+    def closeEvent(self, ev):
+        self.experimental.shutdown()
+        super().closeEvent(ev)
+
     def open_model(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, 'Open model', '', MODEL_FILTER,

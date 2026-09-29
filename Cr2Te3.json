@@ -1,0 +1,273 @@
+{
+  "tail": 3.0,
+  "alpha": 0.0,
+  "background": 0.0,
+  "q_in_fronting": false,
+  "resolution": {
+    "enabled": false,
+    "wavelength": 5.0,
+    "dlambda_rel": 0.002,
+    "dtheta": 0.0007
+  },
+  "magnetic_smearing": "vector",
+  "layers": [
+    {
+      "name": "vacuum",
+      "thickness": 0.0,
+      "NSLD_real": 0.0,
+      "NSLD_img": 0.0,
+      "MSLD_rho": 0.0,
+      "MSLD_theta": 0.0,
+      "roughness_sigma": 0.0,
+      "roughness_model": "tanh",
+      "roughness_sublayer": 5,
+      "fit": {}
+    },
+    {
+      "name": "AlOx",
+      "thickness": 100.0,
+      "NSLD_real": 4e-06,
+      "NSLD_img": 0.0,
+      "MSLD_rho": 0.0,
+      "MSLD_theta": 0.0,
+      "roughness_sigma": 2.0,
+      "roughness_model": "tanh",
+      "roughness_sublayer": 20,
+      "fit": {
+        "thickness": {
+          "vary": false,
+          "min": 0.0,
+          "max": 500.0
+        },
+        "NSLD_real": {
+          "vary": false,
+          "min": -2e-06,
+          "max": 1e-05
+        },
+        "NSLD_img": {
+          "vary": false,
+          "min": -1e-06,
+          "max": 0.0
+        },
+        "MSLD_rho": {
+          "vary": false,
+          "min": 0.0,
+          "max": 5e-06
+        },
+        "MSLD_theta": {
+          "vary": false,
+          "min": 0.0,
+          "max": 1.0
+        },
+        "roughness_sigma": {
+          "vary": false,
+          "min": 0.0,
+          "max": 20.0
+        },
+        "roughness_sublayer": {
+          "vary": false,
+          "min": 1,
+          "max": 200
+        }
+      }
+    },
+    {
+      "name": "Cr2Te3",
+      "thickness": 60.8,
+      "NSLD_real": 1.8999999999999998e-06,
+      "NSLD_img": 0.0,
+      "MSLD_rho": 1.08e-06,
+      "MSLD_theta": 0.0,
+      "roughness_sigma": 2.0,
+      "roughness_model": "tanh",
+      "roughness_sublayer": 20,
+      "fit": {
+        "thickness": {
+          "vary": false,
+          "min": 0.0,
+          "max": 500.0
+        },
+        "NSLD_real": {
+          "vary": false,
+          "min": -2e-06,
+          "max": 1e-05
+        },
+        "NSLD_img": {
+          "vary": false,
+          "min": -1e-06,
+          "max": 0.0
+        },
+        "MSLD_rho": {
+          "vary": false,
+          "min": 0.0,
+          "max": 5e-06
+        },
+        "MSLD_theta": {
+          "vary": false,
+          "min": 0.0,
+          "max": 1.0
+        },
+        "roughness_sigma": {
+          "vary": false,
+          "min": 0.0,
+          "max": 20.0
+        },
+        "roughness_sublayer": {
+          "vary": false,
+          "min": 1,
+          "max": 200
+        }
+      }
+    },
+    {
+      "name": "BAT",
+      "thickness": 60.0,
+      "NSLD_real": 1.8000000000000001e-06,
+      "NSLD_img": 0.0,
+      "MSLD_rho": 0.0,
+      "MSLD_theta": 0.0,
+      "roughness_sigma": 2.0,
+      "roughness_model": "tanh",
+      "roughness_sublayer": 10,
+      "fit": {
+        "thickness": {
+          "vary": false,
+          "min": 0.0,
+          "max": 500.0
+        },
+        "NSLD_real": {
+          "vary": false,
+          "min": -2e-06,
+          "max": 1e-05
+        },
+        "NSLD_img": {
+          "vary": false,
+          "min": -1e-06,
+          "max": 0.0
+        },
+        "MSLD_rho": {
+          "vary": false,
+          "min": 0.0,
+          "max": 5e-06
+        },
+        "MSLD_theta": {
+          "vary": false,
+          "min": 0.0,
+          "max": 1.0
+        },
+        "roughness_sigma": {
+          "vary": false,
+          "min": 0.0,
+          "max": 20.0
+        },
+        "roughness_sublayer": {
+          "vary": false,
+          "min": 1,
+          "max": 200
+        }
+      }
+    },
+    {
+      "name": "Cr2Te3",
+      "thickness": 120.16,
+      "NSLD_real": 1.8999999999999998e-06,
+      "NSLD_img": 0.0,
+      "MSLD_rho": 1.08e-06,
+      "MSLD_theta": 0.0,
+      "roughness_sigma": 2.0,
+      "roughness_model": "tanh",
+      "roughness_sublayer": 20,
+      "fit": {
+        "thickness": {
+          "vary": false,
+          "min": 0.0,
+          "max": 500.0
+        },
+        "NSLD_real": {
+          "vary": false,
+          "min": -2e-06,
+          "max": 1e-05
+        },
+        "NSLD_img": {
+          "vary": false,
+          "min": -1e-06,
+          "max": 0.0
+        },
+        "MSLD_rho": {
+          "vary": false,
+          "min": 0.0,
+          "max": 5e-06
+        },
+        "MSLD_theta": {
+          "vary": false,
+          "min": 0.0,
+          "max": 1.0
+        },
+        "roughness_sigma": {
+          "vary": false,
+          "min": 0.0,
+          "max": 20.0
+        },
+        "roughness_sublayer": {
+          "vary": false,
+          "min": 1,
+          "max": 200
+        }
+      }
+    },
+    {
+      "name": "substrate",
+      "thickness": 0.0,
+      "NSLD_real": 5.719000000000001e-06,
+      "NSLD_img": 0.0,
+      "MSLD_rho": 0.0,
+      "MSLD_theta": 0.0,
+      "roughness_sigma": 2.0,
+      "roughness_model": "tanh",
+      "roughness_sublayer": 20,
+      "fit": {
+        "thickness": {
+          "vary": false,
+          "min": 0.0,
+          "max": 500.0
+        },
+        "NSLD_real": {
+          "vary": false,
+          "min": -2e-06,
+          "max": 1e-05
+        },
+        "NSLD_img": {
+          "vary": false,
+          "min": -1e-06,
+          "max": 0.0
+        },
+        "MSLD_rho": {
+          "vary": false,
+          "min": 0.0,
+          "max": 5e-06
+        },
+        "MSLD_theta": {
+          "vary": false,
+          "min": 0.0,
+          "max": 1.0
+        },
+        "roughness_sigma": {
+          "vary": false,
+          "min": 0.0,
+          "max": 20.0
+        },
+        "roughness_sublayer": {
+          "vary": false,
+          "min": 1,
+          "max": 200
+        }
+      }
+    }
+  ],
+  "simulation": {
+    "qmin": 0.0001,
+    "qmax": 0.25,
+    "nq": 400,
+    "basis": 0
+  }
+}

@@ -15,6 +15,7 @@ save_model / load_model write / read the stack and Q settings as JSON.
 Every edit triggers a debounced recompute.
 """
 
+import html
 import json
 import re
 
@@ -22,7 +23,7 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from model.stack import Layer, Stack
+from model.stack import Layer, Stack, wrap_turns
 
 
 SLD_SCALE = 1e-6                      # SLDs are edited / plotted in 1e-6 A^-2
@@ -402,7 +403,7 @@ class LayerEditor(QtWidgets.QGroupBox):
         self.model.setCurrentText(layer.roughness_model)
         n = int(layer.roughness_sublayer)
         e = layer.fit.get('roughness_sublayer') or \
-            {'min': 1, 'max': max(NSUB_DEFAULT_MAX, n)}
+            {'min': 1, 'max': NSUB_DEFAULT_MAX}
         self.nsub_min.setValue(int(e['min']))
         self.nsub_max.setValue(int(e['max']))
         self.nsub.setValue(n)
@@ -563,6 +564,38 @@ class SimulationTab(QtWidgets.QWidget):
         self.basis = QtWidgets.QComboBox()
         self.basis.addItems(['lab (++ +- -+ --)', 'spin (uu ud du dd)'])
 
+        self.msmear = QtWidgets.QComboBox()
+        self.msmear.addItems(['vector (roughness)', 'angle (twist)'])
+        self.msmear.setCurrentIndex(
+            0 if self.stack.magnetic_smearing == 'vector' else 1)
+        self.msmear.setToolTip(
+            'How the magnetisation crosses a rough interface.\n'
+            'vector: the components ρ cos θ, ρ sin θ are smeared (lateral '
+            'average of a rough interface);\n  a non-magnetic neighbour only '
+            'fades |M|, its θ has no effect.\n'
+            'angle: ρ and θ are smeared separately, so M turns towards the '
+            'next layer\'s θ\n  over the roughness width (magnetic twist); a '
+            'non-magnetic layer\'s θ then matters.')
+
+        # instrumental resolution, Gaussian in Q (see model.stack RESOLUTION)
+        res = self.stack.resolution
+        self.res_on = QtWidgets.QCheckBox('smear')
+        self.res_on.setChecked(res['enabled'])
+        self.res_on.setToolTip(
+            'Average the reflectivity over a Gaussian in Q of standard '
+            'deviation\nσ_Q = Q·√((Δθ/θ)² + (Δλ/λ)²),  θ = asin(Qλ/4π)\n'
+            '(Licorne resolution.m, MONO mode).')
+        self.res_lambda = dspin(0.1, 50, 3, 0.1, ' Å')
+        self.res_lambda.setValue(res['wavelength'])
+        self.res_lambda.setToolTip('Neutron wavelength λ')
+        self.res_dlambda = dspin(0, 50, 3, 0.05, ' %')
+        self.res_dlambda.setValue(100 * res['dlambda_rel'])
+        self.res_dlambda.setToolTip('Relative wavelength spread Δλ/λ '
+                                    '(standard deviation)')
+        self.res_dtheta = dspin(0, 100, 3, 0.05, ' mrad')
+        self.res_dtheta.setValue(1e3 * res['dtheta'])
+        self.res_dtheta.setToolTip('Angular spread Δθ (standard deviation)')
+
         f.setVerticalSpacing(3)
         qrange = QtWidgets.QHBoxLayout()
         qrange.addWidget(self.qmin, 1)
@@ -575,12 +608,24 @@ class SimulationTab(QtWidgets.QWidget):
         f.addRow('Q reference', self.q_fronting)
         f.addRow('Basis', self.basis)
         f.addRow('Polarisation α', self.alpha)
+        f.addRow('M smearing', self.msmear)
+        resrow = QtWidgets.QHBoxLayout()
+        resrow.addWidget(self.res_on)
+        for lab, w in (('λ', self.res_lambda), ('Δλ/λ', self.res_dlambda),
+                       ('Δθ', self.res_dtheta)):
+            resrow.addWidget(QtWidgets.QLabel(lab))
+            resrow.addWidget(w, 1)
+        f.addRow('Resolution', resrow)
         for w in (self.qmin, self.qmax, self.tail, self.alpha,
-                  self.background):
+                  self.background, self.res_lambda, self.res_dlambda,
+                  self.res_dtheta):
             w.valueChanged.connect(self.schedule)
         self.nq.valueChanged.connect(self.schedule)
         self.basis.currentIndexChanged.connect(self.schedule)
+        self.msmear.currentIndexChanged.connect(self.schedule)
         self.q_fronting.toggled.connect(self.schedule)
+        self.res_on.toggled.connect(self._sync_resolution)
+        self._sync_resolution()
 
         # general parameters and layer list side by side
         top = QtWidgets.QHBoxLayout()
@@ -683,7 +728,10 @@ class SimulationTab(QtWidgets.QWidget):
                 # right-axis curve there too without adding it to p.vb
                 p.items.append(curve)
             else:
-                p.addItem(bars)
+                # bars go straight into the viewbox: PlotItem.addItem would
+                # list them in p.curves, and the Matplotlib exporter chokes
+                # on BarGraphItem.getData() (x is None when built from x0)
+                p.vb.addItem(bars)
                 p.addItem(curve)
             self.prof_bars.append(bars)
             self.prof_curves.append(curve)
@@ -822,6 +870,14 @@ class SimulationTab(QtWidgets.QWidget):
         # rebuild after Qt has finished the drop
         QtCore.QTimer.singleShot(0, lambda: self.refresh_list(select=new))
 
+    def set_parameters(self, params, x):
+        """Write values x of Stack.free_parameters() entries `params` into
+        the stack (e.g. from a fit) and refresh the editor and plots."""
+        for (i, attr, *_), v in zip(params, x):
+            setattr(self.stack.layers[i], attr, float(v))
+        self.refresh_list(select=self.list.currentRow())
+        self.schedule()
+
     def _on_layer_edit(self):
         row = self.list.currentRow()
         self.refresh_list(select=row)
@@ -839,6 +895,13 @@ class SimulationTab(QtWidgets.QWidget):
             self.stack.alpha = np.radians(self.alpha.value())
             self.stack.background = self.background.value()
             self.stack.q_in_fronting = self.q_fronting.isChecked()
+            self.stack.magnetic_smearing = ('vector', 'angle')[
+                self.msmear.currentIndex()]
+            self.stack.resolution.update(
+                enabled=self.res_on.isChecked(),
+                wavelength=self.res_lambda.value(),
+                dlambda_rel=self.res_dlambda.value() / 100,
+                dtheta=self.res_dtheta.value() / 1e3)
             self.stack.build_sublayers()
             self._compute_profile()
             self._show_profile()
@@ -853,6 +916,12 @@ class SimulationTab(QtWidgets.QWidget):
             self.status.setText('Error: %s' % exc)
             self.status.setStyleSheet('color: #b00020')
 
+    def _sync_resolution(self, *_):
+        on = self.res_on.isChecked()
+        for w in (self.res_lambda, self.res_dlambda, self.res_dtheta):
+            w.setEnabled(on)
+        self.schedule()
+
     def _compute_profile(self):
         st = self.stack
         Z = st._interfaces()
@@ -863,14 +932,24 @@ class SimulationTab(QtWidgets.QWidget):
         z = np.linspace(min(e[0], Z[0] - pad) - 10,
                         max(e[-1], Z[-1] + pad) + 10, 4000)
         nsld, rho, theta = st.profile(z)
-        curves = [nsld.real / SLD_SCALE, rho / SLD_SCALE, theta * 360.0]
+        # no angle where there is no magnetisation to point (st.angle_defined)
+        curves = [nsld.real / SLD_SCALE, rho / SLD_SCALE,
+                  np.where(st.angle_defined(rho), theta * 360.0, np.nan)]
+        theta_all = theta * 360.0
         # fronting and backing are semi-infinite: draw them as one bar each
         # out to the edges of the plotted range
         e = np.concatenate([[z[0]], e, [z[-1]]])
         slabs_all = [st.fronting] + list(st.sublayers) + [st.backing]
+        slab_rho = np.array([s.MSLD_rho for s in slabs_all])
+        slab_theta = wrap_turns([s.MSLD_theta for s in slabs_all]) * 360.0
         slabs = [np.array([s.NSLD_real / SLD_SCALE for s in slabs_all]),
-                 np.array([s.MSLD_rho / SLD_SCALE for s in slabs_all]),
-                 np.array([s.MSLD_theta * 360.0 for s in slabs_all])]
+                 slab_rho / SLD_SCALE,
+                 np.where(st.angle_defined(slab_rho), slab_theta, np.nan)]
+        # with the bars shown, the angle curve is drawn over exactly the bars
+        # that have an angle, so both start and stop at the same depths
+        k = np.clip(np.searchsorted(e, z, side='right') - 1, 0, len(e) - 2)
+        self._theta_on_bars = np.where(np.isfinite(slabs[2][k]), theta_all,
+                                       np.nan)
         self._profile = (z, Z, e, curves, slabs)
 
     def _show_profile(self, *_):
@@ -881,12 +960,15 @@ class SimulationTab(QtWidgets.QWidget):
         p = self.prof_plot
         show_bars = self.prof_show_bars.isChecked()
 
+        if show_bars:
+            curves = curves[:2] + [self._theta_on_bars]
         for i, cb in enumerate(self.prof_boxes):
             on = cb.isChecked()
-            self.prof_curves[i].setData(z, curves[i])
+            self.prof_curves[i].setData(z, curves[i], connect='finite')
             self.prof_curves[i].setVisible(on)
+            # a blank angle (NaN) is a bar of zero height
             self.prof_bars[i].setOpts(x0=e[:-1], width=np.diff(e),
-                                      height=slabs[i], y0=0)
+                                      height=np.nan_to_num(slabs[i]), y0=0)
             self.prof_bars[i].setVisible(on and show_bars)
         angle_on = self.prof_boxes[2].isChecked()
         p.showAxis('right', angle_on)
@@ -911,9 +993,11 @@ class SimulationTab(QtWidgets.QWidget):
             band.setZValue(-100)
             p.addItem(band, ignoreBounds=True)
             self.prof_bands.append(band)
-            text = l.name if j in (0, n - 1) else \
-                '%s  (%.4g Å)' % (l.name, l.thickness)
-            t = pg.TextItem(text, anchor=(0.5, 0))
+            # thickness goes on a second line so crowded stacks stay legible
+            text = html.escape(l.name) if j in (0, n - 1) else \
+                '%s<br>%.4g Å' % (html.escape(l.name), l.thickness)
+            t = pg.TextItem(html='<div align="center">%s</div>' % text,
+                            anchor=(0.5, 0))
             t.setPos(0.5 * (bounds[j] + bounds[j + 1]), 0)
             p.addItem(t, ignoreBounds=True)
             self.prof_labels.append(t)
@@ -933,6 +1017,9 @@ class SimulationTab(QtWidgets.QWidget):
             font = t.textItem.font()
             font.setBold(j == sel)
             t.setFont(font)
+            # centring needs a fixed text width; refit it after the font change
+            t.textItem.setTextWidth(-1)
+            t.setTextWidth(t.textItem.document().idealWidth())
             t.setColor('#222222' if j == sel else '#666666')
 
     def _place_layer_labels(self, *_):
@@ -954,6 +1041,8 @@ class SimulationTab(QtWidgets.QWidget):
         if self._profile is None:
             return None, []
         z, Z, e, curves, slabs = self._profile
+        if self.prof_show_bars.isChecked():          # as drawn, see _show_profile
+            curves = curves[:2] + [self._theta_on_bars]
         layer = self.stack.layers[int(np.searchsorted(Z, x))]
         rows = []
         for i, (name, _, col) in enumerate(PROFILE_QUANTITIES):
@@ -1075,9 +1164,13 @@ class SimulationTab(QtWidgets.QWidget):
         self.stack.tail, self.stack.alpha = new.tail, new.alpha
         self.stack.background = new.background
         self.stack.q_in_fronting = new.q_in_fronting
+        self.stack.resolution = new.resolution
+        self.stack.magnetic_smearing = new.magnetic_smearing
         sim = d.get('simulation', {})
         widgets = [self.qmin, self.qmax, self.nq, self.tail, self.alpha,
-                   self.background, self.basis, self.q_fronting]
+                   self.background, self.basis, self.q_fronting, self.res_on,
+                   self.msmear,
+                   self.res_lambda, self.res_dlambda, self.res_dtheta]
         for w in widgets:
             w.blockSignals(True)
         self.qmin.setValue(sim.get('qmin', self.qmin.value()))
@@ -1088,7 +1181,15 @@ class SimulationTab(QtWidgets.QWidget):
         self.alpha.setValue(np.degrees(new.alpha))
         self.background.setValue(new.background)
         self.q_fronting.setChecked(new.q_in_fronting)
+        self.msmear.setCurrentIndex(
+            0 if new.magnetic_smearing == 'vector' else 1)
+        res = new.resolution
+        self.res_on.setChecked(res['enabled'])
+        self.res_lambda.setValue(res['wavelength'])
+        self.res_dlambda.setValue(100 * res['dlambda_rel'])
+        self.res_dtheta.setValue(1e3 * res['dtheta'])
         for w in widgets:
             w.blockSignals(False)
+        self._sync_resolution()
         self.refresh_list(select=1)
         self.recompute()
