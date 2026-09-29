@@ -12,3 +12,6 @@ __pycache__/
 .DS_Store
 .vscode/*
 !.vscode/settings.json
+
+# Scratch models
+bizar*.json
