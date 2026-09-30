@@ -14,6 +14,7 @@ Dashed verticals mark the nominal interface depths.
 import numpy as np
 import matplotlib.pyplot as plt
 
+from model.polarisation import channel_pair
 from model.stack import Layer, Stack
 
 
@@ -55,7 +56,7 @@ def draw(stack, scale=1e-6, unit=r'$10^{-6}\,\AA^{-2}$'):
 
     pad = 0.35 * max(Z[-1], 1.0)
     z = np.linspace(min(e[0], Z[0] - pad) - 10, max(e[-1], Z[-1] + pad) + 10, 4000)
-    nsld, rho, theta = stack.profile(z)
+    nsld, rho, theta, _ = stack.profile(z)
 
     fig, ax = plt.subplots(3, 1, figsize=(9.5, 8.2), sharex=True)
     fig.subplots_adjust(hspace=0.12, left=0.11, right=0.97, top=0.94, bottom=0.08)
@@ -94,24 +95,12 @@ if __name__ == '__main__':
     st = make_stack()
     st.build_sublayers()
 
-    Q=np.linspace(0.0001, 0.25, 400)
-
-    reflectance=st.calc_reflectance(Q)
-    
-
-    print(reflectance.shape)
-
-    # plt.plot(Q, reflectance[:,0], label='R++')
-    # plt.plot(Q, reflectance[:,1], label='R+-')
-    # plt.plot(Q, reflectance[:,2], label='R-+')
-    # plt.plot(Q, reflectance[:,3], label='R--')
-
-    plt.plot(Q, reflectance[:,4], label='R++ lab')
-    plt.plot(Q, reflectance[:,5], label='R+- lab')
-    plt.plot(Q, reflectance[:,6], label='R-+ lab')
-    plt.plot(Q, reflectance[:,7], label='R-- lab')
-
-
+    Q = np.linspace(0.0001, 0.25, 400)
+    names = ['++', '+-', '-+', '--']
+    x = (1.0, 0.0, 0.0)                     # polarisation along sample x
+    R = st.reflectivities(Q, [channel_pair(c, x) for c in names])
+    for j, c in enumerate(names):
+        plt.plot(Q, R[:, j], label='R' + c)
     plt.yscale('log')
     plt.xlabel(r'Q ($\AA^{-1}$)')
     plt.ylabel('Reflectivity')
@@ -119,9 +108,4 @@ if __name__ == '__main__':
     plt.legend()
     plt.show()
 
-
-
-        
-
     draw(st)
-    plt.show()

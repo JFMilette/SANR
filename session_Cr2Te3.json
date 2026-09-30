@@ -1,0 +1,497 @@
+{
+  "tail": 3.0,
+  "background": 0.0,
+  "q_in_fronting": false,
+  "resolution": {
+    "enabled": true,
+    "mode": "tof",
+    "wavelength": 5.0,
+    "dlambda_rel": 0.002,
+    "dtheta": 0.0007,
+    "tof_dlambda": 0.005,
+    "tof_angles": [
+      {
+        "theta": 0.006,
+        "dtheta": 0.0003,
+        "qmax": 0.04
+      },
+      {
+        "theta": 0.01,
+        "dtheta": 0.0005,
+        "qmax": 0.12
+      },
+      {
+        "theta": 0.017,
+        "dtheta": 0.0005,
+        "qmax": null
+      }
+    ]
+  },
+  "magnetic_smearing": "vector",
+  "layers": [
+    {
+      "name": "vacuum",
+      "thickness": 0.0,
+      "NSLD_real": 0.0,
+      "NSLD_img": 0.0,
+      "MSLD_rho": 0.0,
+      "MSLD_theta": 0.0,
+      "MSLD_phi": 0.0,
+      "roughness_sigma": 0.0,
+      "roughness_model": "tanh",
+      "roughness_sublayer": 5,
+      "fit": {}
+    },
+    {
+      "name": "AlOx",
+      "thickness": 71.3237,
+      "NSLD_real": 4.698889999999999e-06,
+      "NSLD_img": 0.0,
+      "MSLD_rho": 0.0,
+      "MSLD_theta": 0.0,
+      "MSLD_phi": 0.0,
+      "roughness_sigma": 0.0003,
+      "roughness_model": "tanh",
+      "roughness_sublayer": 6,
+      "fit": {
+        "thickness": {
+          "vary": false,
+          "min": 70.0,
+          "max": 120.0
+        },
+        "NSLD_real": {
+          "vary": false,
+          "min": 3e-06,
+          "max": 6e-06
+        },
+        "NSLD_img": {
+          "vary": false,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "MSLD_rho": {
+          "vary": false,
+          "min": 0.0,
+          "max": 5e-06
+        },
+        "MSLD_theta": {
+          "vary": false,
+          "min": 0.0,
+          "max": 1.0
+        },
+        "MSLD_phi": {
+          "vary": false,
+          "min": -0.25,
+          "max": 0.25
+        },
+        "roughness_sigma": {
+          "vary": false,
+          "min": 0.0,
+          "max": 10.0
+        },
+        "roughness_sublayer": {
+          "vary": false,
+          "min": 1,
+          "max": 200
+        }
+      }
+    },
+    {
+      "name": "Cr2Te3",
+      "thickness": 41.5,
+      "NSLD_real": 1.53998e-06,
+      "NSLD_img": 0.0,
+      "MSLD_rho": 2.31522e-06,
+      "MSLD_theta": 0.0,
+      "MSLD_phi": 0.0,
+      "roughness_sigma": 9.8237,
+      "roughness_model": "tanh",
+      "roughness_sublayer": 6,
+      "fit": {
+        "thickness": {
+          "vary": false,
+          "min": 30.0,
+          "max": 80.0
+        },
+        "NSLD_real": {
+          "vary": false,
+          "min": 1.3e-06,
+          "max": 2.5e-06
+        },
+        "NSLD_img": {
+          "vary": false,
+          "min": -1e-06,
+          "max": 0.0
+        },
+        "MSLD_rho": {
+          "vary": false,
+          "min": 0.0,
+          "max": 3e-06
+        },
+        "MSLD_theta": {
+          "vary": false,
+          "min": 0.0,
+          "max": 1.0
+        },
+        "MSLD_phi": {
+          "vary": false,
+          "min": -0.25,
+          "max": 0.25
+        },
+        "roughness_sigma": {
+          "vary": false,
+          "min": 0.0,
+          "max": 10.0
+        },
+        "roughness_sublayer": {
+          "vary": false,
+          "min": 1,
+          "max": 200
+        }
+      }
+    },
+    {
+      "name": "BAT",
+      "thickness": 53.0,
+      "NSLD_real": 1.20162e-06,
+      "NSLD_img": 0.0,
+      "MSLD_rho": 0.0,
+      "MSLD_theta": 0.0,
+      "MSLD_phi": 0.0,
+      "roughness_sigma": 0.8135,
+      "roughness_model": "tanh",
+      "roughness_sublayer": 6,
+      "fit": {
+        "thickness": {
+          "vary": false,
+          "min": 40.0,
+          "max": 80.0
+        },
+        "NSLD_real": {
+          "vary": false,
+          "min": 1e-06,
+          "max": 2.5e-06
+        },
+        "NSLD_img": {
+          "vary": false,
+          "min": -1e-06,
+          "max": 0.0
+        },
+        "MSLD_rho": {
+          "vary": false,
+          "min": 0.0,
+          "max": 5e-06
+        },
+        "MSLD_theta": {
+          "vary": false,
+          "min": 0.0,
+          "max": 1.0
+        },
+        "MSLD_phi": {
+          "vary": false,
+          "min": -0.25,
+          "max": 0.25
+        },
+        "roughness_sigma": {
+          "vary": false,
+          "min": 0.0,
+          "max": 5.0
+        },
+        "roughness_sublayer": {
+          "vary": false,
+          "min": 1,
+          "max": 200
+        }
+      }
+    },
+    {
+      "name": "Cr2Te3",
+      "thickness": 78.0913,
+      "NSLD_real": 1.0585299999999999e-06,
+      "NSLD_img": 0.0,
+      "MSLD_rho": 3.09713e-06,
+      "MSLD_theta": 0.0,
+      "MSLD_phi": 0.0,
+      "roughness_sigma": 1.0,
+      "roughness_model": "tanh",
+      "roughness_sublayer": 6,
+      "fit": {
+        "thickness": {
+          "vary": false,
+          "min": 60.0,
+          "max": 120.0
+        },
+        "NSLD_real": {
+          "vary": false,
+          "min": 1e-06,
+          "max": 2.5e-06
+        },
+        "NSLD_img": {
+          "vary": false,
+          "min": -1e-06,
+          "max": 0.0
+        },
+        "MSLD_rho": {
+          "vary": false,
+          "min": 0.0,
+          "max": 3.5e-06
+        },
+        "MSLD_theta": {
+          "vary": false,
+          "min": 0.0,
+          "max": 1.0
+        },
+        "MSLD_phi": {
+          "vary": false,
+          "min": -0.25,
+          "max": 0.25
+        },
+        "roughness_sigma": {
+          "vary": false,
+          "min": 0.0,
+          "max": 5.0
+        },
+        "roughness_sublayer": {
+          "vary": false,
+          "min": 1,
+          "max": 200
+        }
+      }
+    },
+    {
+      "name": "substrate",
+      "thickness": 0.0,
+      "NSLD_real": 6.08194e-06,
+      "NSLD_img": 0.0,
+      "MSLD_rho": 0.0,
+      "MSLD_theta": 0.0,
+      "MSLD_phi": 0.0,
+      "roughness_sigma": 0.1214,
+      "roughness_model": "tanh",
+      "roughness_sublayer": 6,
+      "fit": {
+        "thickness": {
+          "vary": false,
+          "min": 0.0,
+          "max": 500.0
+        },
+        "NSLD_real": {
+          "vary": false,
+          "min": 4.5e-06,
+          "max": 6.5e-06
+        },
+        "NSLD_img": {
+          "vary": false,
+          "min": -1e-06,
+          "max": 0.0
+        },
+        "MSLD_rho": {
+          "vary": false,
+          "min": 0.0,
+          "max": 5e-06
+        },
+        "MSLD_theta": {
+          "vary": false,
+          "min": 0.0,
+          "max": 1.0
+        },
+        "MSLD_phi": {
+          "vary": false,
+          "min": -0.25,
+          "max": 0.25
+        },
+        "roughness_sigma": {
+          "vary": false,
+          "min": 0.0,
+          "max": 5.0
+        },
+        "roughness_sublayer": {
+          "vary": false,
+          "min": 1,
+          "max": 200
+        }
+      }
+    }
+  ],
+  "simulation": {
+    "qmin": 0.0001,
+    "qmax": 0.24,
+    "nq": 400,
+    "polarisation": {
+      "++": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          1.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "+-": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          -1.0,
+          -0.0,
+          -0.0
+        ]
+      ],
+      "-+": [
+        [
+          -1.0,
+          -0.0,
+          -0.0
+        ],
+        [
+          1.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "--": [
+        [
+          -1.0,
+          -0.0,
+          -0.0
+        ],
+        [
+          -1.0,
+          -0.0,
+          -0.0
+        ]
+      ],
+      "+": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "-": [
+        [
+          -1.0,
+          -0.0,
+          -0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0
+        ]
+      ]
+    },
+    "display": {
+      "quantity": 1,
+      "logy": true,
+      "rq4": false,
+      "freeze_y": false,
+      "profile": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "sublayers": true
+    },
+    "selected_layer": 5
+  },
+  "experimental": {
+    "sets": [
+      {
+        "name": "S1 3K 4.8T FC",
+        "visible": true,
+        "live": false,
+        "line": false,
+        "channels": {
+          "+": {
+            "file": {
+              "path": "/Users/jf/Desktop/Raw Exp Data/PNR/IPTS 27232/S1/S1_3K_4.8T_FC/2/REF_M_39242+39243+39244_peak1_Specular_Off_Off.dat",
+              "relative": "../../../Raw Exp Data/PNR/IPTS 27232/S1/S1_3K_4.8T_FC/2/REF_M_39242+39243+39244_peak1_Specular_Off_Off.dat"
+            },
+            "q_file": null,
+            "start": 51,
+            "pol": null
+          },
+          "-": {
+            "file": {
+              "path": "/Users/jf/Desktop/Raw Exp Data/PNR/IPTS 27232/S1/S1_3K_4.8T_FC/2/REF_M_39242+39243+39244_peak1_Specular_On_Off.dat",
+              "relative": "../../../Raw Exp Data/PNR/IPTS 27232/S1/S1_3K_4.8T_FC/2/REF_M_39242+39243+39244_peak1_Specular_On_Off.dat"
+            },
+            "q_file": null,
+            "start": 51,
+            "pol": null
+          }
+        }
+      },
+      {
+        "name": "Fit 103 Licorne",
+        "visible": true,
+        "live": false,
+        "line": false,
+        "channels": {
+          "+": {
+            "file": {
+              "path": "/Users/jf/Desktop/Raw Exp Data/PNR/IPTS 27232/S1/S1_3K_4.8T_FC/2/best_103/rtheory1.dat",
+              "relative": "../../../Raw Exp Data/PNR/IPTS 27232/S1/S1_3K_4.8T_FC/2/best_103/rtheory1.dat"
+            },
+            "q_file": {
+              "path": "/Users/jf/Desktop/Raw Exp Data/PNR/IPTS 27232/S1/S1_3K_4.8T_FC/2/best_103/q.dat",
+              "relative": "../../../Raw Exp Data/PNR/IPTS 27232/S1/S1_3K_4.8T_FC/2/best_103/q.dat"
+            },
+            "start": 1,
+            "pol": null
+          },
+          "-": {
+            "file": {
+              "path": "/Users/jf/Desktop/Raw Exp Data/PNR/IPTS 27232/S1/S1_3K_4.8T_FC/2/best_103/rtheory2.dat",
+              "relative": "../../../Raw Exp Data/PNR/IPTS 27232/S1/S1_3K_4.8T_FC/2/best_103/rtheory2.dat"
+            },
+            "q_file": {
+              "path": "/Users/jf/Desktop/Raw Exp Data/PNR/IPTS 27232/S1/S1_3K_4.8T_FC/2/best_103/q.dat",
+              "relative": "../../../Raw Exp Data/PNR/IPTS 27232/S1/S1_3K_4.8T_FC/2/best_103/q.dat"
+            },
+            "start": 1,
+            "pol": null
+          }
+        }
+      },
+      {
+        "name": "Simulation",
+        "visible": true,
+        "live": true,
+        "line": true,
+        "pairs": null
+      }
+    ],
+    "display": {
+      "quantity": 1,
+      "logy": true,
+      "rq4": false,
+      "errors": true
+    },
+    "fit": {
+      "dataset": "S1 3K 4.8T FC",
+      "cost": 0,
+      "maxiter": 200,
+      "mutation": [
+        0.5,
+        1.0
+      ],
+      "population": 15,
+      "tol": 0.01,
+      "polish": true,
+      "workers": 4
+    }
+  }
+}

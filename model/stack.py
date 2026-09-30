@@ -26,8 +26,8 @@ layer become one slab each.  Clipping limits the WINDOW, never the VALUES:
 every slab samples the exact profile at its own centre.
 
 MAGNETISATION -- Stack.magnetic_smearing chooses how M crosses an interface:
-  'vector' (default): the in-plane components rho cos(theta), rho sin(theta)
-      are smeared like any other quantity.  This is the lateral average of a
+  'vector' (default): the Cartesian components of M are smeared like any
+      other quantity.  This is the lateral average of a
       rough interface (the potential is linear in M), so a non-magnetic
       neighbour only fades |M| without turning it, its theta has no effect,
       and layers at an angle D pass through |M| = cos(D/2) (0 if antiparallel).
@@ -37,38 +37,77 @@ MAGNETISATION -- Stack.magnetic_smearing chooses how M crosses an interface:
       than passing through |M| = 0).  theta is interpolated between the values
       as entered: 0 -> 350 deg turns the long way; enter -10 deg for the short
       way.  A non-magnetic layer's theta then matters: keep it equal to its
-      magnetic neighbour's unless a rotation is intended.
+      magnetic neighbour's unless a rotation is intended.  phi is
+      interpolated the same way (not folded).
 
 ANGLES -- axes of Majkrzak Fig. 1.14: sample z || Q (film normal), x and y in
 the film plane.  MSLD_theta is theta_M, the in-plane angle of M from sample x
 towards y (GEPORE THE(J); also the theta of Eq. 1.128 / Fig. 1.19), stored in
-turns.  phi_M (out-of-plane) is not modelled: Np_z has no effect (Halperin).
-Stack.alpha is the in-plane azimuth of the lab polarisation from sample x; it
-is NOT GEPORE's EPS (a rotation about x): alpha = 90 deg <=> EPS = 3pi/2, and
-the spin (uu, ud, du, dd) channels are EPS = 0 (P || Q).
+turns.  MSLD_phi is the elevation of M out of the film plane, in turns
+(0 = in plane, +1/4 = along +z), so M = rho (cos phi cos theta,
+cos phi sin theta, sin phi).  MSLD_rho is |M|.
 
-TRANSFER MATRIX -- Majkrzak Eq. 1.128, i.e. Table 1.2 with Np_z = 0 (Halperin:
-the component of B along Q is cancelled by the demagnetising field, so only
-the in-plane magnetisation is seen).  Quantisation along the film normal.
+HALPERIN -- the neutron sees B, and B_z is continuous across the film
+surface: the z component of M is cancelled by the demagnetising field and
+has no effect on the reflectivity.  Every medium (slabs, fronting, backing)
+therefore enters the transfer matrix and the boundary conditions only through
+its in-plane projection rho cos(phi) at angle theta (Stack.inplane_rho).
+M_z is kept in the model and in the profiles but is invisible to the
+neutrons, so rho and phi of one layer are degenerate in a fit: only
+rho cos(phi) is measured.
+
+TRANSFER MATRIX -- Majkrzak Eq. 1.128, i.e. Table 1.2 with Np_z = 0
+(HALPERIN).  Quantisation along the film normal.
 
 RESOLUTION -- with Stack.resolution on, every reflectivity is averaged over a
-Gaussian in Q of standard deviation (Licorne resolution.m, MONO mode)
+Gaussian in Q of standard deviation
 
     sigma_Q = Q * sqrt( (dtheta/theta)^2 + (dlambda/lambda)^2 ),
-    theta   = asin( Q lambda / 4 pi ),
 
-dtheta in rad, dlambda / lambda relative.  The average is a fixed quadrature
+where resolution['mode'] says which of theta, lambda is fixed
+(RESOLUTION_MODES, one sigma function per mode):
+  'mono' -- fixed wavelength, angle scan (Licorne resolution.m, MONO mode):
+            theta = asin(Q lambda / 4 pi); 'wavelength' (A), 'dlambda_rel'
+            (dlambda / lambda), 'dtheta' (rad).
+  'tof'  -- time of flight at a few fixed angles, each covering a Q band:
+            lambda = 4 pi sin(theta) / Q; 'tof_dlambda' (A, absolute) and
+            'tof_angles' = [{'theta', 'dtheta' (rad), 'qmax' (A^-1)}, ...]
+            in increasing qmax.  Angle i is used for qmax_{i-1} <= Q <
+            qmax_i; the last angle's qmax is ignored (open-ended).
+The average is a fixed quadrature
 over +-RES_SPAN sigma.  The ideal reflectivity is computed once on a uniform
 Q grid of step (smallest sigma) / RES_GRID_STEP and linearly interpolated at
 the quadrature nodes; about 10x cheaper than evaluating every node and more
 accurate (<= 0.3 % at the critical edge, where R has a square-root kink).
 A channel that is undefined (NaN) at some nodes is averaged over the others.
 
-SURROUND -- a magnetic fronting/backing is off-diagonal in that basis, so its
-wavevector is a 2x2 operator (Stack._surround_K), not one scalar per spin.
-Lab channels are taken along the fronting's M when it is magnetic and are
-flux-normalised; see calc_reflectance.
+POLARISATION -- a measured quantity is a pair (P0, P): incident polarisation
+P0 and analyser P, 3-vectors in the sample frame of ANGLES whose length is
+the efficiency, P = None for no analyser.  Stack.reflectivities(Q, pairs)
+returns one column per pair (Ruehm, Toperverg & Dosch, PRB 60, 16073,
+Eq. 2): R = Tr{rho r rho0 r^+}, rho0 = (1 + P0.sigma)/2,
+rho = (1 + P.sigma)/2, or rho = 1 for P=None (all reflected spins counted).
+The background is added once per pair: R+ = (n, None) is
+R++ + R+- + background.  model.polarisation names the usual pairs.
+
+With a non-magnetic fronting this holds for any backing, and all pairs share
+one transfer-matrix evaluation.  With a magnetic fronting the two eigenspins
+(+-M_f) have different k_z there, so a component of P0 or P transverse to M_f
+precesses with depth and is averaged out over the macroscopic path through
+the fronting: only P0.m_f and P.m_f survive, and R is the flux-normalised
+lab channels along M_f (Stack._lab_channels) weighted by (1 +- P0.m_f)/2 and
+(1 +- P.m_f)/2 (one warning per call if a pair has a transverse part).  With
+the resolution on, the weights are applied AFTER averaging each lab channel:
+in vacuum-referenced Q a flipped channel is NaN below a fronting edge and is
+averaged over the nodes where it is defined.
+
+SURROUND -- a magnetic fronting/backing is off-diagonal in the film-normal
+basis, so its wavevector is a 2x2 operator (Stack._surround_K), not one
+scalar per spin.
 """
+
+import copy
+import warnings
 
 import numpy as np
 from scipy.special import erf
@@ -77,7 +116,7 @@ from scipy.special import erf
 # Layer attributes a fit may vary.  Layer.fit[attr] = {'vary', 'min', 'max'},
 # bounds in the same units as the attribute (Angstrom, A^-2, turns).
 FIT_PARAMS = ('thickness', 'NSLD_real', 'NSLD_img', 'MSLD_rho', 'MSLD_theta',
-              'roughness_sigma')
+              'MSLD_phi', 'roughness_sigma')
 
 
 # Default fit bounds, the same for every layer: attr -> (min, max).
@@ -87,7 +126,8 @@ DEFAULT_BOUNDS = {
     'NSLD_img':        (-1e-6, 0.0),       # A^-2
     'MSLD_rho':        (0.0, 5e-6),        # A^-2
     'MSLD_theta':      (0.0, 1.0),         # turns
-    'roughness_sigma': (0.0, 20.0),        # Angstrom
+    'MSLD_phi':        (-0.25, 0.25),      # turns, out of plane
+    'roughness_sigma': (0.0, 10.0),        # Angstrom
 }
 
 
@@ -104,8 +144,11 @@ RES_NODES = 101
 RES_SPAN = 3.5
 RES_GRID_STEP = 32
 RES_GRID_MAX = 50000
-# default resolution: Licorne's resolution.m (lambda = 5 A, dlambda = 0.01 A,
-# dtheta = 0.7 mrad)
+# Q points per block of the transfer-matrix product (see
+# Stack.build_transfer_matrix); set from a benchmark
+TM_BLOCK = 256
+
+
 def wrap_turns(t):
     """Angle in turns folded into [0, 1); rounding first keeps -1e-17 at 0
     instead of 1 (i.e. 0 deg, not 360)."""
@@ -117,8 +160,116 @@ def wrap_turns(t):
 # from any magnetic layer (e.g. a rough interface's tail outliving a sharper
 # one below it points along M_above - M_below).  See Stack.angle_defined.
 M_TINY = 1e-3
-DEFAULT_RESOLUTION = {'enabled': False, 'wavelength': 5.0,
-                      'dlambda_rel': 0.002, 'dtheta': 7e-4}
+def cos_turns(t):
+    """cos(2 pi t) with the quarter turns exactly 0 (cos(pi/2) = 6e-17 would
+    otherwise leave a 'magnetic' residue on a layer magnetised along z)."""
+    c = np.cos(2*np.pi*np.asarray(t, dtype=float))
+    return np.where(np.abs(c) < 1e-12, 0.0, c)
+
+
+def sin_turns(t):
+    """sin(2 pi t) with the half turns exactly 0."""
+    s = np.sin(2*np.pi*np.asarray(t, dtype=float))
+    return np.where(np.abs(s) < 1e-12, 0.0, s)
+
+
+_PAULI = np.array([[[0, 1], [1, 0]], [[0, -1j], [1j, 0]], [[1, 0], [0, -1]]],
+                  dtype=complex)
+
+
+def _density(P):
+    """(1 + P.sigma)/2 for a polarisation 3-vector P (|P| <= 1)."""
+    return 0.5*(np.eye(2) + np.tensordot(np.asarray(P, dtype=float), _PAULI, 1))
+
+
+def _check_P(P, name):
+    P = np.asarray(P, dtype=float)
+    if P.shape != (3,):
+        raise ValueError('%s must be a 3-vector (x, y, z) in the sample frame'
+                         % name)
+    if np.linalg.norm(P) > 1 + 1e-9:
+        raise ValueError('|%s| = %.4g > 1' % (name, np.linalg.norm(P)))
+    return P
+
+
+def _check_pairs(pairs):
+    out = [(_check_P(P0, 'P0'), None if P is None else _check_P(P, 'P'))
+           for P0, P in pairs]
+    if not out:
+        raise ValueError('no (P0, P) pair given')
+    return out
+
+
+def _weigh(Rab, w):
+    """Rab (nQ, 4) lab channels, w (4, k) weights -> (nQ, k).  A zero weight
+    drops an undefined (NaN) channel instead of spreading it."""
+    Rw = Rab[:, :, None] * w[None, :, :]
+    return np.where(w[None, :, :] > 0, Rw, 0.0).sum(1)
+
+
+
+# default resolution: mono is Licorne's resolution.m (lambda = 5 A,
+# dlambda = 0.01 A, dtheta = 0.7 mrad), tof its three-angle TOF setup
+DEFAULT_RESOLUTION = {
+    'enabled': False, 'mode': 'mono',
+    'wavelength': 5.0, 'dlambda_rel': 0.002, 'dtheta': 7e-4,
+    'tof_dlambda': 0.005,
+    'tof_angles': [{'theta': 0.006, 'dtheta': 3e-4, 'qmax': 0.04},
+                   {'theta': 0.010, 'dtheta': 5e-4, 'qmax': 0.12},
+                   {'theta': 0.017, 'dtheta': 5e-4, 'qmax': None}],
+}
+
+
+def _sigma_mono(Q, res):
+    """Fixed wavelength (see RESOLUTION); Q > 0."""
+    s = np.clip(Q * res['wavelength'] / (4*np.pi), 1e-12, 1.0)
+    return Q * np.hypot(res['dtheta'] / np.arcsin(s), res['dlambda_rel'])
+
+
+def _sigma_tof(Q, res):
+    """Fixed angles, one per Q band (see RESOLUTION); Q > 0."""
+    ang = res['tof_angles']
+    if not ang:
+        raise ValueError('TOF resolution needs at least one angle')
+    theta = np.array([a['theta'] for a in ang], dtype=float)
+    dtheta = np.array([a['dtheta'] for a in ang], dtype=float)
+    edges = np.array([a['qmax'] for a in ang[:-1]], dtype=float)
+    if np.any(theta <= 0):
+        raise ValueError('TOF angles must be > 0')
+    if np.any(np.diff(edges) <= 0):
+        raise ValueError('TOF Q limits must increase')
+    k = np.searchsorted(edges, Q, side='right')
+    lam = 4*np.pi*np.sin(theta[k]) / Q
+    return Q * np.hypot(dtheta[k] / theta[k], res['tof_dlambda'] / lam)
+
+
+# resolution['mode'] -> sigma_Q(Q > 0, resolution dict)
+RESOLUTION_MODES = {'mono': _sigma_mono, 'tof': _sigma_tof}
+
+
+def _res_grid(Qn, sigma, bins=2048):
+    """Q grid on which the ideal R is computed for the quadrature nodes Qn
+    (nQ, RES_NODES) of widths sigma (nQ,): the local step is sigma /
+    RES_GRID_STEP of the finest Gaussian whose nodes fall there, so a
+    resolution that is sharp in one Q band (TOF at low Q) only refines that
+    band.  At most RES_GRID_MAX points."""
+    lo, hi = Qn.min(), Qn.max()
+    edges = np.linspace(lo, hi, bins + 1)
+    h = np.full(bins, np.inf)
+    ok = sigma > 0
+    idx = np.minimum(((Qn[ok] - lo) / (hi - lo) * bins).astype(int), bins - 1)
+    np.minimum.at(h, idx.ravel(),
+                  np.repeat(sigma[ok] / RES_GRID_STEP, Qn.shape[1]))
+    # a bin between two nodes of a wide Gaussian takes its neighbours' step
+    i = np.arange(bins)
+    fin = np.isfinite(h)
+    left = np.maximum.accumulate(np.where(fin, i, 0))
+    right = np.minimum.accumulate(np.where(fin, i, bins - 1)[::-1])[::-1]
+    h = np.where(fin, h, np.minimum(h[left], h[right]))
+    h = np.maximum(h, (hi - lo) / (RES_GRID_MAX - 1))
+    # points evenly spaced in u = integral dq / h(q)
+    u = np.concatenate([[0.0], np.cumsum(np.diff(edges) / h)])
+    return np.interp(np.linspace(0, u[-1], int(np.ceil(u[-1])) + 1), u, edges)
 
 
 # ---------------------------------------------------------------- Layer ----
@@ -134,13 +285,15 @@ class Layer:
                  NSLD_real: float = 0.0, NSLD_img: float = 0.0,
                  MSLD_rho: float = 0.0, MSLD_theta: float = 0.0,
                  roughness_sigma: float = 0.0, roughness_model: str = "tanh",
-                 roughness_sublayer: int = 5, fit: dict = None):
+                 roughness_sublayer: int = 5, fit: dict = None,
+                 MSLD_phi: float = 0.0):
         self.name = name
         self.thickness = thickness              # Angstrom
         self.NSLD_real = NSLD_real              # A^-2
         self.NSLD_img = NSLD_img                # A^-2, negative = absorbing
-        self.MSLD_rho = MSLD_rho                # A^-2, in-plane magnitude
+        self.MSLD_rho = MSLD_rho                # A^-2, |M|
         self.MSLD_theta = MSLD_theta        # turns, theta_M of Fig. 1.14 (from x)
+        self.MSLD_phi = MSLD_phi            # turns, elevation out of the plane
         self.roughness_sigma = roughness_sigma  # Angstrom, Gaussian sigma
         self.roughness_model = roughness_model  # 'erf' or 'tanh'
         self.roughness_sublayer = roughness_sublayer
@@ -153,11 +306,12 @@ class Layer:
         return self.fit[attr]
 
     def __repr__(self):
-        return ("Layer(%r, t=%.3g, nsld=%.4g%+.4gj, msld=%.4g @ %.4g turn, "
-                "sigma=%.3g, N=%d)" % (self.name, self.thickness, self.NSLD_real,
-                                       self.NSLD_img, self.MSLD_rho,
-                                       self.MSLD_theta, self.roughness_sigma,
-                                       self.roughness_sublayer))
+        return ("Layer(%r, t=%.3g, nsld=%.4g%+.4gj, msld=%.4g @ %.4g, %+.4g "
+                "turn, sigma=%.3g, N=%d)" % (self.name, self.thickness,
+                                             self.NSLD_real, self.NSLD_img,
+                                             self.MSLD_rho, self.MSLD_theta,
+                                             self.MSLD_phi, self.roughness_sigma,
+                                             self.roughness_sublayer))
 
 
 # ------------------------------------------------------ profile helpers ----
@@ -191,24 +345,22 @@ class Stack:
         self.layers = list(layers)
         self.tail = tail                 # unclipped window half-width = tail*sigma
         self.sublayers = None
-        self.transfer_matrix = None
-        self.alpha = 0.0                     # rad, in-plane lab polarisation azimuth
-                                             # from sample x (not EPS; see ANGLES)
         self.background = 0.0                # constant added to every channel
         self.q_in_fronting = False           # True: Q is measured inside the fronting
-        # instrumental resolution (see RESOLUTION): enabled, wavelength (A),
-        # dlambda_rel (dlambda / lambda), dtheta (rad)
-        self.resolution = dict(DEFAULT_RESOLUTION)
+        # instrumental resolution (see RESOLUTION): enabled, mode and the
+        # parameters of each mode
+        self.resolution = copy.deepcopy(DEFAULT_RESOLUTION)
         self.magnetic_smearing = 'vector'    # or 'angle'; see MAGNETISATION
 
     # -- serialisation ------------------------------------------------------
     def to_dict(self):
-        """Plain-JSON description of the sample (layers, tail, alpha,
-        background, resolution)."""
-        return {'tail': self.tail, 'alpha': self.alpha,
+        """Plain-JSON description of the sample (layers, tail, background,
+        resolution, smearing).  No polarisation: it belongs to each
+        measurement."""
+        return {'tail': self.tail,
                 'background': self.background,
                 'q_in_fronting': self.q_in_fronting,
-                'resolution': dict(self.resolution),
+                'resolution': copy.deepcopy(self.resolution),
                 'magnetic_smearing': self.magnetic_smearing,
                 'layers': [dict(vars(l), fit={k: dict(v)
                                               for k, v in l.fit.items()})
@@ -216,13 +368,12 @@ class Stack:
 
     @classmethod
     def from_dict(cls, d):
-        s = cls([Layer(**l) for l in d['layers']], tail=d.get('tail', 3.0))
-        s.alpha = d.get('alpha', 0.0)
-        s.background = d.get('background', 0.0)
-        s.q_in_fronting = bool(d.get('q_in_fronting', False))
-        s.resolution.update(d.get('resolution', {}))
-        # files saved before the option existed used angle smearing
-        s.magnetic_smearing = d.get('magnetic_smearing', 'angle')
+        """Inverse of to_dict."""
+        s = cls([Layer(**l) for l in d['layers']], tail=d['tail'])
+        s.background = d['background']
+        s.q_in_fronting = bool(d['q_in_fronting'])
+        s.resolution.update(copy.deepcopy(d['resolution']))
+        s.magnetic_smearing = d['magnetic_smearing']
         return s
 
     # -- fitting ------------------------------------------------------------
@@ -280,7 +431,6 @@ class Stack:
 
         Stores and returns the list; fronting and backing are not included.
         """
-        t = self._thicknesses()
         Z = self._interfaces()
         n_if = len(Z)
         sig = [max(self.layers[j + 1].roughness_sigma, 0.0) for j in range(n_if)]
@@ -299,19 +449,21 @@ class Stack:
 
         c = 0.5 * (e[:-1] + e[1:])
         v_n = _profile(c, Z, sig, mod, nsld)
-        v_rho, v_theta = self._magnetic_profile(c, Z, sig, mod)
+        v_rho, v_theta, v_phi = self._magnetic_profile(c, Z, sig, mod)
 
         self.sublayers = [
             Layer(name='%s_%03d' % (self.layers[0].name or 'slab', i),
                   thickness=th, NSLD_real=v_n[i].real, NSLD_img=v_n[i].imag,
                   MSLD_rho=float(v_rho[i]),
-                  MSLD_theta=float(v_theta[i]),
+                  MSLD_theta=float(v_theta[i]), MSLD_phi=float(v_phi[i]),
                   roughness_sigma=0.0, roughness_sublayer=1)
             for i, th in enumerate(np.diff(e))]
         return self.sublayers
 
     def profile(self, z):
-        """Exact continuous profile: (nsld complex, msld_rho, MSLD_theta in turns)."""
+        """Exact continuous profile: (nsld complex, |M| = msld_rho, MSLD_theta,
+        MSLD_phi), angles in turns.  The neutrons only see the in-plane part
+        rho cos(phi) (HALPERIN)."""
         Z = self._interfaces()
         n_if = len(Z)
         sig = [max(self.layers[j + 1].roughness_sigma, 0.0) for j in range(n_if)]
@@ -321,18 +473,31 @@ class Stack:
             self._magnetic_profile(z, Z, sig, mod)
 
     def _magnetic_profile(self, z, Z, sig, mod):
-        """(rho, theta in turns) at depths z, smeared as magnetic_smearing
-        says (see MAGNETISATION)."""
+        """(|M|, theta, phi in turns) at depths z, smeared as
+        magnetic_smearing says (see MAGNETISATION)."""
         rho = np.array([l.MSLD_rho for l in self.layers])
         theta = np.array([l.MSLD_theta for l in self.layers])
+        phi = np.array([l.MSLD_phi for l in self.layers])
         if self.magnetic_smearing == 'angle':
-            # the interpolated angle is kept as is (the physics depends on the
-            # path it takes); only the reported value is folded into a turn
+            # the interpolated angles are kept as is (the physics depends on
+            # the path they take); only the reported theta is folded
             return (_profile(z, Z, sig, mod, rho),
-                    wrap_turns(_profile(z, Z, sig, mod, theta)))
+                    wrap_turns(_profile(z, Z, sig, mod, theta)),
+                    _profile(z, Z, sig, mod, phi))
         z = np.asarray(z, dtype=float)
-        m = _profile(z, Z, sig, mod, rho * np.exp(2j*np.pi*theta))
-        return np.abs(m), wrap_turns(np.angle(m) / (2*np.pi))
+        # in-plane part as one complex number, M_z separately; with phi = 0
+        # everywhere mz is exactly 0 and this is the previous 2D smearing
+        mp = _profile(z, Z, sig, mod,
+                      rho * cos_turns(phi) * np.exp(2j*np.pi*theta))
+        mz = _profile(z, Z, sig, mod, rho * sin_turns(phi))
+        a = np.abs(mp)
+        return (np.hypot(a, mz), wrap_turns(np.angle(mp) / (2*np.pi)),
+                np.arctan2(mz, a) / (2*np.pi))
+
+    @staticmethod
+    def inplane_rho(layer):
+        """rho cos(phi): the in-plane magnetic SLD the neutrons see."""
+        return float(layer.MSLD_rho * cos_turns(layer.MSLD_phi))
 
     def angle_defined(self, rho):
         """True where the magnetisation |M| = rho (A^-2, array) is large
@@ -349,7 +514,9 @@ class Stack:
     def _slab_matrices(nsld, rho, theta, d, Q):
         """4x4 matrices of many homogeneous slabs at once.
 
-        nsld (complex), rho, theta (turns), d: arrays of length nS.
+        nsld (complex), rho (the IN-PLANE magnetic SLD, see HALPERIN),
+        theta (turns), d:
+        arrays of length nS.
         Returns shape (nS, nQ, 4, 4).  Majkrzak Eq. 1.128 (Table 1.2, Np_z = 0).
         """
         nsld = np.asarray(nsld, dtype=complex)[:, None]
@@ -387,48 +554,37 @@ class Stack:
         M[0, 3] = muc * tm
         return np.ascontiguousarray(M.transpose(2, 3, 0, 1))
 
-    @staticmethod
-    def layer_matrix(layer, Q):
-        """4x4 matrix of one homogeneous slab.  Returns shape (nQ, 4, 4)."""
-        Q = np.atleast_1d(np.asarray(Q, dtype=float))
-        return Stack._slab_matrices([complex(layer.NSLD_real, layer.NSLD_img)],
-                                    [layer.MSLD_rho], [layer.MSLD_theta],
-                                    [layer.thickness], Q)[0]
-
-    def build_transfer_matrix(self, Q, use_sublayers: bool = True):
-        """Product matrix A = A_N ... A_1 (deepest leftmost).  Shape (nQ,4,4).
-
-        Uses the sliced sublayers when available, else the nominal layers.
-        The fronting and backing are never part of the product; they enter
-        through the boundary condition.
+    def build_transfer_matrix(self, Q):
+        """Product matrix A = A_N ... A_1 (deepest leftmost) of the sliced
+        sublayers.  Shape (nQ,4,4).  The fronting and backing are never part
+        of the product; they enter through the boundary condition.
 
         All slab matrices are built in one vectorised call, then multiplied
         pairwise (tree reduction): ~log2(N) batched matmuls instead of N.
         """
         Q = np.atleast_1d(np.asarray(Q))     # may be complex: only Q**2 is used
-        if use_sublayers:
-            if self.sublayers is None:
-                self.build_sublayers()
-            seq = self.sublayers
-        else:
-            seq = self.layers[1:-1]
+        if self.sublayers is None:
+            self.build_sublayers()
+        seq = self.sublayers
         if not seq:
             M = np.broadcast_to(np.eye(4, dtype=np.complex128),
                                 Q.shape + (4, 4)).copy()
         else:
-            A = self._slab_matrices(
-                [complex(l.NSLD_real, l.NSLD_img) for l in seq],
-                [l.MSLD_rho for l in seq], [l.MSLD_theta for l in seq],
-                [l.thickness for l in seq], Q)   # top -> bottom
-            while len(A) > 1:
-                odd = A[-1:] if len(A) % 2 else None
-                A = A[1::2] @ A[0:len(A) - 1:2]   # deeper on the left
-                if odd is not None:
-                    A = np.concatenate([A, odd])
-            M = A[0]
-        self.transfer_matrix = M
+            slabs = ([complex(l.NSLD_real, l.NSLD_img) for l in seq],
+                     [self.inplane_rho(l) for l in seq],
+                     [l.MSLD_theta for l in seq],
+                     [l.thickness for l in seq])       # top -> bottom
+            M = np.empty(Q.shape + (4, 4), dtype=np.complex128)
+            # blocks of Q small enough for the slab matrices to stay in cache
+            for j in range(0, len(Q), TM_BLOCK):
+                A = self._slab_matrices(*slabs, Q[j:j + TM_BLOCK])
+                while len(A) > 1:
+                    odd = A[-1:] if len(A) % 2 else None
+                    A = A[1::2] @ A[0:len(A) - 1:2]   # deeper on the left
+                    if odd is not None:
+                        A = np.concatenate([A, odd])
+                M[j:j + TM_BLOCK] = A[0]
         return M
-
 
     @staticmethod
     def _surround_K(layer, Q2):
@@ -443,8 +599,9 @@ class Stack:
         Returns K (nQ,2,2) and q+- = sqrt(...) (the Q inside the medium).
         """
         n = layer.NSLD_real + 1j*layer.NSLD_img
-        qp = np.sqrt(Q2 - 16*np.pi*(n + layer.MSLD_rho) + 0j)
-        qm = np.sqrt(Q2 - 16*np.pi*(n - layer.MSLD_rho) + 0j)
+        rho = Stack.inplane_rho(layer)              # HALPERIN
+        qp = np.sqrt(Q2 - 16*np.pi*(n + rho) + 0j)
+        qm = np.sqrt(Q2 - 16*np.pi*(n - rho) + 0j)
         mu = np.exp(2j*np.pi*layer.MSLD_theta)
         a, b = 0.25j*(qp + qm), 0.25j*(qp - qm)
         K = np.empty(np.shape(Q2) + (2, 2), dtype=np.complex128)
@@ -453,21 +610,19 @@ class Stack:
         K[:, 1, 0] = b*mu
         return K, qp, qm
 
-    def lab_axis(self):
-        """Angle (rad) of the lab quantisation axis in the sample plane.
-
-        A magnetic fronting fixes it: only spins along its M propagate as
-        stationary states there, so alpha is overridden by its MSLD_theta.
-        """
+    def fronting_direction(self):
+        """Unit in-plane vector of a magnetic fronting's M, None if the
+        fronting is not magnetic.  Only spins along it propagate as
+        stationary states in the fronting (see POLARISATION)."""
         f = self.fronting
-        return 2*np.pi*f.MSLD_theta if f.MSLD_rho != 0 else self.alpha
+        if self.inplane_rho(f) == 0:
+            return None
+        return np.array([float(cos_turns(f.MSLD_theta)),
+                         float(sin_turns(f.MSLD_theta)), 0.0])
 
     def _reflect(self, Q2):
-        """Reflection matrices for squared vacuum Q.
-
-        Returns r (z basis) and rl (lab basis), both [:, out, in], plus the
-        fronting q+- (lab eigenchannels).
-        """
+        """Reflection matrix r [:, out, in] in the film-normal (z) basis for
+        the squared vacuum Q, plus the fronting's q+- (see _surround_K)."""
         M = self.build_transfer_matrix(np.sqrt(Q2 + 0j))
         A, B = M[:, :2, :2], M[:, :2, 2:]
         C, D = M[:, 2:, :2], M[:, 2:, 2:]
@@ -479,12 +634,7 @@ class Stack:
         X = C - Kb @ A
         Y = (D - Kb @ B) @ Kf
         r = -np.linalg.solve(X - Y, X + Y)
-
-        # lab basis: columns (1, +-e^{i axis})/sqrt(2)
-        e = np.exp(1j*self.lab_axis())
-        U = np.array([[1, 1], [e, -e]]) / np.sqrt(2)
-        Ui = np.array([[1, np.conj(e)], [1, -np.conj(e)]]) / np.sqrt(2)
-        return r, Ui @ r @ U, qf_p, qf_m
+        return r, qf_p, qf_m
 
     def resolution_sigma(self, Q):
         """Standard deviation of the Q resolution at each Q (see RESOLUTION);
@@ -493,28 +643,46 @@ class Stack:
         res = self.resolution
         if not res['enabled']:
             return np.zeros_like(Q)
-        s = np.clip(np.abs(Q) * res['wavelength'] / (4*np.pi), 1e-12, 1.0)
+        mode = res.get('mode', 'mono')
+        if mode not in RESOLUTION_MODES:
+            raise ValueError('unknown resolution mode %r' % (mode,))
         with np.errstate(divide='ignore', invalid='ignore'):
-            rel = np.hypot(res['dtheta'] / np.arcsin(s), res['dlambda_rel'])
-        return np.where(Q != 0, np.abs(Q) * rel, 0.0)
+            sigma = RESOLUTION_MODES[mode](np.abs(Q), res)
+        return np.where(Q != 0, sigma, 0.0)
 
-    def calc_reflectance(self, Q):
-        """Reflectivity + background as calc_reflectance_ideal, averaged over
-        the Q resolution when self.resolution is enabled."""
+    # -- reflectivity -------------------------------------------------------
+    def reflectivity(self, Q, P0, P=None):
+        """reflectivities for the single pair (P0, P), shape (nQ,)."""
+        return self.reflectivities(Q, [(P0, P)])[:, 0]
+
+    def reflectivities(self, Q, pairs, warn=True):
+        """Reflectivity + background of each (P0, P) in pairs (see
+        POLARISATION), averaged over the Q resolution when it is enabled.
+        Shape (nQ, len(pairs)).  warn=False silences the warning about a
+        polarisation transverse to a magnetic fronting's M."""
+        pairs = _check_pairs(pairs)
+        m = self.fronting_direction()
+        if m is None:
+            R = self._resolve(Q, lambda q: self._trace(q, pairs))
+        else:
+            w = self._lab_weights(pairs, m, warn)
+            R = _weigh(self._resolve(Q, self._lab_channels), w)
+        return R + self.background
+
+    def _resolve(self, Q, ideal):
+        """Average ideal(Q) -> (nQ, k) over the Q resolution (see RESOLUTION)."""
         Q = np.atleast_1d(np.asarray(Q, dtype=float))
         sigma = self.resolution_sigma(Q)
         if not np.any(sigma > 0):
-            return self.calc_reflectance_ideal(Q)
+            return ideal(Q)
         x = np.linspace(-RES_SPAN, RES_SPAN, RES_NODES)
         w = np.exp(-0.5 * x**2)
         # reflectivity is even in Q; keep the nodes off Q = 0
         Qn = np.maximum(np.abs(Q[:, None] + x[None, :] * sigma[:, None]), 1e-6)
-        lo, hi = Qn.min(), Qn.max()
-        h = max(sigma[sigma > 0].min() / RES_GRID_STEP,
-                (hi - lo) / (RES_GRID_MAX - 1))
-        grid = np.linspace(lo, hi, int(np.ceil((hi - lo) / h)) + 1)
-        Rg = self.calc_reflectance_ideal(grid)
-        R = np.stack([np.interp(Qn, grid, Rg[:, c]) for c in range(8)], -1)
+        grid = _res_grid(Qn, sigma)
+        Rg = ideal(grid)
+        R = np.stack([np.interp(Qn, grid, Rg[:, c])
+                      for c in range(Rg.shape[1])], -1)
         ok = np.isfinite(R)
         W = np.where(ok, w[None, :, None], 0.0)
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -522,65 +690,94 @@ class Stack:
                             (np.where(ok, R, 0.0) * W).sum(1) / W.sum(1),
                             np.nan)
 
-    def calc_reflectance_ideal(self, Q):
-        """Reflectivity + background, shape (nQ, 8): spin channels
-        (uu, ud, du, dd) then lab channels (++, +-, -+, --); no resolution.
+    def _trace(self, Q, pairs):
+        """Non-magnetic fronting: Tr{rho r rho0 r^+} of every pair from ONE
+        transfer-matrix evaluation, any backing; no background or resolution.
+        Shape (nQ, len(pairs))."""
+        Q = np.atleast_1d(np.asarray(Q, dtype=float))
+        f = self.fronting
+        Q2 = Q**2 + 0j
+        if self.q_in_fronting:
+            Q2 = Q2 + 16*np.pi*(f.NSLD_real + 1j*f.NSLD_img)
+        r = self._reflect(Q2)[0]
+        rho0 = np.stack([_density(P0) for P0, _ in pairs])
+        rho = np.stack([np.eye(2) if P is None else _density(P)
+                        for _, P in pairs])
+        # = einsum('kij,qjl,klm,qim->qk', rho, r, rho0, r*), in a fixed
+        # order so that a pair rounds the same in any batch
+        A = rho[:, None] @ (r[None] @ rho0[:, None])
+        return (A * r.conj()[None]).real.sum((-2, -1)).T
 
-        Channel 'ab' = incident a, reflected b.  Lab channels are along
-        lab_axis() and flux-normalised, R_ab = |r_ab|^2 Re(q_b)/Re(q_a),
-        which is what makes R+- = R-+ with a magnetic fronting.
+    def _lab_channels(self, Q):
+        """Magnetic fronting: the channels ++, +-, -+, -- along its M, no
+        background or resolution.  Shape (nQ, 4).
+
+        Channel 'ab' = incident a, reflected b, flux-normalised:
+        R_ab = |r_ab|^2 Re(q_b)/Re(q_a), which is what makes R+- = R-+.
 
         q_in_fronting False: Q is the vacuum-referenced 2 k0z, common to both
             spins.  Below a fronting critical edge that spin cannot propagate
             in the fronting; its spin-flip channel is NaN there.
         q_in_fronting True: Q is the wavevector transfer inside the fronting,
             as measured through a substrate (Majkrzak Eq. 1.113, GEPORE's
-            QP/QM): each incident lab spin s has its own vacuum
+            QP/QM): each incident spin s has its own vacuum
             Q_s^2 = Q^2 + 16 pi rho_f,s, so the matrices are built once per
-            incident spin.  The spin channels then use the spin-averaged
-            Q^2 + 16 pi rho_f,N.
-
-        Spin channels are |r|^2 in the film-normal basis; they are only
-        meaningful as reflectivities for a non-magnetic fronting.
+            incident spin.
         """
         Q = np.atleast_1d(np.asarray(Q, dtype=float))
         f = self.fronting
         nf = f.NSLD_real + 1j*f.NSLD_img
+        rf = self.inplane_rho(f)                   # HALPERIN
+        # spins along +-M: columns (1, +-e^{i theta})/sqrt(2)
+        e = np.exp(1j*2*np.pi*f.MSLD_theta)
+        U = np.array([[1, 1], [e, -e]]) / np.sqrt(2)
+        Ui = np.array([[1, np.conj(e)], [1, -np.conj(e)]]) / np.sqrt(2)
+
+        def lab(Q2):
+            r, qp, qm = self._reflect(Q2)
+            return Ui @ r @ U, qp, qm
 
         if not self.q_in_fronting:
-            r, rl, qf_p, qf_m = self._reflect(Q**2 + 0j)
-            same = np.isclose(qf_p, qf_m, rtol=1e-12, atol=0.0)
+            rl_p, qf_p, qf_m = lab(Q**2 + 0j)
+            rl_m = rl_p
             with np.errstate(divide='ignore', invalid='ignore'):
-                f_pm = np.where(same, 1.0,
-                                np.where(qf_p.real > 0, qf_m.real/qf_p.real, np.nan))
-                f_mp = np.where(same, 1.0,
-                                np.where(qf_m.real > 0, qf_p.real/qf_m.real, np.nan))
-            r_pp, r_pm = rl[:, 0, 0], rl[:, 1, 0]
-            r_mp, r_mm = rl[:, 0, 1], rl[:, 1, 1]
+                f_pm = np.where(qf_p.real > 0, qf_m.real/qf_p.real, np.nan)
+                f_mp = np.where(qf_m.real > 0, qf_p.real/qf_m.real, np.nan)
         else:
-            r, rl_p, qp_p, qp_m = self._reflect(Q**2 + 16*np.pi*nf)
-            if f.MSLD_rho == 0:              # one vacuum Q serves both spins
-                rl_m, qm_p, qm_m = rl_p, qp_p, qp_m
-            else:
-                _, rl_p, qp_p, qp_m = self._reflect(
-                    Q**2 + 16*np.pi*(nf + f.MSLD_rho))
-                _, rl_m, qm_p, qm_m = self._reflect(
-                    Q**2 + 16*np.pi*(nf - f.MSLD_rho))
+            rl_p, _, qp_m = lab(Q**2 + 16*np.pi*(nf + rf))
+            rl_m, qm_p, _ = lab(Q**2 + 16*np.pi*(nf - rf))
             # the incident channel's q in the fronting is Q itself; the
             # flipped one leaves at a Zeeman-shifted q (0 flux if evanescent)
             f_pm = qp_m.real / Q
             f_mp = qm_p.real / Q
-            r_pp, r_pm = rl_p[:, 0, 0], rl_p[:, 1, 0]
-            r_mp, r_mm = rl_m[:, 0, 1], rl_m[:, 1, 1]
+        return np.stack([np.abs(rl_p[:, 0, 0])**2,
+                         np.abs(rl_p[:, 1, 0])**2 * f_pm,
+                         np.abs(rl_m[:, 0, 1])**2 * f_mp,
+                         np.abs(rl_m[:, 1, 1])**2], axis=-1)
 
-        R_uu = np.abs(r[:, 0, 0])**2
-        R_ud = np.abs(r[:, 1, 0])**2
-        R_du = np.abs(r[:, 0, 1])**2
-        R_dd = np.abs(r[:, 1, 1])**2
-        R_pp = np.abs(r_pp)**2
-        R_pm = np.abs(r_pm)**2 * f_pm
-        R_mp = np.abs(r_mp)**2 * f_mp
-        R_mm = np.abs(r_mm)**2
-
-        return np.stack([R_uu, R_ud, R_du, R_dd, R_pp, R_pm, R_mp, R_mm],
-                        axis=-1) + self.background
+    @staticmethod
+    def _lab_weights(pairs, m, warn=True):
+        """(4, k) weights of the lab channels ++ +- -+ -- along m (a magnetic
+        fronting's M) for each pair: (1 +- P0.m)/2 x (1 +- P.m)/2, or x 1 for
+        no analyser.  Warns once if any pair has a part transverse to m."""
+        w, lost = [], []
+        for k, (P0, P) in enumerate(pairs):
+            a0 = P0 @ m
+            w_in = np.array([(1 + a0)/2, (1 - a0)/2])
+            if P is None:
+                w_out = np.ones(2)
+            else:
+                a1 = P @ m
+                w_out = np.array([(1 + a1)/2, (1 - a1)/2])
+            if any(v is not None and np.linalg.norm(v - (v @ m)*m) > 1e-9
+                   for v in (P0, P)):
+                lost.append(k)
+            w.append(np.outer(w_in, w_out).ravel())
+        if lost and warn:
+            warnings.warn('magnetic fronting: the part of P0 / P transverse '
+                          'to its magnetisation precesses and is averaged '
+                          'out; only the projection on M_f is used (pair(s) '
+                          '%s)' % ', '.join(map(str, lost)), stacklevel=3)
+        w = np.array(w).T
+        # round-off leaves ~1e-17 on a channel that is meant to be dropped
+        return np.where(np.abs(w) < 1e-12, 0.0, w)

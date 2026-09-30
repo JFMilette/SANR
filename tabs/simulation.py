@@ -4,26 +4,32 @@ Simulation tab: build a Stack by hand and look at its profile and reflectivity.
     left  : general parameters beside the layer list (add / remove /
             reorder), property editor of the selected layer below
     right : depth profile on top, reflectivity below, both wide.
-            The profile overlays NSLD / MSLD (left axis) and the magnetic
-            angle (right axis), each toggled by a checkbox:
+            The profile overlays NSLD / MSLD |M| (left axis) and the
+            magnetic angles θ, φ (right axis), each toggled by a checkbox:
             solid line = Stack.profile(z), bars = Stack.build_sublayers(),
             shaded bands = layers (selected one's name in bold, click a band
             to select it), grey verticals = nominal interfaces.
 
 save_model / load_model write / read the stack and Q settings as JSON.
+The Polarisation box links each channel R++, R+-, R-+, R--, R+, R- to an
+incident polarisation Pi and an analysed polarisation Pa (3-vectors in the
+sample frame, length = efficiency, Pa = 0 for no analyser); the plot and
+every dataset that does not set its own use these pairs.
 
 Every edit triggers a debounced recompute.
 """
 
 import html
-import json
 import re
+import warnings
 
 import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from model.stack import Layer, Stack, wrap_turns
+from model.polarisation import (CHANNEL_NAMES, default_vectors, in_plane,
+                                vectors_pair)
+from model.stack import Layer, Stack, cos_turns, wrap_turns
 
 
 SLD_SCALE = 1e-6                      # SLDs are edited / plotted in 1e-6 A^-2
@@ -33,24 +39,27 @@ CH_COLOURS = ['#1f77b4', '#d62728', '#2ca02c', '#ff7f0e']
 HP_COLOURS = ['#1f77b4', '#ff7f0e']    # half-polarized R↑, R↓
 # combo label, axis label, colour
 PROFILE_QUANTITIES = [
-    ('NSLD', 'NSLD real (10⁻⁶ Å⁻²)', '#1f4e79'),
-    ('MSLD', 'MSLD ρ (10⁻⁶ Å⁻²)', '#2a7f62'),
-    ('Magnetic angle', 'MSLD θ (deg)', '#8b5a2b'),
+    ('NSLD', 'NSLD real (10⁻⁶ Å⁻²)', '#5b9bd5'),
+    ('MSLD ρ', 'MSLD ρ = |M| (10⁻⁶ Å⁻²)', '#4fc08d'),
+    ('θ', 'MSLD θ, in plane (deg)', '#e0a458'),
+    ('φ', 'MSLD φ, out of plane (deg)', '#e36fa8'),
 ]
+RIGHT = (2, 3)                        # PROFILE_QUANTITIES on the angle axis
 # combo label, axis label (None = raw reflectivities), formula beside the combo.
-# Channels indexed 0..3 = ↑↑ ↑↓ ↓↑ ↓↓ in the chosen basis.
+# The channels are the Pi / Pa pairs of the Polarisation box.
 REFL_QUANTITIES = [
     ('Reflectivity', None, ''),
-    ('Half-polarized', None, 'R↑ = R↑↑ + R↑↓,   R↓ = R↓↓ + R↓↑'),
-    ('SA NSF', 'SA_NSF', '(R↑↑ − R↓↓) / (R↑↑ + R↓↓)'),
-    ('SF fraction', 'SF fraction', '(R↑↓ + R↓↑) / (R↑↑ + R↑↓ + R↓↑ + R↓↓)'),
-    ('SA SF', 'SA_SF', '(R↑↓ − R↓↑) / (R↑↓ + R↓↑)'),
-    ('SA half-polarized', 'SA',
-     '(R↑ − R↓) / (R↑ + R↓),   R↑ = R↑↑ + R↑↓,  R↓ = R↓↓ + R↓↑'),
+    ('Half-polarized', None, 'R+, R− (Pa = 0: no analyser)'),
+    ('SA NSF', 'SA_NSF', '(R++ − R−−) / (R++ + R−−)'),
+    ('SF fraction', 'SF fraction', '(R+− + R−+) / (R++ + R+− + R−+ + R−−)'),
+    ('SA SF', 'SA_SF', '(R+− − R−+) / (R+− + R−+)'),
+    ('SA half-polarized', 'SA', '(R+ − R−) / (R+ + R−)'),
 ]
-ASYM_COLOUR = '#6a3d9a'
+ASYM_COLOUR = '#b392f0'
+# smallest font for the layer names in the depth profile
+LABEL_MIN_PT = 6
 # layer shading in the depth profile: alternating greys
-BANDS = ['#00000000', '#0000000f']
+BANDS = ['#00000000', '#ffffff0c']
 
 
 def ratio(a, b):
@@ -60,16 +69,57 @@ def ratio(a, b):
 
 
 def refl_quantity(name, R):
-    """Asymmetry `name` of REFL_QUANTITIES from R = [R↑↑, R↑↓, R↓↑, R↓↓]."""
-    uu, ud, du, dd = R
+    """Asymmetry `name` of REFL_QUANTITIES from R = {channel: array}."""
+    uu, ud, du, dd = (R[c] for c in CHANNELS)
     if name == 'SA NSF':
         return ratio(uu - dd, uu + dd)
     if name == 'SF fraction':
         return ratio(ud + du, uu + ud + du + dd)
     if name == 'SA SF':
         return ratio(ud - du, ud + du)
-    up, dn = uu + ud, dd + du
-    return ratio(up - dn, up + dn)
+    return ratio(R['+'] - R['-'], R['+'] + R['-'])
+
+
+def profile_data(st):
+    """Depth profile of a stack with built sublayers, for plotting:
+    ((z, Z, e, curves, slabs), on_bars).  curves are the continuous
+    PROFILE_QUANTITIES at depths z, slabs their value in each slab between
+    the edges e (fronting and backing included, out to the plotted range),
+    Z the interfaces; on_bars[i] is angle curve i restricted to the slabs
+    that have that angle."""
+    Z = st._interfaces()
+    lo = st.windows()[0][0]
+    e = lo + np.concatenate([[0.0], np.cumsum([s.thickness
+                                               for s in st.sublayers])])
+    pad = 0.35 * max(Z[-1], 1.0)
+    z = np.linspace(min(e[0], Z[0] - pad) - 10,
+                    max(e[-1], Z[-1] + pad) + 10, 4000)
+    nsld, rho, theta, phi = st.profile(z)
+    # no angle where there is no magnetisation to point
+    # (st.angle_defined): theta needs an in-plane part, phi any |M|
+    mp = np.abs(rho * cos_turns(phi))
+    curves = [nsld.real / SLD_SCALE, rho / SLD_SCALE,
+              np.where(st.angle_defined(mp), theta * 360.0, np.nan),
+              np.where(st.angle_defined(rho), phi * 360.0, np.nan)]
+    angles_all = {2: theta * 360.0, 3: phi * 360.0}
+    # fronting and backing are semi-infinite: draw them as one bar each
+    # out to the edges of the plotted range
+    e = np.concatenate([[z[0]], e, [z[-1]]])
+    slabs_all = [st.fronting] + list(st.sublayers) + [st.backing]
+    slab_rho = np.array([s.MSLD_rho for s in slabs_all])
+    slab_mp = np.abs([Stack.inplane_rho(s) for s in slabs_all])
+    slab_theta = wrap_turns([s.MSLD_theta for s in slabs_all]) * 360.0
+    slab_phi = np.array([s.MSLD_phi for s in slabs_all]) * 360.0
+    slabs = [np.array([s.NSLD_real / SLD_SCALE for s in slabs_all]),
+             slab_rho / SLD_SCALE,
+             np.where(st.angle_defined(slab_mp), slab_theta, np.nan),
+             np.where(st.angle_defined(slab_rho), slab_phi, np.nan)]
+    # with the bars shown, an angle curve is drawn over exactly the bars
+    # that have that angle, so both start and stop at the same depths
+    k = np.clip(np.searchsorted(e, z, side='right') - 1, 0, len(e) - 2)
+    on_bars = {i: np.where(np.isfinite(slabs[i][k]), angles_all[i], np.nan)
+               for i in RIGHT}
+    return (z, Z, e, curves, slabs), on_bars
 
 
 def make_stack():
@@ -186,10 +236,10 @@ class Crosshair(QtCore.QObject):
         self._pos = None                        # last scene position
         vb = plot.vb
         self.line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(
-            '#444444', width=0.8, style=QtCore.Qt.PenStyle.DashLine))
-        self.text = pg.TextItem(anchor=(0, 1), color='#222222',
-                                fill=pg.mkBrush(255, 255, 255, 225),
-                                border=pg.mkPen('#999999'))
+            '#9aa0a6', width=0.8, style=QtCore.Qt.PenStyle.DashLine))
+        self.text = pg.TextItem(anchor=(0, 1), color='#e3e5e8',
+                                fill=pg.mkBrush(43, 45, 49, 235),
+                                border=pg.mkPen('#55585f'))
         for item in (self.line, self.text):
             item.setZValue(1000)
             vb.addItem(item, ignoreBounds=True)
@@ -220,7 +270,7 @@ class Crosshair(QtCore.QObject):
 
     def _marker(self, vb):
         if vb not in self.markers:
-            m = pg.ScatterPlotItem(size=8, pen=pg.mkPen('w', width=1))
+            m = pg.ScatterPlotItem(size=8, pen=pg.mkPen('#1b1c1f', width=1))
             m.setZValue(999)
             vb.addItem(m, ignoreBounds=True)
             self.markers[vb] = m
@@ -269,20 +319,277 @@ def fmt(v):
     return '—' if not np.isfinite(v) else '%.4g' % v
 
 
+class LayerLabels:
+    """A shaded band and a name (with the thickness) per layer on a depth
+    profile plot.  selected() is the row drawn in bold (-1 for none)."""
+
+    def __init__(self, plot, selected=lambda: -1):
+        self.plot, self.selected = plot, selected
+        self.bands = []                      # one shaded region per layer
+        self.labels = []                     # layer names, pinned to the top
+        self.spans = []                      # (z0, z1, texts) of each label
+        plot.vb.sigYRangeChanged.connect(self.place)
+        plot.vb.sigXRangeChanged.connect(self.fit)
+        plot.vb.sigResized.connect(self.fit)
+
+    def set_layers(self, layers, Z, zlo, zhi):
+        """One band per layer between the interfaces Z; the semi-infinite
+        media run out to zlo / zhi, the edges of the plotted range."""
+        p = self.plot
+        for item in self.bands + self.labels:
+            p.removeItem(item)
+        self.bands, self.labels, self.spans = [], [], []
+        # layer j spans [bounds[j], bounds[j+1]]
+        bounds = np.concatenate([[zlo], Z, [zhi]])
+        n = len(layers)
+        for j, l in enumerate(layers):
+            band = pg.LinearRegionItem((bounds[j], bounds[j + 1]),
+                                       movable=False, pen=pg.mkPen(None))
+            band.setZValue(-100)
+            p.addItem(band, ignoreBounds=True)
+            self.bands.append(band)
+            # thickness goes on a second line so crowded stacks stay legible
+            name = html.escape(l.name)
+            texts = [name] if j in (0, n - 1) else \
+                ['%s<br>%.4g Å' % (name, l.thickness), name]
+            texts = ['<div align="center">%s</div>' % x for x in texts]
+            t = pg.TextItem(html=texts[0], anchor=(0.5, 0))
+            t.setPos(0.5 * (bounds[j] + bounds[j + 1]), 0)
+            p.addItem(t, ignoreBounds=True)
+            self.labels.append(t)
+            self.spans.append((bounds[j], bounds[j + 1], texts))
+        self.style()
+
+    def style(self):
+        """Alternate grey shading per layer; bold the selected layer's name."""
+        sel = self.selected()
+        for j, (band, t) in enumerate(zip(self.bands, self.labels)):
+            brush = pg.mkBrush(BANDS[j % 2])
+            band.setBrush(brush)
+            band.setHoverBrush(brush)
+            font = t.textItem.font()
+            font.setBold(j == sel)
+            t.setFont(font)
+            t.setColor('#e3e5e8' if j == sel else '#9aa0a6')
+        self.fit()
+
+    def fit(self, *_):
+        """Give every layer label the same size and layout: the largest that
+        fits the narrowest band on screen, down to LABEL_MIN_PT, dropping the
+        thickness line first if needed.  Bands too narrow even for that hide
+        their label (except the selected layer's)."""
+        labels, spans = self.labels, self.spans
+        if not labels:
+            return
+        vb = self.plot.vb
+        (x0, x1), _ = vb.viewRange()
+        px = vb.width() / (x1 - x0) if x1 > x0 else 0   # pixels per Å
+        base = QtGui.QFont().pointSizeF()
+        sel = self.selected()
+        margin = 2 * labels[0].textItem.document().documentMargin()
+
+        def measure(t, text):
+            """Text width at the base size, bold, without the margins."""
+            font = t.textItem.font()
+            font.setPointSizeF(base)
+            font.setBold(True)
+            t.setFont(font)
+            t.setHtml(text)
+            t.textItem.setTextWidth(-1)
+            return t.textItem.document().idealWidth() - margin
+
+        # per label: room on screen and width of each variant (0 = name +
+        # thickness, 1 = name only; the media only have the name)
+        rooms, widths = [], []
+        for t, (z0, z1, texts) in zip(labels, spans):
+            rooms.append((min(z1, x1) - max(z0, x0)) * px - 4 - margin)
+            widths.append([measure(t, x) for x in texts])
+
+        # the inner layers are all measured against the widest inner label,
+        # so whether a label fits depends on its band width, not its name
+        n = len(labels)
+        widest = [max((widths[j][k] for j in range(1, n - 1)), default=0)
+                  for k in range(2)]
+
+        def fits(j, k):
+            """Size at which variant k of label j fills its band."""
+            w = widths[j][0] if j in (0, n - 1) else widest[k]
+            return base * min(1.0, 0.95 * rooms[j] / w) if w > 0 else base
+
+        # the inner layers set the common size; on screen ones only
+        inner = [j for j in range(1, n - 1) if rooms[j] > 0] \
+            or [j for j in range(n) if rooms[j] > 0]
+        for k in range(2):
+            size = min((fits(j, k) for j in inner), default=base)
+            if size >= LABEL_MIN_PT:
+                break
+        size = max(size, LABEL_MIN_PT)
+
+        for j, (t, (_, _, texts)) in enumerate(zip(labels, spans)):
+            font = t.textItem.font()
+            font.setPointSizeF(size)
+            font.setBold(j == sel)
+            t.setFont(font)
+            t.setHtml(texts[min(k, len(texts) - 1)])
+            # centring needs a fixed text width; refit it after the font change
+            t.textItem.setTextWidth(-1)
+            t.setTextWidth(t.textItem.document().idealWidth())
+            t.setVisible(bool(fits(j, k) >= size * 0.999) or j == sel)
+
+    def place(self, *_):
+        """Pin the labels to the top of the view."""
+        ytop = self.plot.vb.viewRange()[1][1]
+        for t in self.labels:
+            t.setPos(t.pos().x(), ytop)
+
+
 # ------------------------------------------------------- layer editor ----
 # attr, label, lo, hi, decimals, step, suffix, display = stored * scale
 EDITOR_PARAMS = [
-    ('thickness', 'Thickness (Å)', 0.0, 1e5, 2, 1.0, '', 1.0),
-    ('NSLD_real', 'NSLD real', -100, 100, 4, 0.1, '', 1 / SLD_SCALE),
-    ('NSLD_img', 'NSLD imag', -100, 100, 5, 0.001, '', 1 / SLD_SCALE),
-    ('MSLD_rho', 'MSLD ρ', 0, 100, 4, 0.1, '', 1 / SLD_SCALE),
-    ('MSLD_theta', 'MSLD θ', -360, 360, 2, 5.0, ' °', 360.0),
-    ('roughness_sigma', 'Roughness σ', 0.0, 1e4, 2, 0.5, ' Å', 1.0),
+    ('thickness', 'Thickness (Å)', 0.0, 1e5, 4, 1.0, '', 1.0),
+    ('NSLD_real', 'NSLD real', -100, 100, 6, 0.1, '', 1 / SLD_SCALE),
+    ('NSLD_img', 'NSLD imag', -100, 100, 7, 0.001, '', 1 / SLD_SCALE),
+    ('MSLD_rho', 'MSLD ρ', 0, 100, 6, 0.1, '', 1 / SLD_SCALE),
+    ('MSLD_theta', 'MSLD θ', -360, 360, 4, 5.0, ' °', 360.0),
+    ('MSLD_phi', 'MSLD φ', -90, 90, 4, 5.0, ' °', 360.0),
+    ('roughness_sigma', 'Roughness σ', 0.0, 1e4, 4, 0.5, ' Å', 1.0),
 ]
-OUT_OF_BOUNDS = 'QDoubleSpinBox { background: #ffd6d6 }'
+OUT_OF_BOUNDS = 'QDoubleSpinBox { background: #4a1f22; border: 1px solid #f87171 }'
+RES_MODES = ('mono', 'tof')     # res_mode combo order
+# instrument setups of the fixed-angle mode: name -> (dlambda (A), angles)
+RES_PRESETS = {
+    'Mono (3 angles)': (0.005, [{'theta': 0.006, 'dtheta': 3e-4, 'qmax': 0.04},
+                                {'theta': 0.010, 'dtheta': 5e-4, 'qmax': 0.12},
+                                {'theta': 0.017, 'dtheta': 5e-4,
+                                 'qmax': None}]),
+    'ToF (1 angle)': (0.01, [{'theta': 0.010, 'dtheta': 3e-4, 'qmax': None}]),
+}
 SLIDER_STEPS = 1000             # slider resolution across [Min, Max]
 NSUB_MAX = 1000                 # largest sublayer count
-NSUB_DEFAULT_MAX = 200          # default top of the sublayer slider
+NSUB_DEFAULT_MAX = 50           # default top of the sublayer slider
+
+
+PAIR_TIP = ('Pi: incident polarisation, Pa: analysed polarisation, as '
+            '(x, y, z) in the sample frame\n(x, y in the film plane, z = film '
+            'normal = Q).  |P| is the efficiency (≤ 1).\nPa = (0, 0, 0) means '
+            'no analyser: every reflected spin is counted (R+, R−).\nOnly the '
+            'in-plane part along a magnetic fronting\'s M survives in it.')
+PAIR_COLUMNS = ['Pi x', 'Pi y', 'Pi z', 'Pa x', 'Pa y', 'Pa z']
+
+
+class PairTable(QtWidgets.QTableWidget):
+    """Incident (Pi) and analysed (Pa) polarisation of named channels, three
+    components each (see PAIR_TIP).  With follow=True each row starts with a
+    check box: ticked = use the Simulation tab's pair (vectors() gives None
+    for that row)."""
+
+    changed = QtCore.pyqtSignal()
+
+    def __init__(self, names, follow=False):
+        super().__init__(len(names), len(PAIR_COLUMNS) + bool(follow))
+        self.names, self.follow = list(names), bool(follow)
+        self._fallback = default_vectors()
+        off = int(self.follow)
+        self.setHorizontalHeaderLabels(
+            (['Same as Simulation'] if follow else []) + PAIR_COLUMNS)
+        self.setVerticalHeaderLabels(['R' + n for n in self.names])
+        self.setToolTip(PAIR_TIP)
+        self.spins, self.checks = [], []
+        # values filled in by set_vectors, returned exactly (the boxes show
+        # 4 decimals) until that box is edited: cos 0.7 stays cos 0.7
+        self._exact = [[None] * len(PAIR_COLUMNS) for _ in self.names]
+        for r in range(len(self.names)):
+            row = []
+            for c in range(len(PAIR_COLUMNS)):
+                sb = dspin(-1, 1, 4, 0.1)
+                sb.setButtonSymbols(
+                    QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
+                sb.setFrame(False)
+                sb.valueChanged.connect(
+                    lambda _, r=r, c=c: self._edited(r, c))
+                self.setCellWidget(r, c + off, sb)
+                row.append(sb)
+            self.spins.append(row)
+            if follow:
+                cb = QtWidgets.QCheckBox()
+                cb.toggled.connect(lambda on, r=r: self._follow(r, on))
+                self.setCellWidget(r, 0, cb)
+                self.checks.append(cb)
+        self.horizontalHeader().setSectionResizeMode(
+            QtWidgets.QHeaderView.ResizeMode.Stretch)
+        if follow:
+            self.horizontalHeader().setSectionResizeMode(
+                0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.verticalHeader().setDefaultSectionSize(
+            self.fontMetrics().height() + 8)
+        self.setVerticalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setFixedHeight(self.horizontalHeader().sizeHint().height()
+                            + len(self.names)
+                            * self.verticalHeader().defaultSectionSize() + 4)
+        self.set_vectors(default_vectors())
+
+    def _edited(self, r, c):
+        self._exact[r][c] = None
+        self._check()
+        self.changed.emit()
+
+    def _row(self, r):
+        return [w.value() if x is None else x
+                for w, x in zip(self.spins[r], self._exact[r])]
+
+    def _check(self):
+        """Red for a vector longer than 1 (not a physical polarisation)."""
+        for r, row in enumerate(self.spins):
+            v = self._row(r)
+            for vec, val in ((row[:3], v[:3]), (row[3:], v[3:])):
+                bad = np.linalg.norm(val) > 1 + 1e-9
+                for w in vec:
+                    w.setStyleSheet(OUT_OF_BOUNDS if bad else '')
+                    w.setToolTip('|P| > 1' if bad else '')
+
+    def _follow(self, r, on):
+        for w in self.spins[r]:
+            w.setEnabled(not on)
+        if on:
+            self._fill(r, self._fallback[self.names[r]])
+        self.changed.emit()
+
+    def _fill(self, r, vec):
+        vals = [float(v) for v in list(vec[0]) + list(vec[1])]
+        for w, v in zip(self.spins[r], vals):
+            w.blockSignals(True)
+            w.setValue(v)
+            w.blockSignals(False)
+        self._exact[r] = vals
+
+    def set_vectors(self, vectors, fallback=None):
+        """vectors: {channel: [Pi, Pa] or None (follow)}; fallback: the
+        Simulation tab's vectors, shown on followed rows."""
+        if fallback is not None:
+            self._fallback = fallback
+        for r, n in enumerate(self.names):
+            vec = vectors.get(n)
+            if self.follow:
+                self.checks[r].blockSignals(True)
+                self.checks[r].setChecked(vec is None)
+                self.checks[r].blockSignals(False)
+                for w in self.spins[r]:
+                    w.setEnabled(vec is not None)
+            self._fill(r, self._fallback[n] if vec is None else vec)
+        self._check()
+        self.changed.emit()
+
+    def vectors(self):
+        """{channel: [Pi, Pa]}, None for a followed row."""
+        out = {}
+        for r, n in enumerate(self.names):
+            if self.follow and self.checks[r].isChecked():
+                out[n] = None
+            else:
+                v = self._row(r)
+                out[n] = [v[:3], v[3:]]
+        return out
 
 
 class LayerEditor(QtWidgets.QGroupBox):
@@ -343,6 +650,11 @@ class LayerEditor(QtWidgets.QGroupBox):
         self.rows['MSLD_theta'][4].setToolTip(
             'θ_M: in-plane angle of M from the sample x axis towards y '
             '(Majkrzak Fig. 1.14)')
+        self.rows['MSLD_rho'][4].setToolTip(
+            'ρ_M = |M|, including any out-of-plane part')
+        self.rows['MSLD_phi'][4].setToolTip(
+            'φ_M: elevation of M out of the film plane (+90° = +z). Only '
+            'ρ cos φ is seen by neutrons (Halperin)')
 
         g = QtWidgets.QGridLayout(self)
         g.setColumnStretch(1, 1)
@@ -453,13 +765,14 @@ class LayerEditor(QtWidgets.QGroupBox):
         sl.blockSignals(False)
 
     def _check_bounds(self):
-        """Grey out the bounds of fixed parameters; flag varied values that
-        lie outside [Min, Max] or an empty range."""
+        """Flag varied values that lie outside [Min, Max] or an empty range.
+        The bounds stay editable when the parameter is fixed (they also span
+        its slider)."""
         for attr, (val, bmin, bmax, cb, lab) in self.rows.items():
             row_on = lab.isEnabled()
             vary = cb.isChecked()
-            bmin.setEnabled(row_on and vary)
-            bmax.setEnabled(row_on and vary)
+            bmin.setEnabled(row_on)
+            bmax.setEnabled(row_on)
             self.sliders[attr].setEnabled(
                 row_on and bmin.value() < bmax.value())
             bad = row_on and vary and not (
@@ -497,7 +810,8 @@ class SimulationTab(QtWidgets.QWidget):
     def __init__(self, stack=None, parent=None):
         super().__init__(parent)
         self.stack = stack if stack is not None else make_stack()
-        self.last_Q = self.last_R = None     # latest calc_reflectance result
+        self.last_Q = self.last_R = None     # latest Q, {channel: R}
+        self._refl_note = ''                 # warning of the last reflectivity
         self._profile = None        # (z, edges, [curves], [slab values])
 
         self._timer = QtCore.QTimer(self, singleShot=True, interval=120)
@@ -540,13 +854,6 @@ class SimulationTab(QtWidgets.QWidget):
         self.qmax.setValue(0.25)
         self.nq.setValue(400)
         self.tail.setValue(self.stack.tail)
-        self.alpha = dspin(-360, 360, 2, 5.0, ' °')
-        self.alpha.setValue(np.degrees(self.stack.alpha))
-        self.alpha.setToolTip('In-plane polarisation azimuth α from sample x '
-                              '(Majkrzak Fig. 1.14 axes) defining the lab '
-                              'channels (++ +- -+ --).\nα = 90° is P ∥ y '
-                              '(GEPORE EPS = 3π/2); ignored when the fronting '
-                              'is magnetic.')
 
         self.background = SciSpinBox()
         self.background.setValue(self.stack.background)
@@ -561,9 +868,6 @@ class SimulationTab(QtWidgets.QWidget):
             'vacuum Q.\nUnchecked: Q is the vacuum-referenced 2k0z, common to '
             'both spins.')
 
-        self.basis = QtWidgets.QComboBox()
-        self.basis.addItems(['lab (++ +- -+ --)', 'spin (uu ud du dd)'])
-
         self.msmear = QtWidgets.QComboBox()
         self.msmear.addItems(['vector (roughness)', 'angle (twist)'])
         self.msmear.setCurrentIndex(
@@ -575,7 +879,8 @@ class SimulationTab(QtWidgets.QWidget):
             'fades |M|, its θ has no effect.\n'
             'angle: ρ and θ are smeared separately, so M turns towards the '
             'next layer\'s θ\n  over the roughness width (magnetic twist); a '
-            'non-magnetic layer\'s θ then matters.')
+            'non-magnetic layer\'s θ then matters; φ is interpolated the '
+            'same way.')
 
         # instrumental resolution, Gaussian in Q (see model.stack RESOLUTION)
         res = self.stack.resolution
@@ -583,8 +888,16 @@ class SimulationTab(QtWidgets.QWidget):
         self.res_on.setChecked(res['enabled'])
         self.res_on.setToolTip(
             'Average the reflectivity over a Gaussian in Q of standard '
-            'deviation\nσ_Q = Q·√((Δθ/θ)² + (Δλ/λ)²),  θ = asin(Qλ/4π)\n'
-            '(Licorne resolution.m, MONO mode).')
+            'deviation\nσ_Q = Q·√((Δθ/θ)² + (Δλ/λ)²).')
+        self.res_mode = QtWidgets.QComboBox()
+        self.res_mode.addItems(['fixed λ', 'fixed θ per Q band'])
+        self.res_mode.setCurrentIndex(RES_MODES.index(res['mode']))
+        self.res_mode.setToolTip(
+            'fixed λ: one wavelength, angle scan, θ = asin(Qλ/4π) '
+            '(Licorne resolution.m, MONO mode).\n'
+            'fixed θ per Q band: one or more fixed angles, each used over a '
+            'Q band, λ = 4π sin θ / Q\n(presets: Mono with 3 angles, ToF '
+            'with 1).')
         self.res_lambda = dspin(0.1, 50, 3, 0.1, ' Å')
         self.res_lambda.setValue(res['wavelength'])
         self.res_lambda.setToolTip('Neutron wavelength λ')
@@ -595,51 +908,102 @@ class SimulationTab(QtWidgets.QWidget):
         self.res_dtheta = dspin(0, 100, 3, 0.05, ' mrad')
         self.res_dtheta.setValue(1e3 * res['dtheta'])
         self.res_dtheta.setToolTip('Angular spread Δθ (standard deviation)')
+        self.res_tof_dl = dspin(0, 1, 4, 0.001, ' Å')
+        self.res_tof_dl.setValue(res['tof_dlambda'])
+        self.res_tof_dl.setToolTip('Absolute wavelength spread Δλ '
+                                   '(standard deviation), the same at every λ')
+        self.res_tof = QtWidgets.QTableWidget(0, 3)
+        self.res_tof.setHorizontalHeaderLabels(
+            ['θ (mrad)', 'Δθ (mrad)', 'Q max (Å⁻¹)'])
+        self.res_tof.horizontalHeader().setSectionResizeMode(
+            QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.res_tof.verticalHeader().setDefaultSectionSize(
+            self.res_tof.fontMetrics().height() + 6)
+        self.res_tof.setFixedHeight(5 * (self.res_tof.fontMetrics().height()
+                                         + 6) + 4)
+        self.res_tof.setToolTip(
+            'One row per angle, in increasing Q.  Row i is used from the '
+            'previous row\'s Q max up to its own;\nthe last row is '
+            'open-ended.')
+        self._set_tof_angles(res['tof_angles'])
+        self.res_tof.itemChanged.connect(self.schedule)
+        tof_add = QtWidgets.QPushButton('+')
+        tof_del = QtWidgets.QPushButton('−')
+        for b in (tof_add, tof_del):          # as narrow as the style allows
+            b.setFixedWidth(b.sizeHint().width())
+        tof_add.setToolTip('Add an angle after the last one')
+        tof_del.setToolTip('Remove the selected angle')
+        tof_add.clicked.connect(self._add_tof_angle)
+        self.res_preset = QtWidgets.QComboBox()
+        self.res_preset.addItems(['Preset…'] + list(RES_PRESETS))
+        self.res_preset.setToolTip('Fill Δλ and the angle table with a '
+                                   'known instrument setup')
+        self.res_preset.activated.connect(self._apply_res_preset)
+        tof_del.clicked.connect(self._del_tof_angle)
 
         f.setVerticalSpacing(3)
         qrange = QtWidgets.QHBoxLayout()
         qrange.addWidget(self.qmin, 1)
+        qrange.addSpacing(6)
         qrange.addWidget(QtWidgets.QLabel('–'))
+        qrange.addSpacing(6)
         qrange.addWidget(self.qmax, 1)
         f.addRow('Q (Å⁻¹)', qrange)
         f.addRow('Q points', self.nq)
         f.addRow('Window tail', self.tail)
         f.addRow('Background', self.background)
         f.addRow('Q reference', self.q_fronting)
-        f.addRow('Basis', self.basis)
-        f.addRow('Polarisation α', self.alpha)
         f.addRow('M smearing', self.msmear)
         resrow = QtWidgets.QHBoxLayout()
         resrow.addWidget(self.res_on)
+        resrow.addSpacing(10)
+        resrow.addWidget(self.res_mode, 1)
+        f.addRow('Resolution', resrow)
+
+        # one page of parameters per mode, in RES_MODES order
+        mono = QtWidgets.QWidget()
+        mrow = QtWidgets.QHBoxLayout(mono)
+        mrow.setContentsMargins(0, 0, 0, 0)
         for lab, w in (('λ', self.res_lambda), ('Δλ/λ', self.res_dlambda),
                        ('Δθ', self.res_dtheta)):
-            resrow.addWidget(QtWidgets.QLabel(lab))
-            resrow.addWidget(w, 1)
-        f.addRow('Resolution', resrow)
-        for w in (self.qmin, self.qmax, self.tail, self.alpha,
+            mrow.addSpacing(10)
+            mrow.addWidget(QtWidgets.QLabel(lab))
+            mrow.addSpacing(4)
+            mrow.addWidget(w, 1)
+        tof = QtWidgets.QWidget()
+        tg = QtWidgets.QGridLayout(tof)
+        tg.setContentsMargins(0, 0, 0, 0)
+        tg.addWidget(QtWidgets.QLabel('Δλ'), 0, 0)
+        tg.addWidget(self.res_tof_dl, 0, 1)
+        tg.addWidget(tof_add, 0, 2)
+        tg.addWidget(tof_del, 0, 3)
+        tg.addWidget(self.res_preset, 0, 4)
+        tg.addWidget(self.res_tof, 1, 0, 1, 5)
+        tg.setColumnStretch(1, 1)
+        self.res_pages = QtWidgets.QStackedWidget()
+        self.res_pages.addWidget(mono)
+        self.res_pages.addWidget(tof)
+        f.addRow(self.res_pages)
+
+        for w in (self.qmin, self.qmax, self.tail,
                   self.background, self.res_lambda, self.res_dlambda,
-                  self.res_dtheta):
+                  self.res_dtheta, self.res_tof_dl):
             w.valueChanged.connect(self.schedule)
         self.nq.valueChanged.connect(self.schedule)
-        self.basis.currentIndexChanged.connect(self.schedule)
         self.msmear.currentIndexChanged.connect(self.schedule)
         self.q_fronting.toggled.connect(self.schedule)
         self.res_on.toggled.connect(self._sync_resolution)
+        self.res_mode.currentIndexChanged.connect(self._sync_resolution)
         self._sync_resolution()
-
-        # general parameters and layer list side by side
-        top = QtWidgets.QHBoxLayout()
-        top.addWidget(gen)
-        v.addLayout(top)
 
         # layer list
         lay = QtWidgets.QGroupBox('Layers (top → bottom)')
         lv = QtWidgets.QVBoxLayout(lay)
         self.list = QtWidgets.QListWidget()
-        # take the height of the general box beside it, not its own default
+        # a few rows; the tool box below takes the rest of the height
         self.list.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
-                                QtWidgets.QSizePolicy.Policy.Ignored)
-        self.list.setMinimumHeight(80)
+                                QtWidgets.QSizePolicy.Policy.Fixed)
+        self.list.setFixedHeight(7 * self.list.fontMetrics().height() + 16)
         self.list.currentRowChanged.connect(self._on_select)
         self.list.setDragDropMode(
             QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
@@ -664,17 +1028,69 @@ class SimulationTab(QtWidgets.QWidget):
         self.btn_up.clicked.connect(lambda: self.move_layer(-1))
         self.btn_dn.clicked.connect(lambda: self.move_layer(+1))
         lv.addLayout(row)
-        top.addWidget(lay, 1)
+        v.addWidget(lay)
+
+        # polarisation of every channel: Pi, Pa pairs
+        pol = QtWidgets.QGroupBox('Polarisation (Pi incident, Pa analysed)')
+        pv = QtWidgets.QVBoxLayout(pol)
+        self.pol = PairTable(CHANNEL_NAMES)
+        self.pol.changed.connect(self.schedule)
+        pv.addWidget(self.pol)
+        fill = QtWidgets.QHBoxLayout()
+        fill.addWidget(QtWidgets.QLabel('Fill ±P in plane at'))
+        self.fill_angle = dspin(-360, 360, 2, 5.0, ' °')
+        self.fill_angle.setToolTip('Angle from sample x towards y')
+        fill.addWidget(self.fill_angle)
+        b = QtWidgets.QPushButton('Fill')
+        b.setToolTip('Set every row to ±P along this in-plane direction '
+                     '(Pa = 0 for R+ / R−)')
+        b.clicked.connect(lambda: self.pol.set_vectors(default_vectors(
+            in_plane(np.radians(self.fill_angle.value())))))
+        fill.addWidget(b)
+        b = QtWidgets.QPushButton('Along fronting M')
+        b.setToolTip('Set every row to ±P along the fronting\'s in-plane M '
+                     '(sample x if the fronting is not magnetic)')
+        b.clicked.connect(self._fill_along_fronting)
+        fill.addWidget(b)
+        fill.addStretch(1)
+        pv.addLayout(fill)
 
         self.editor = LayerEditor()
         self.editor.changed.connect(self._on_layer_edit)
-        v.addWidget(self.editor)
+
+        # one collapsible page open at a time keeps the column short; QToolBox
+        # scrolls a page that is taller than the room left
+        self.toolbox = QtWidgets.QToolBox()
+        width = 0
+        for box, title in ((self.editor, 'Layer properties'),
+                           (gen, 'General parameters'), (pol, 'Polarisation')):
+            box.setTitle('')                  # the page tab carries it
+            box.setFlat(True)
+            page = QtWidgets.QWidget()          # box at the top, not centred
+            pl = QtWidgets.QVBoxLayout(page)
+            pl.setContentsMargins(0, 0, 0, 0)
+            pl.addWidget(box)
+            pl.addStretch(1)
+            self.toolbox.addItem(page, title)
+            width = max(width, page.minimumSizeHint().width())
+        # never narrower than a page plus a vertical scroll bar: no
+        # horizontal scrolling
+        self.toolbox.setMinimumWidth(
+            width + self.style().pixelMetric(
+                QtWidgets.QStyle.PixelMetric.PM_ScrollBarExtent) + 4)
+        v.addWidget(self.toolbox, 1)
 
         self.status = QtWidgets.QLabel()
         self.status.setWordWrap(True)
         v.addWidget(self.status)
-        v.addStretch(1)
         return panel
+
+    def _fill_along_fronting(self):
+        """Every row along the fronting's in-plane M (sample x if the
+        fronting is not magnetic)."""
+        m = self.stack.fronting_direction()
+        self.pol.set_vectors(default_vectors(in_plane(0.0) if m is None
+                                             else m))
 
     # -- plots --------------------------------------------------------------
     def _build_profile_plot(self):
@@ -706,7 +1122,7 @@ class SimulationTab(QtWidgets.QWidget):
         p.showAxis('right')
         p.scene().addItem(self.prof_vb2)
         p.getAxis('right').linkToView(self.prof_vb2)
-        p.getAxis('right').setLabel(PROFILE_QUANTITIES[2][1])
+        p.getAxis('right').setLabel('MSLD θ, φ (deg)')
         p.getAxis('right').enableAutoSIPrefix(False)
         self.prof_vb2.setXLink(p)
 
@@ -721,7 +1137,7 @@ class SimulationTab(QtWidgets.QWidget):
                                    brush=pg.mkBrush(col + '33'),
                                    pen=pg.mkPen(col, width=0.6))
             curve = pg.PlotDataItem(pen=pg.mkPen(col, width=2))
-            if i == 2:
+            if i in RIGHT:
                 self.prof_vb2.addItem(bars)
                 self.prof_vb2.addItem(curve)
                 # the CSV exporter only walks PlotItem.items; register the
@@ -736,11 +1152,10 @@ class SimulationTab(QtWidgets.QWidget):
             self.prof_bars.append(bars)
             self.prof_curves.append(curve)
         p.addItem(pg.InfiniteLine(
-            pos=0, angle=0, pen=pg.mkPen('#bbbbbb', width=0.7)))
+            pos=0, angle=0, pen=pg.mkPen('#4b4e55', width=0.7)))
         self.prof_decor = []                 # interface lines
-        self.prof_bands = []                 # one shaded region per layer
-        self.prof_labels = []                # layer names, pinned to the top
-        p.vb.sigYRangeChanged.connect(self._place_layer_labels)
+        # band and name of each layer; the list is built further down
+        self.prof_layers = LayerLabels(p, lambda: self.list.currentRow())
         p.scene().sigMouseClicked.connect(self._on_profile_click)
         self.prof_cursor = Crosshair(w, p, self._profile_readout)
         v.addWidget(w)
@@ -758,7 +1173,7 @@ class SimulationTab(QtWidgets.QWidget):
         self.refl_quantity.currentIndexChanged.connect(self.schedule)
         bar.addWidget(self.refl_quantity)
         self.refl_formula = QtWidgets.QLabel()
-        self.refl_formula.setStyleSheet('color: #555555')
+        self.refl_formula.setStyleSheet('color: #9aa0a6')
         bar.addWidget(self.refl_formula)
         bar.addStretch(1)
         self.logy = QtWidgets.QCheckBox('log R')
@@ -783,7 +1198,7 @@ class SimulationTab(QtWidgets.QWidget):
         self.asym_curve = self.refl_plot.plot(
             pen=pg.mkPen(ASYM_COLOUR, width=1.8), connect='finite')
         self.asym_zero = pg.InfiniteLine(
-            pos=0, angle=0, pen=pg.mkPen('#bbbbbb', width=0.7))
+            pos=0, angle=0, pen=pg.mkPen('#4b4e55', width=0.7))
         self.refl_plot.addItem(self.asym_zero)
         self._refl_shown = []               # [(curve, name, Q, y)] on screen
         self._refl_log = False
@@ -814,11 +1229,14 @@ class SimulationTab(QtWidgets.QWidget):
         ok = 0 <= row < n
         self.editor.load(self.stack.layers[row] if ok else None,
                          row == 0, row == n - 1)
+        self.toolbox.setItemText(0, 'Layer properties — %s'
+                                 % self.stack.layers[row].name if ok
+                                 else 'Layer properties')
         interior = ok and 0 < row < n - 1
         self.btn_del.setEnabled(interior)
         self.btn_up.setEnabled(interior and row > 1)
         self.btn_dn.setEnabled(interior and row < n - 2)
-        self._style_bands()
+        self.prof_layers.style()
 
     def add_layer(self):
         row = self.list.currentRow()
@@ -892,65 +1310,132 @@ class SimulationTab(QtWidgets.QWidget):
     def recompute(self):
         try:
             self.stack.tail = self.tail.value()
-            self.stack.alpha = np.radians(self.alpha.value())
             self.stack.background = self.background.value()
             self.stack.q_in_fronting = self.q_fronting.isChecked()
             self.stack.magnetic_smearing = ('vector', 'angle')[
                 self.msmear.currentIndex()]
+            mode = RES_MODES[self.res_mode.currentIndex()]
             self.stack.resolution.update(
-                enabled=self.res_on.isChecked(),
+                enabled=self.res_on.isChecked(), mode=mode,
                 wavelength=self.res_lambda.value(),
                 dlambda_rel=self.res_dlambda.value() / 100,
-                dtheta=self.res_dtheta.value() / 1e3)
+                dtheta=self.res_dtheta.value() / 1e3,
+                tof_dlambda=self.res_tof_dl.value())
+            if mode == 'tof':
+                self.stack.resolution['tof_angles'] = self._tof_angles()
             self.stack.build_sublayers()
             self._compute_profile()
             self._show_profile()
             self._draw_reflectance()
-            self.status.setText('%d layers, %d sublayers' %
-                                (len(self.stack.layers), len(self.stack.sublayers)))
+            text = '%d layers, %d sublayers' % (len(self.stack.layers),
+                                                len(self.stack.sublayers))
+            if self._refl_note:
+                text += ('<br><span style="color:#f87171">%s</span>'
+                         % html.escape(self._refl_note))
+            self.status.setText(text)
             self.status.setStyleSheet('')
             self.prof_cursor.refresh()
             self.refl_cursor.refresh()
             self.reflectanceChanged.emit()
         except Exception as exc:                      # keep the UI alive
             self.status.setText('Error: %s' % exc)
-            self.status.setStyleSheet('color: #b00020')
+            self.status.setStyleSheet('color: #f87171')
 
     def _sync_resolution(self, *_):
         on = self.res_on.isChecked()
-        for w in (self.res_lambda, self.res_dlambda, self.res_dtheta):
-            w.setEnabled(on)
+        self.res_mode.setEnabled(on)
+        self.res_pages.setCurrentIndex(self.res_mode.currentIndex())
+        self.res_pages.setEnabled(on)
+        self.schedule()
+
+    # -- TOF angle table (mrad in the table, rad in the model) ---------------
+    def _set_tof_angles(self, angles):
+        t = self.res_tof
+        t.blockSignals(True)
+        t.setRowCount(0)
+        for a in angles:
+            r = t.rowCount()
+            t.insertRow(r)
+            for c, v in enumerate((1e3 * a['theta'], 1e3 * a['dtheta'],
+                                   a['qmax'])):
+                t.setItem(r, c, QtWidgets.QTableWidgetItem(
+                    '' if v is None else '%g' % v))
+        self._mark_last_tof_row()
+        t.blockSignals(False)
+
+    def _mark_last_tof_row(self):
+        """Every Q max is editable except the last row's (open-ended)."""
+        t = self.res_tof
+        editable = QtCore.Qt.ItemFlag.ItemIsEditable
+        for r in range(t.rowCount()):
+            it = t.item(r, 2)
+            if it is None:
+                it = QtWidgets.QTableWidgetItem('')
+                t.setItem(r, 2, it)
+            last = r == t.rowCount() - 1
+            it.setFlags(it.flags() & ~editable if last else
+                        it.flags() | editable)
+            if last:
+                it.setText('∞')
+            elif it.text() == '∞':
+                it.setText('')
+
+    def _tof_angles(self):
+        t = self.res_tof
+        out = []
+        for r in range(t.rowCount()):
+            last = r == t.rowCount() - 1
+            vals = []
+            for c in range(2 if last else 3):
+                it = t.item(r, c)
+                try:
+                    vals.append(float(it.text()))
+                except (AttributeError, ValueError):
+                    raise ValueError('TOF angle %d: %s is not a number'
+                                     % (r + 1, t.horizontalHeaderItem(c)
+                                        .text())) from None
+            out.append({'theta': vals[0] / 1e3, 'dtheta': vals[1] / 1e3,
+                        'qmax': None if last else vals[2]})
+        return out
+
+    def _apply_res_preset(self, i):
+        if i <= 0:
+            return
+        dl, angles = RES_PRESETS[self.res_preset.itemText(i)]
+        self.res_preset.setCurrentIndex(0)
+        self.res_tof_dl.setValue(dl)          # schedules the recompute
+        self._set_tof_angles(angles)
+        self.schedule()
+
+    def _add_tof_angle(self):
+        t = self.res_tof
+        t.blockSignals(True)
+        r = t.rowCount()
+        t.insertRow(r)
+        if r:                                   # continue from the old last
+            prev = [t.item(r - 1, c).text() for c in range(2)]
+            t.item(r - 1, 2).setText('')
+            for c, v in enumerate(prev):
+                t.setItem(r, c, QtWidgets.QTableWidgetItem(v))
+        self._mark_last_tof_row()
+        t.blockSignals(False)
+        if r:                                   # its Q max is now needed
+            t.editItem(t.item(r - 1, 2))
+        self.schedule()
+
+    def _del_tof_angle(self):
+        t = self.res_tof
+        if t.rowCount() <= 1:
+            return
+        r = t.currentRow()
+        t.blockSignals(True)
+        t.removeRow(r if r >= 0 else t.rowCount() - 1)
+        self._mark_last_tof_row()
+        t.blockSignals(False)
         self.schedule()
 
     def _compute_profile(self):
-        st = self.stack
-        Z = st._interfaces()
-        lo = st.windows()[0][0]
-        e = lo + np.concatenate([[0.0], np.cumsum([s.thickness
-                                                   for s in st.sublayers])])
-        pad = 0.35 * max(Z[-1], 1.0)
-        z = np.linspace(min(e[0], Z[0] - pad) - 10,
-                        max(e[-1], Z[-1] + pad) + 10, 4000)
-        nsld, rho, theta = st.profile(z)
-        # no angle where there is no magnetisation to point (st.angle_defined)
-        curves = [nsld.real / SLD_SCALE, rho / SLD_SCALE,
-                  np.where(st.angle_defined(rho), theta * 360.0, np.nan)]
-        theta_all = theta * 360.0
-        # fronting and backing are semi-infinite: draw them as one bar each
-        # out to the edges of the plotted range
-        e = np.concatenate([[z[0]], e, [z[-1]]])
-        slabs_all = [st.fronting] + list(st.sublayers) + [st.backing]
-        slab_rho = np.array([s.MSLD_rho for s in slabs_all])
-        slab_theta = wrap_turns([s.MSLD_theta for s in slabs_all]) * 360.0
-        slabs = [np.array([s.NSLD_real / SLD_SCALE for s in slabs_all]),
-                 slab_rho / SLD_SCALE,
-                 np.where(st.angle_defined(slab_rho), slab_theta, np.nan)]
-        # with the bars shown, the angle curve is drawn over exactly the bars
-        # that have an angle, so both start and stop at the same depths
-        k = np.clip(np.searchsorted(e, z, side='right') - 1, 0, len(e) - 2)
-        self._theta_on_bars = np.where(np.isfinite(slabs[2][k]), theta_all,
-                                       np.nan)
-        self._profile = (z, Z, e, curves, slabs)
+        self._profile, self._on_bars = profile_data(self.stack)
 
     def _show_profile(self, *_):
         """Draw the checked quantities from the cached profile."""
@@ -961,7 +1446,7 @@ class SimulationTab(QtWidgets.QWidget):
         show_bars = self.prof_show_bars.isChecked()
 
         if show_bars:
-            curves = curves[:2] + [self._theta_on_bars]
+            curves = [self._on_bars.get(i, c) for i, c in enumerate(curves)]
         for i, cb in enumerate(self.prof_boxes):
             on = cb.isChecked()
             self.prof_curves[i].setData(z, curves[i], connect='finite')
@@ -970,62 +1455,24 @@ class SimulationTab(QtWidgets.QWidget):
             self.prof_bars[i].setOpts(x0=e[:-1], width=np.diff(e),
                                       height=np.nan_to_num(slabs[i]), y0=0)
             self.prof_bars[i].setVisible(on and show_bars)
-        angle_on = self.prof_boxes[2].isChecked()
-        p.showAxis('right', angle_on)
-        p.showAxis('left', any(cb.isChecked() for cb in self.prof_boxes[:2]))
+        p.showAxis('right', any(self.prof_boxes[i].isChecked() for i in RIGHT))
+        p.showAxis('left', any(cb.isChecked() for i, cb in
+                               enumerate(self.prof_boxes) if i not in RIGHT))
 
-        for item in self.prof_decor + self.prof_bands + self.prof_labels:
+        for item in self.prof_decor:
             p.removeItem(item)
-        self.prof_decor, self.prof_bands, self.prof_labels = [], [], []
-        line = pg.mkPen('#888888', width=1)
+        self.prof_decor = []
+        line = pg.mkPen('#62666d', width=1)
         for Zj in Z:
             ln = pg.InfiniteLine(pos=Zj, angle=90, pen=line)
             ln.setZValue(-50)
             p.addItem(ln)
             self.prof_decor.append(ln)
-        # layer j spans [bounds[j], bounds[j+1]]; the semi-infinite media
-        # run to the edges of the plotted range
-        bounds = np.concatenate([[z[0]], Z, [z[-1]]])
-        n = len(self.stack.layers)
-        for j, l in enumerate(self.stack.layers):
-            band = pg.LinearRegionItem((bounds[j], bounds[j + 1]),
-                                       movable=False, pen=pg.mkPen(None))
-            band.setZValue(-100)
-            p.addItem(band, ignoreBounds=True)
-            self.prof_bands.append(band)
-            # thickness goes on a second line so crowded stacks stay legible
-            text = html.escape(l.name) if j in (0, n - 1) else \
-                '%s<br>%.4g Å' % (html.escape(l.name), l.thickness)
-            t = pg.TextItem(html='<div align="center">%s</div>' % text,
-                            anchor=(0.5, 0))
-            t.setPos(0.5 * (bounds[j] + bounds[j + 1]), 0)
-            p.addItem(t, ignoreBounds=True)
-            self.prof_labels.append(t)
-        self._style_bands()
+        self.prof_layers.set_layers(self.stack.layers, Z, z[0], z[-1])
         p.setXRange(z[0], z[-1], padding=0)
         p.enableAutoRange(axis='y')
         self.prof_vb2.enableAutoRange(axis='y')
-        self._place_layer_labels()
-
-    def _style_bands(self):
-        """Alternate grey shading per layer; bold the selected layer's name."""
-        sel = self.list.currentRow()
-        for j, (band, t) in enumerate(zip(self.prof_bands, self.prof_labels)):
-            brush = pg.mkBrush(BANDS[j % 2])
-            band.setBrush(brush)
-            band.setHoverBrush(brush)
-            font = t.textItem.font()
-            font.setBold(j == sel)
-            t.setFont(font)
-            # centring needs a fixed text width; refit it after the font change
-            t.textItem.setTextWidth(-1)
-            t.setTextWidth(t.textItem.document().idealWidth())
-            t.setColor('#222222' if j == sel else '#666666')
-
-    def _place_layer_labels(self, *_):
-        ytop = self.prof_plot.vb.viewRange()[1][1]
-        for t in self.prof_labels:
-            t.setPos(t.pos().x(), ytop)
+        self.prof_layers.place()
 
     def _on_profile_click(self, ev):
         """Clicking inside a layer's band selects it in the list."""
@@ -1042,20 +1489,20 @@ class SimulationTab(QtWidgets.QWidget):
             return None, []
         z, Z, e, curves, slabs = self._profile
         if self.prof_show_bars.isChecked():          # as drawn, see _show_profile
-            curves = curves[:2] + [self._theta_on_bars]
+            curves = [self._on_bars.get(i, c) for i, c in enumerate(curves)]
         layer = self.stack.layers[int(np.searchsorted(Z, x))]
         rows = []
         for i, (name, _, col) in enumerate(PROFILE_QUANTITIES):
             if not self.prof_boxes[i].isChecked():
                 continue
             y = np.interp(x, z, curves[i], left=np.nan, right=np.nan)
-            unit = ' °' if i == 2 else ''
+            unit = ' °' if i in RIGHT else ''
             if self.prof_show_bars.isChecked():
                 k = min(max(int(np.searchsorted(e, x)) - 1, 0), len(slabs[i]) - 1)
                 value = '%s%s  (sublayer %s)' % (fmt(y), unit, fmt(slabs[i][k]))
             else:
                 value = fmt(y) + unit
-            vb = self.prof_vb2 if i == 2 else self.prof_plot.vb
+            vb = self.prof_vb2 if i in RIGHT else self.prof_plot.vb
             rows.append((name, value, col, y, vb))
         return 'z = %.4g Å  —  %s' % (x, layer.name), rows
 
@@ -1081,11 +1528,15 @@ class SimulationTab(QtWidgets.QWidget):
         if qmax <= qmin:
             raise ValueError('Q max must exceed Q min')
         Q = np.linspace(qmin, qmax, self.nq.value())
-        R = self.stack.calc_reflectance(Q)
+        vec = self.pol.vectors()
+        pairs = [vectors_pair(*vec[c]) for c in CHANNEL_NAMES]
+        # a magnetic fronting drops the part of P transverse to its M
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            R = self.stack.reflectivities(Q, pairs)
+        self._refl_note = ' '.join(str(w.message) for w in caught)
+        R = dict(zip(CHANNEL_NAMES, R.T))
         self.last_Q, self.last_R = Q, R
-        off = 4 if self.basis.currentIndex() == 0 else 0
-        # α only mixes lab channels; a magnetic fronting fixes the lab axis
-        self.alpha.setEnabled(bool(off) and self.stack.fronting.MSLD_rho == 0)
         k = self.refl_quantity.currentIndex()
         name, label, formula = REFL_QUANTITIES[k]
         is_refl = label is None
@@ -1093,17 +1544,13 @@ class SimulationTab(QtWidgets.QWidget):
         for w in (self.logy, self.rq4):
             w.setEnabled(is_refl)
 
-        uu, ud, du, dd = R[:, off:off + 4].T
         if k == 0:
-            shown = zip(self.refl_curves, (uu, ud, du, dd),
-                        ['R' + c for c in CHANNELS] if off else
-                        ['R_uu', 'R_ud', 'R_du', 'R_dd'])
+            shown = zip(self.refl_curves, (R[c] for c in CHANNELS),
+                        ['R' + c for c in CHANNELS])
         elif is_refl:
-            shown = zip(self.hp_curves, (uu + ud, dd + du),
-                        ['R+', 'R−'] if off else ['R_u', 'R_d'])
+            shown = zip(self.hp_curves, (R['+'], R['-']), ['R+', 'R−'])
         else:
-            shown = [(self.asym_curve, refl_quantity(name, (uu, ud, du, dd)),
-                      name)]
+            shown = [(self.asym_curve, refl_quantity(name, R), name)]
         shown = list(shown)
 
         p = self.refl_plot
@@ -1148,37 +1595,45 @@ class SimulationTab(QtWidgets.QWidget):
             self._refl_shown.append((curve, cname, Q, y))
 
     # -- save / load --------------------------------------------------------
-    def save_model(self, path):
+    def session_state(self):
+        """The model (Stack.to_dict) plus the tab's own settings under
+        'simulation': Q grid, polarisation and display."""
+        self.recompute()                     # the widgets' values into the stack
         d = self.stack.to_dict()
-        d['simulation'] = {'qmin': self.qmin.value(), 'qmax': self.qmax.value(),
-                           'nq': self.nq.value(),
-                           'basis': self.basis.currentIndex()}
-        with open(path, 'w') as f:
-            json.dump(d, f, indent=2)
+        d['simulation'] = {
+            'qmin': self.qmin.value(), 'qmax': self.qmax.value(),
+            'nq': self.nq.value(), 'polarisation': self.pol.vectors(),
+            'display': {
+                'quantity': self.refl_quantity.currentIndex(),
+                'logy': self.logy.isChecked(), 'rq4': self.rq4.isChecked(),
+                'freeze_y': self.freeze_y.isChecked(),
+                'profile': [cb.isChecked() for cb in self.prof_boxes],
+                'sublayers': self.prof_show_bars.isChecked()},
+            'selected_layer': self.list.currentRow()}
+        return d
 
-    def load_model(self, path):
-        with open(path) as f:
-            d = json.load(f)
+    def restore_state(self, d):
+        """Inverse of session_state; a plain model file (no 'simulation')
+        keeps the tab's settings."""
         new = Stack.from_dict(d)                 # validate before touching UI
         self.stack.layers = new.layers
-        self.stack.tail, self.stack.alpha = new.tail, new.alpha
+        self.stack.tail = new.tail
         self.stack.background = new.background
         self.stack.q_in_fronting = new.q_in_fronting
         self.stack.resolution = new.resolution
         self.stack.magnetic_smearing = new.magnetic_smearing
         sim = d.get('simulation', {})
-        widgets = [self.qmin, self.qmax, self.nq, self.tail, self.alpha,
-                   self.background, self.basis, self.q_fronting, self.res_on,
-                   self.msmear,
+        widgets = [self.qmin, self.qmax, self.nq, self.tail, self.pol,
+                   self.background, self.q_fronting, self.res_on,
+                   self.msmear, self.res_mode, self.res_tof_dl,
                    self.res_lambda, self.res_dlambda, self.res_dtheta]
         for w in widgets:
             w.blockSignals(True)
         self.qmin.setValue(sim.get('qmin', self.qmin.value()))
         self.qmax.setValue(sim.get('qmax', self.qmax.value()))
         self.nq.setValue(sim.get('nq', self.nq.value()))
-        self.basis.setCurrentIndex(sim.get('basis', self.basis.currentIndex()))
         self.tail.setValue(new.tail)
-        self.alpha.setValue(np.degrees(new.alpha))
+        self.pol.set_vectors(sim.get('polarisation', default_vectors()))
         self.background.setValue(new.background)
         self.q_fronting.setChecked(new.q_in_fronting)
         self.msmear.setCurrentIndex(
@@ -1188,8 +1643,24 @@ class SimulationTab(QtWidgets.QWidget):
         self.res_lambda.setValue(res['wavelength'])
         self.res_dlambda.setValue(100 * res['dlambda_rel'])
         self.res_dtheta.setValue(1e3 * res['dtheta'])
-        for w in widgets:
+        self.res_mode.setCurrentIndex(RES_MODES.index(res['mode']))
+        self.res_tof_dl.setValue(res['tof_dlambda'])
+        self._set_tof_angles(res['tof_angles'])
+        disp = sim.get('display', {})
+        display = [self.refl_quantity, self.logy, self.rq4, self.freeze_y,
+                   self.prof_show_bars] + self.prof_boxes
+        for w in display:
+            w.blockSignals(True)
+        self.refl_quantity.setCurrentIndex(disp.get(
+            'quantity', self.refl_quantity.currentIndex()))
+        for key, cb in (('logy', self.logy), ('rq4', self.rq4),
+                        ('freeze_y', self.freeze_y),
+                        ('sublayers', self.prof_show_bars)):
+            cb.setChecked(disp.get(key, cb.isChecked()))
+        for cb, on in zip(self.prof_boxes, disp.get('profile', [])):
+            cb.setChecked(on)
+        for w in widgets + display:
             w.blockSignals(False)
         self._sync_resolution()
-        self.refresh_list(select=1)
+        self.refresh_list(select=sim.get('selected_layer', 1))
         self.recompute()
