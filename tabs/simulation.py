@@ -1126,6 +1126,11 @@ class SimulationTab(QtWidgets.QWidget):
             cb.toggled.connect(self._show_profile)
             self.prof_boxes.append(cb)
             bar.addWidget(cb)
+        self.prof_show_smooth = QtWidgets.QCheckBox('smooth')
+        self.prof_show_smooth.setChecked(True)
+        self.prof_show_smooth.setToolTip('The continuous profile Stack.profile(z)')
+        self.prof_show_smooth.toggled.connect(self._show_profile)
+        bar.addWidget(self.prof_show_smooth)
         self.prof_show_bars = QtWidgets.QCheckBox('sublayers')
         self.prof_show_bars.setChecked(True)
         self.prof_show_bars.toggled.connect(self._show_profile)
@@ -1471,13 +1476,14 @@ class SimulationTab(QtWidgets.QWidget):
         z, Z, e, curves, slabs = self._profile
         p = self.prof_plot
         show_bars = self.prof_show_bars.isChecked()
+        show_smooth = self.prof_show_smooth.isChecked()
 
         if show_bars:
             curves = [self._on_bars.get(i, c) for i, c in enumerate(curves)]
         for i, cb in enumerate(self.prof_boxes):
             on = cb.isChecked()
             self.prof_curves[i].setData(z, curves[i], connect='finite')
-            self.prof_curves[i].setVisible(on)
+            self.prof_curves[i].setVisible(on and show_smooth)
             # a blank angle (NaN) is a bar of zero height
             self.prof_bars[i].setOpts(x0=e[:-1], width=np.diff(e),
                                       height=np.nan_to_num(slabs[i]), y0=0)
@@ -1515,20 +1521,28 @@ class SimulationTab(QtWidgets.QWidget):
         if self._profile is None:
             return None, []
         z, Z, e, curves, slabs = self._profile
-        if self.prof_show_bars.isChecked():          # as drawn, see _show_profile
+        show_bars = self.prof_show_bars.isChecked()
+        show_smooth = self.prof_show_smooth.isChecked()
+        if show_bars:                                # as drawn, see _show_profile
             curves = [self._on_bars.get(i, c) for i, c in enumerate(curves)]
         layer = self.stack.layers[int(np.searchsorted(Z, x))]
         rows = []
         for i, (name, _, col) in enumerate(PROFILE_QUANTITIES):
-            if not self.prof_boxes[i].isChecked():
+            if not self.prof_boxes[i].isChecked() or \
+                    not (show_smooth or show_bars):
                 continue
-            y = np.interp(x, z, curves[i], left=np.nan, right=np.nan)
             unit = ' °' if i in RIGHT else ''
-            if self.prof_show_bars.isChecked():
-                k = min(max(int(np.searchsorted(e, x)) - 1, 0), len(slabs[i]) - 1)
-                value = '%s%s  (sublayer %s)' % (fmt(y), unit, fmt(slabs[i][k]))
+            k = min(max(int(np.searchsorted(e, x)) - 1, 0), len(slabs[i]) - 1)
+            if not show_smooth:                      # the bar's top
+                y = slabs[i][k]
+                value = '%s%s  (sublayer)' % (fmt(y), unit)
             else:
-                value = fmt(y) + unit
+                y = np.interp(x, z, curves[i], left=np.nan, right=np.nan)
+                if show_bars:
+                    value = '%s%s  (sublayer %s)' % (fmt(y), unit,
+                                                     fmt(slabs[i][k]))
+                else:
+                    value = fmt(y) + unit
             vb = self.prof_vb2 if i in RIGHT else self.prof_plot.vb
             rows.append((name, value, col, y, vb))
         return 'z = %.4g Å  —  %s' % (x, layer.name), rows
@@ -1635,7 +1649,8 @@ class SimulationTab(QtWidgets.QWidget):
                 'logy': self.logy.isChecked(), 'rq4': self.rq4.isChecked(),
                 'freeze_y': self.freeze_y.isChecked(),
                 'profile': [cb.isChecked() for cb in self.prof_boxes],
-                'sublayers': self.prof_show_bars.isChecked()},
+                'sublayers': self.prof_show_bars.isChecked(),
+                'smooth': self.prof_show_smooth.isChecked()},
             'selected_layer': self.list.currentRow()}
         return d
 
@@ -1681,14 +1696,15 @@ class SimulationTab(QtWidgets.QWidget):
         self._set_tof_angles(res['tof_angles'])
         disp = sim.get('display', {})
         display = [self.refl_quantity, self.logy, self.rq4, self.freeze_y,
-                   self.prof_show_bars] + self.prof_boxes
+                   self.prof_show_bars, self.prof_show_smooth] + self.prof_boxes
         for w in display:
             w.blockSignals(True)
         self.refl_quantity.setCurrentIndex(disp.get(
             'quantity', self.refl_quantity.currentIndex()))
         for key, cb in (('logy', self.logy), ('rq4', self.rq4),
                         ('freeze_y', self.freeze_y),
-                        ('sublayers', self.prof_show_bars)):
+                        ('sublayers', self.prof_show_bars),
+                        ('smooth', self.prof_show_smooth)):
             cb.setChecked(disp.get(key, cb.isChecked()))
         for cb, on in zip(self.prof_boxes, disp.get('profile', [])):
             cb.setChecked(on)

@@ -129,6 +129,11 @@ class FitWindow(QtWidgets.QWidget):
             cb.toggled.connect(self._show_profile_curves)
             self.prof_boxes.append(cb)
             bar.addWidget(cb)
+        self.prof_show_smooth = QtWidgets.QCheckBox('smooth')
+        self.prof_show_smooth.setChecked(True)
+        self.prof_show_smooth.setToolTip('The continuous profile Stack.profile(z)')
+        self.prof_show_smooth.toggled.connect(self._show_profile_curves)
+        bar.addWidget(self.prof_show_smooth)
         self.prof_show_bars = QtWidgets.QCheckBox('sublayers')
         self.prof_show_bars.setChecked(True)
         self.prof_show_bars.setToolTip('The slabs the reflectivity is '
@@ -381,12 +386,13 @@ class FitWindow(QtWidgets.QWidget):
             return
         z, _, e, curves, slabs = self._profile
         show_bars = self.prof_show_bars.isChecked()
+        show_smooth = self.prof_show_smooth.isChecked()
         if show_bars:
             curves = [self._on_bars.get(i, c) for i, c in enumerate(curves)]
         for i, cb in enumerate(self.prof_boxes):
             on = cb.isChecked()
             self.prof_curves[i].setData(z, curves[i], connect='finite')
-            self.prof_curves[i].setVisible(on)
+            self.prof_curves[i].setVisible(on and show_smooth)
             # a blank angle (NaN) is a bar of zero height
             self.prof_bars[i].setOpts(x0=e[:-1], width=np.diff(e),
                                       height=np.nan_to_num(slabs[i]), y0=0)
