@@ -25,8 +25,38 @@ rest; windows meet at the midpoint and never overlap.  Uncovered parts of a
 layer become one slab each.  Clipping limits the WINDOW, never the VALUES:
 every slab samples the exact profile at its own centre.
 
-MAGNETISATION -- Stack.magnetic_smearing chooses how M crosses an interface:
-  'vector' (default): the Cartesian components of M are smeared like any
+ROUGHNESS SCHEME -- Stack.roughness_scheme chooses between the additive erf /
+tanh profile above ('rms', default) and Licorne's scheme ('licorne', see
+model.roughness): each interface j has its own window [Z_j - l_a, Z_j + l_b],
+l = min(gamma, T/2), gamma = 2.47584 sigma_L (tanh) or 2.0913 sigma_L (erf),
+cut into roughness_sublayer equal slabs sampled at their midpoints; the
+thinner, clipped side is renormalised to keep its amount of material
+(Stack.licorne_renorm 'manual' or 'none'), and the rest of each layer is one
+core slab at its nominal value.  Licorne's jumps are kept, in the slabs and
+in Stack.profile alike: 1.5 % of the step at every unclipped window edge, and
+at the midpoint of a thin layer whose two interfaces renormalise it
+differently.  In this scheme a layer's roughness_sigma is Licorne's sigma_L,
+roughness_model its roughness_fun ('tanh', 'erf' or 'none') and
+roughness_sublayer its roughness_nbound, all for the interface at the TOP of
+the layer; Stack.tail is unused.  model.licorne_io reads a Licorne export.
+
+MAGNETISATION -- Stack.magnetic_smearing chooses how M crosses an interface
+(default 'vector' for the 'rms' scheme, 'step' for 'licorne'):
+  'step': rho is smeared as a scalar like the NSLD (renormalised with it in
+      the 'licorne' scheme) and each slab takes the whole angle (theta, phi)
+      of one layer: in a Licorne window the layer above for x <= 0 (the tie
+      at x = 0, met by the middle slab of an odd count in a symmetric
+      window, goes to the layer above, as in Licorne 1.2.7 exports) and the
+      layer below for x > 0; in the 'rms' scheme the layer of largest
+      occupancy f_{k-1} - f_k at the slab centre.  The angle jumps; |M| does
+      not dip.  With Stack.step_fallback (default) a layer with rho == 0 has
+      no angle and the other layer's is used (both non-magnetic: 0, 0).
+      step_fallback False reproduces Licorne, where only the fronting and
+      backing (which have no angle parameter there) fall back and an
+      interior non-magnetic layer's stored angle shows wherever its window
+      side carries rho > 0.  Core slabs and the semi-infinite media keep
+      their own angle.
+  'vector': the Cartesian components of M are smeared like any
       other quantity.  This is the lateral average of a
       rough interface (the potential is linear in M), so a non-magnetic
       neighbour only fades |M| without turning it, its theta has no effect,
@@ -112,6 +142,8 @@ import warnings
 import numpy as np
 from scipy.special import erf
 
+from model import roughness as rough
+
 
 # Layer attributes a fit may vary.  Layer.fit[attr] = {'vary', 'min', 'max'},
 # bounds in the same units as the attribute (Angstrom, A^-2, turns).
@@ -160,6 +192,16 @@ def wrap_turns(t):
 # from any magnetic layer (e.g. a rough interface's tail outliving a sharper
 # one below it points along M_above - M_below).  See Stack.angle_defined.
 M_TINY = 1e-3
+
+ROUGHNESS_SCHEMES = ('rms', 'licorne')
+SMEARING_MODES = ('vector', 'angle', 'step')
+# magnetic_smearing when none is given, per roughness scheme
+DEFAULT_SMEARING = {'rms': 'vector', 'licorne': 'step'}
+# 'step' in a Licorne window: x <= STEP_TIE * window width takes the layer
+# above, so round-off in a depth never moves the tie at x = 0
+STEP_TIE = 1e-9
+
+
 def cos_turns(t):
     """cos(2 pi t) with the quarter turns exactly 0 (cos(pi/2) = 6e-17 would
     otherwise leave a 'magnetic' residue on a layer magnetised along z)."""
@@ -295,7 +337,7 @@ class Layer:
         self.MSLD_theta = MSLD_theta        # turns, theta_M of Fig. 1.14 (from x)
         self.MSLD_phi = MSLD_phi            # turns, elevation out of the plane
         self.roughness_sigma = roughness_sigma  # Angstrom, Gaussian sigma
-        self.roughness_model = roughness_model  # 'erf' or 'tanh'
+        self.roughness_model = roughness_model  # 'erf', 'tanh' or 'none'
         self.roughness_sublayer = roughness_sublayer
         self.fit = {k: dict(v) for k, v in (fit or {}).items()}
 
@@ -317,7 +359,7 @@ class Layer:
 # ------------------------------------------------------ profile helpers ----
 def _step(u, sigma, model):
     u = np.asarray(u, dtype=float)
-    if sigma <= 0.0:
+    if sigma <= 0.0 or model == 'none':
         return np.where(u < 0.0, 0.0, 1.0)
     if model == 'tanh':
         return 0.5 * (1.0 + np.tanh(u * 2.0 / (sigma * np.sqrt(2.0 * np.pi))))
@@ -339,18 +381,29 @@ class Stack:
     """[fronting, L1, ..., LN, backing].  Fronting and backing are
     semi-infinite; their thickness is ignored."""
 
-    def __init__(self, layers, tail: float = 3.0):
+    def __init__(self, layers, tail: float = 3.0, roughness_scheme='rms',
+                 magnetic_smearing=None):
         if len(layers) < 2:
             raise ValueError('need at least a fronting and a backing')
+        if roughness_scheme not in ROUGHNESS_SCHEMES:
+            raise ValueError('unknown roughness scheme %r' % (roughness_scheme,))
         self.layers = list(layers)
         self.tail = tail                 # unclipped window half-width = tail*sigma
+        # 'rms' or 'licorne' (see ROUGHNESS SCHEME)
+        self.roughness_scheme = roughness_scheme
+        self.licorne_renorm = 'manual'   # or 'none' (Licorne scheme only)
         self.sublayers = None
         self.background = 0.0                # constant added to every channel
         self.q_in_fronting = False           # True: Q is measured inside the fronting
         # instrumental resolution (see RESOLUTION): enabled, mode and the
         # parameters of each mode
         self.resolution = copy.deepcopy(DEFAULT_RESOLUTION)
-        self.magnetic_smearing = 'vector'    # or 'angle'; see MAGNETISATION
+        # 'vector', 'angle' or 'step' (see MAGNETISATION); None takes the
+        # scheme's default
+        self.magnetic_smearing = (DEFAULT_SMEARING[roughness_scheme]
+                                  if magnetic_smearing is None
+                                  else magnetic_smearing)
+        self.step_fallback = True        # 'step': a rho = 0 layer has no angle
 
     # -- serialisation ------------------------------------------------------
     def to_dict(self):
@@ -362,18 +415,25 @@ class Stack:
                 'q_in_fronting': self.q_in_fronting,
                 'resolution': copy.deepcopy(self.resolution),
                 'magnetic_smearing': self.magnetic_smearing,
+                'roughness_scheme': self.roughness_scheme,
+                'licorne_renorm': self.licorne_renorm,
+                'step_fallback': self.step_fallback,
                 'layers': [dict(vars(l), fit={k: dict(v)
                                               for k, v in l.fit.items()})
                            for l in self.layers]}
 
     @classmethod
     def from_dict(cls, d):
-        """Inverse of to_dict."""
-        s = cls([Layer(**l) for l in d['layers']], tail=d['tail'])
+        """Inverse of to_dict.  Files written before the Licorne scheme
+        existed load as 'rms'."""
+        s = cls([Layer(**l) for l in d['layers']], tail=d['tail'],
+                roughness_scheme=d.get('roughness_scheme', 'rms'),
+                magnetic_smearing=d.get('magnetic_smearing'))
         s.background = d['background']
         s.q_in_fronting = bool(d['q_in_fronting'])
         s.resolution.update(copy.deepcopy(d['resolution']))
-        s.magnetic_smearing = d['magnetic_smearing']
+        s.licorne_renorm = d.get('licorne_renorm', 'manual')
+        s.step_fallback = bool(d.get('step_fallback', True))
         return s
 
     # -- fitting ------------------------------------------------------------
@@ -416,14 +476,28 @@ class Stack:
         return np.concatenate([[0.0], np.cumsum(t[1:-1])])
 
     def windows(self):
-        """(lo, hi) per interface, clipped at half the adjacent thicknesses."""
+        """(lo, hi) per interface, clipped at half the adjacent thicknesses
+        (the Licorne window [Z - l_a, Z + l_b] in that scheme)."""
+        if self.roughness_scheme == 'licorne':
+            return [(w['Z'] - w['la'], w['Z'] + w['lb'])
+                    for w in self._licorne_interfaces()]
         t = self._thicknesses()
         Z = self._interfaces()
         out = []
         for j, Zj in enumerate(Z):
-            w = self.tail * max(self.layers[j + 1].roughness_sigma, 0.0)
+            lay = self.layers[j + 1]
+            w = 0.0 if lay.roughness_model == 'none' else \
+                self.tail * max(lay.roughness_sigma, 0.0)
             out.append((Zj - min(w, t[j] / 2.0), Zj + min(w, t[j + 1] / 2.0)))
         return out
+
+    def _check_modes(self):
+        if self.roughness_scheme not in ROUGHNESS_SCHEMES:
+            raise ValueError('unknown roughness scheme %r'
+                             % (self.roughness_scheme,))
+        if self.magnetic_smearing not in SMEARING_MODES:
+            raise ValueError('unknown magnetic smearing %r'
+                             % (self.magnetic_smearing,))
 
     # -- slicing ------------------------------------------------------------
     def build_sublayers(self):
@@ -431,6 +505,9 @@ class Stack:
 
         Stores and returns the list; fronting and backing are not included.
         """
+        self._check_modes()
+        if self.roughness_scheme == 'licorne':
+            return self._build_licorne()
         Z = self._interfaces()
         n_if = len(Z)
         sig = [max(self.layers[j + 1].roughness_sigma, 0.0) for j in range(n_if)]
@@ -450,20 +527,26 @@ class Stack:
         c = 0.5 * (e[:-1] + e[1:])
         v_n = _profile(c, Z, sig, mod, nsld)
         v_rho, v_theta, v_phi = self._magnetic_profile(c, Z, sig, mod)
+        return self._set_sublayers(np.diff(e), v_n, v_rho, v_theta, v_phi)
 
+    def _set_sublayers(self, th, v_n, v_rho, v_theta, v_phi):
         self.sublayers = [
             Layer(name='%s_%03d' % (self.layers[0].name or 'slab', i),
-                  thickness=th, NSLD_real=v_n[i].real, NSLD_img=v_n[i].imag,
-                  MSLD_rho=float(v_rho[i]),
+                  thickness=float(th[i]), NSLD_real=v_n[i].real,
+                  NSLD_img=v_n[i].imag, MSLD_rho=float(v_rho[i]),
                   MSLD_theta=float(v_theta[i]), MSLD_phi=float(v_phi[i]),
                   roughness_sigma=0.0, roughness_sublayer=1)
-            for i, th in enumerate(np.diff(e))]
+            for i in range(len(th))]
         return self.sublayers
 
     def profile(self, z):
         """Exact continuous profile: (nsld complex, |M| = msld_rho, MSLD_theta,
         MSLD_phi), angles in turns.  The neutrons only see the in-plane part
-        rho cos(phi) (HALPERIN)."""
+        rho cos(phi) (HALPERIN).  In the Licorne scheme this is the truncated,
+        renormalised profile the slabs sample, jumps included."""
+        self._check_modes()
+        if self.roughness_scheme == 'licorne':
+            return self._licorne_profile(z)
         Z = self._interfaces()
         n_if = len(Z)
         sig = [max(self.layers[j + 1].roughness_sigma, 0.0) for j in range(n_if)]
@@ -485,6 +568,21 @@ class Stack:
                     wrap_turns(_profile(z, Z, sig, mod, theta)),
                     _profile(z, Z, sig, mod, phi))
         z = np.asarray(z, dtype=float)
+        if self.magnetic_smearing == 'step':
+            # occupancy of layer k: f_{k-1} - f_k (f_{-1} = 1, f_last = 0);
+            # each depth takes the angle of the layer that occupies it most
+            # among those that have an angle (argmax: ties go to the upper)
+            f = np.stack([np.ones(z.shape)]
+                         + [_step(z - Z[j], sig[j], mod[j])
+                            for j in range(len(Z))] + [np.zeros(z.shape)])
+            has = self._has_angle()
+            occ = np.where(has.reshape((-1,) + (1,)*z.ndim), f[:-1] - f[1:],
+                           -np.inf)
+            k = np.argmax(occ.reshape(len(self.layers), -1), 0).reshape(z.shape)
+            some = np.any(has)
+            return (_profile(z, Z, sig, mod, rho),
+                    wrap_turns(np.where(some, theta[k], 0.0)),
+                    np.where(some, phi[k], 0.0))
         # in-plane part as one complex number, M_z separately; with phi = 0
         # everywhere mz is exactly 0 and this is the previous 2D smearing
         mp = _profile(z, Z, sig, mod,
@@ -493,6 +591,149 @@ class Stack:
         a = np.abs(mp)
         return (np.hypot(a, mz), wrap_turns(np.angle(mp) / (2*np.pi)),
                 np.arctan2(mz, a) / (2*np.pi))
+
+    def _has_angle(self):
+        """'step': which layers have an angle to give (see MAGNETISATION).
+        With step_fallback a layer needs rho != 0; without it only a
+        non-magnetic fronting / backing has none (Licorne)."""
+        n = len(self.layers)
+        mag = np.array([l.MSLD_rho != 0 for l in self.layers])
+        if self.step_fallback:
+            return mag
+        return mag | ((np.arange(n) > 0) & (np.arange(n) < n - 1))
+
+    # -- Licorne scheme -------------------------------------------------------
+    @staticmethod
+    def _licorne_values(layer):
+        """Quantities smeared through a Licorne window, all renormalised
+        alike: Re NSLD, Im NSLD, rho, and the Cartesian M (for 'vector')."""
+        r, th, ph = layer.MSLD_rho, layer.MSLD_theta, layer.MSLD_phi
+        return np.array([layer.NSLD_real, layer.NSLD_img, r,
+                         r * cos_turns(ph) * cos_turns(th),
+                         r * cos_turns(ph) * sin_turns(th),
+                         r * sin_turns(ph)], dtype=float)
+
+    def _licorne_interfaces(self):
+        """Per interface j (the top of layer j+1, which owns sigma_L, the
+        function and N): its depth Z, window la / lb, renormalised values
+        Fa / Fb (_licorne_values) and the indices a = j, b = j+1."""
+        t = self._thicknesses()
+        vals = [self._licorne_values(l) for l in self.layers]
+        out = []
+        for j, Zj in enumerate(self._interfaces()):
+            own = self.layers[j + 1]
+            sL = max(own.roughness_sigma, 0.0)
+            kind = own.roughness_model
+            Fa, Fb, la, lb, _ = rough.renormalised(
+                vals[j], vals[j + 1], t[j], t[j + 1], sL, kind,
+                self.licorne_renorm)
+            out.append({'Z': float(Zj), 'la': la, 'lb': lb, 'sigma': sL,
+                        'kind': kind,
+                        'N': max(int(own.roughness_sublayer), 1),
+                        'Fa': Fa, 'Fb': Fb, 'a': j, 'b': j + 1})
+        return out
+
+    def _licorne_window(self, w, x):
+        """(nsld complex, rho, theta, phi) at offsets x from interface w,
+        inside its window."""
+        x = np.asarray(x, dtype=float)
+        s = rough.profile_fraction(x, w['sigma'], w['kind'])
+        v = w['Fa'][:, None] + (w['Fb'] - w['Fa'])[:, None] * s[None, :]
+        nsld = v[0] + 1j * v[1]
+        A, B = self.layers[w['a']], self.layers[w['b']]
+        mode = self.magnetic_smearing
+        if mode == 'vector':
+            mp = v[3] + 1j * v[4]
+            a = np.abs(mp)
+            return (nsld, np.hypot(a, v[5]),
+                    wrap_turns(np.angle(mp) / (2*np.pi)),
+                    np.arctan2(v[5], a) / (2*np.pi))
+        if mode == 'angle':
+            # angles interpolated with the profile fraction, never
+            # renormalised (an angle has no amount of material)
+            return (nsld, v[2],
+                    wrap_turns(A.MSLD_theta + (B.MSLD_theta - A.MSLD_theta) * s),
+                    A.MSLD_phi + (B.MSLD_phi - A.MSLD_phi) * s)
+        # 'step': the upper layer for x <= 0, the lower for x > 0, or the
+        # other one when that layer has no angle
+        has = self._has_angle()
+        upper = x <= STEP_TIE * (w['la'] + w['lb'])
+        first = np.where(upper, w['a'], w['b'])
+        other = np.where(upper, w['b'], w['a'])
+        k = np.where(has[first], first, other)
+        theta = np.array([l.MSLD_theta for l in self.layers])[k]
+        phi = np.array([l.MSLD_phi for l in self.layers])[k]
+        none = ~has[k]
+        return (nsld, v[2], wrap_turns(np.where(none, 0.0, theta)),
+                np.where(none, 0.0, phi))
+
+    def _licorne_regions(self, geo):
+        """[(lo, hi, ('window', w) or ('layer', k))] from the top of the
+        first window to the end of the last one: windows and the core
+        slabs between them (a core of zero thickness is dropped)."""
+        t = self._thicknesses()
+        out = []
+        for j, w in enumerate(geo):
+            if w['la'] + w['lb'] > 0:
+                out.append((w['Z'] - w['la'], w['Z'] + w['lb'], ('window', w)))
+            if j + 1 < len(geo):
+                core = t[j + 1] - w['lb'] - geo[j + 1]['la']
+                if core > 0:
+                    out.append((w['Z'] + w['lb'], geo[j + 1]['Z']
+                                - geo[j + 1]['la'], ('layer', j + 1)))
+        return out
+
+    @staticmethod
+    def _nominal(layer):
+        return (complex(layer.NSLD_real, layer.NSLD_img), layer.MSLD_rho,
+                float(wrap_turns(layer.MSLD_theta)), layer.MSLD_phi)
+
+    def _build_licorne(self):
+        """Licorne slabs (see ROUGHNESS SCHEME): N equal slabs per window at
+        their midpoints, one core slab per layer at its nominal value."""
+        geo = self._licorne_interfaces()
+        th, cols = [], []
+        for lo, hi, (what, w) in self._licorne_regions(geo):
+            if what == 'layer':
+                th.append(hi - lo)
+                cols.append([np.atleast_1d(v) for v in
+                             self._nominal(self.layers[w])])
+                continue
+            N = w['N']
+            h = (w['la'] + w['lb']) / N
+            x = -w['la'] + h * (np.arange(N) + 0.5)
+            th.extend([h] * N)
+            cols.append(list(self._licorne_window(w, x)))
+        if not th:
+            return self._set_sublayers([], [], [], [], [])
+        v = [np.concatenate([c[i] for c in cols]) for i in range(4)]
+        return self._set_sublayers(np.array(th), *v)
+
+    def _licorne_profile(self, z):
+        """profile(z) in the Licorne scheme: the semi-infinite media and the
+        cores at their nominal values, the truncated, renormalised window
+        function between (each region [lo, hi), so a jump sits at its
+        edge)."""
+        z = np.asarray(z, dtype=float)
+        shape = z.shape
+        z = z.ravel()
+        geo = self._licorne_interfaces()
+        nsld = np.empty(z.shape, dtype=complex)
+        rho, theta, phi = (np.empty(z.shape) for _ in range(3))
+
+        def put(mask, vals):
+            for arr, v in zip((nsld, rho, theta, phi), vals):
+                arr[mask] = v
+
+        put(slice(None), self._nominal(self.fronting))
+        put(z >= geo[-1]['Z'] + geo[-1]['lb'], self._nominal(self.backing))
+        for lo, hi, (what, w) in self._licorne_regions(geo):
+            m = (z >= lo) & (z < hi)
+            if what == 'layer':
+                put(m, self._nominal(self.layers[w]))
+            elif np.any(m):
+                put(m, self._licorne_window(w, z[m] - w['Z']))
+        return tuple(a.reshape(shape) for a in (nsld, rho, theta, phi))
 
     @staticmethod
     def inplane_rho(layer):

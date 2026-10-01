@@ -29,7 +29,8 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 
 from model.polarisation import (CHANNEL_NAMES, default_vectors, in_plane,
                                 vectors_pair)
-from model.stack import Layer, Stack, cos_turns, wrap_turns
+from model.stack import (DEFAULT_SMEARING, ROUGHNESS_SCHEMES,
+                         SMEARING_MODES, Layer, Stack, cos_turns, wrap_turns)
 
 
 SLD_SCALE = 1e-6                      # SLDs are edited / plotted in 1e-6 A^-2
@@ -610,7 +611,7 @@ class LayerEditor(QtWidgets.QGroupBox):
 
         self.name = QtWidgets.QLineEdit()
         self.model = QtWidgets.QComboBox()
-        self.model.addItems(['tanh', 'erf'])
+        self.model.addItems(['tanh', 'erf', 'none'])
         self.nsub = QtWidgets.QSpinBox()
         self.nsub.setRange(1, NSUB_MAX)
         self.nsub.setKeyboardTracking(False)
@@ -869,9 +870,10 @@ class SimulationTab(QtWidgets.QWidget):
             'both spins.')
 
         self.msmear = QtWidgets.QComboBox()
-        self.msmear.addItems(['vector (roughness)', 'angle (twist)'])
+        self.msmear.addItems(['vector (roughness)', 'angle (twist)',
+                              'step (Licorne)'])
         self.msmear.setCurrentIndex(
-            0 if self.stack.magnetic_smearing == 'vector' else 1)
+            SMEARING_MODES.index(self.stack.magnetic_smearing))
         self.msmear.setToolTip(
             'How the magnetisation crosses a rough interface.\n'
             'vector: the components ρ cos θ, ρ sin θ are smeared (lateral '
@@ -880,7 +882,21 @@ class SimulationTab(QtWidgets.QWidget):
             'angle: ρ and θ are smeared separately, so M turns towards the '
             'next layer\'s θ\n  over the roughness width (magnetic twist); a '
             'non-magnetic layer\'s θ then matters; φ is interpolated the '
-            'same way.')
+            'same way.\n'
+            'step: ρ is smeared like the NSLD and each slab takes the whole '
+            'angle of one layer\n  (the angle jumps at the interface; a '
+            'non-magnetic layer lends no angle).')
+
+        self.rscheme = QtWidgets.QComboBox()
+        self.rscheme.addItems(['rms (erf / tanh)', 'Licorne'])
+        self.rscheme.setCurrentIndex(
+            ROUGHNESS_SCHEMES.index(self.stack.roughness_scheme))
+        self.rscheme.setToolTip(
+            'rms: additive erf / tanh steps of Gaussian width σ, windows of '
+            '± tail·σ.\n'
+            'Licorne: σ is Licorne\'s σ_L; window to the 97 % point, '
+            'clipped at half thicknesses,\n  thin layers renormalised, jumps '
+            'at the window edges (Licorne manual, App. 10.1).')
 
         # instrumental resolution, Gaussian in Q (see model.stack RESOLUTION)
         res = self.stack.resolution
@@ -953,6 +969,7 @@ class SimulationTab(QtWidgets.QWidget):
         f.addRow('Window tail', self.tail)
         f.addRow('Background', self.background)
         f.addRow('Q reference', self.q_fronting)
+        f.addRow('Roughness', self.rscheme)
         f.addRow('M smearing', self.msmear)
         resrow = QtWidgets.QHBoxLayout()
         resrow.addWidget(self.res_on)
@@ -991,6 +1008,7 @@ class SimulationTab(QtWidgets.QWidget):
             w.valueChanged.connect(self.schedule)
         self.nq.valueChanged.connect(self.schedule)
         self.msmear.currentIndexChanged.connect(self.schedule)
+        self.rscheme.activated.connect(self._scheme_changed)
         self.q_fronting.toggled.connect(self.schedule)
         self.res_on.toggled.connect(self._sync_resolution)
         self.res_mode.currentIndexChanged.connect(self._sync_resolution)
@@ -1301,6 +1319,12 @@ class SimulationTab(QtWidgets.QWidget):
         self.refresh_list(select=row)
         self.schedule()
 
+    def _scheme_changed(self, i):
+        """A new roughness scheme brings its default M smearing."""
+        self.msmear.setCurrentIndex(
+            SMEARING_MODES.index(DEFAULT_SMEARING[ROUGHNESS_SCHEMES[i]]))
+        self.schedule()
+
     # -- computation --------------------------------------------------------
     def schedule(self, *_):
         # throttle, not debounce: a dragged slider still redraws as it moves
@@ -1312,8 +1336,11 @@ class SimulationTab(QtWidgets.QWidget):
             self.stack.tail = self.tail.value()
             self.stack.background = self.background.value()
             self.stack.q_in_fronting = self.q_fronting.isChecked()
-            self.stack.magnetic_smearing = ('vector', 'angle')[
+            self.stack.magnetic_smearing = SMEARING_MODES[
                 self.msmear.currentIndex()]
+            self.stack.roughness_scheme = ROUGHNESS_SCHEMES[
+                self.rscheme.currentIndex()]
+            self.tail.setEnabled(self.stack.roughness_scheme == 'rms')
             mode = RES_MODES[self.res_mode.currentIndex()]
             self.stack.resolution.update(
                 enabled=self.res_on.isChecked(), mode=mode,
@@ -1622,10 +1649,14 @@ class SimulationTab(QtWidgets.QWidget):
         self.stack.q_in_fronting = new.q_in_fronting
         self.stack.resolution = new.resolution
         self.stack.magnetic_smearing = new.magnetic_smearing
+        self.stack.roughness_scheme = new.roughness_scheme
+        self.stack.licorne_renorm = new.licorne_renorm
+        self.stack.step_fallback = new.step_fallback
         sim = d.get('simulation', {})
         widgets = [self.qmin, self.qmax, self.nq, self.tail, self.pol,
                    self.background, self.q_fronting, self.res_on,
-                   self.msmear, self.res_mode, self.res_tof_dl,
+                   self.msmear, self.rscheme, self.res_mode,
+                   self.res_tof_dl,
                    self.res_lambda, self.res_dlambda, self.res_dtheta]
         for w in widgets:
             w.blockSignals(True)
@@ -1637,7 +1668,9 @@ class SimulationTab(QtWidgets.QWidget):
         self.background.setValue(new.background)
         self.q_fronting.setChecked(new.q_in_fronting)
         self.msmear.setCurrentIndex(
-            0 if new.magnetic_smearing == 'vector' else 1)
+            SMEARING_MODES.index(new.magnetic_smearing))
+        self.rscheme.setCurrentIndex(
+            ROUGHNESS_SCHEMES.index(new.roughness_scheme))
         res = new.resolution
         self.res_on.setChecked(res['enabled'])
         self.res_lambda.setValue(res['wavelength'])
