@@ -1094,6 +1094,9 @@ class SimulationTab(QtWidgets.QWidget):
         self.nq.valueChanged.connect(self.schedule)
         self.msmear.currentIndexChanged.connect(self.schedule)
         self.rscheme.activated.connect(self._scheme_changed)
+        # the Licorne-exact box follows its settings at once
+        for w in (self.rscheme, self.msmear, self.res_conv):
+            w.currentIndexChanged.connect(self._sync_licorne_exact)
         self.q_fronting.toggled.connect(self.schedule)
         self.res_on.toggled.connect(self._sync_resolution)
         self.res_mode.currentIndexChanged.connect(self._sync_resolution)
@@ -1464,6 +1467,25 @@ class SimulationTab(QtWidgets.QWidget):
             SMEARING_MODES.index(DEFAULT_SMEARING[ROUGHNESS_SCHEMES[i]]))
         self.schedule()
 
+    def _shown_licorne_exact(self):
+        """Whether the combos and the stack's other Licorne settings (no
+        widget) are all Stack.LICORNE_EXACT."""
+        st = self.stack
+        scheme, fun = RES_CONVOLUTIONS[self.res_conv.currentIndex()][1:]
+        shown = {'roughness_scheme':
+                 ROUGHNESS_SCHEMES[self.rscheme.currentIndex()],
+                 'magnetic_smearing': SMEARING_MODES[self.msmear.currentIndex()],
+                 'resolution.scheme': scheme}
+        return all(shown[k] == v if k in shown else st._setting(k) == v
+                   for k, v in st.LICORNE_EXACT.items())
+
+    def _sync_licorne_exact(self, *_):
+        """Tick the Licorne-exact box exactly when every Licorne setting
+        holds; never runs _licorne_exact."""
+        self.lic_exact.blockSignals(True)
+        self.lic_exact.setChecked(self._shown_licorne_exact())
+        self.lic_exact.blockSignals(False)
+
     def _licorne_exact(self, on):
         """Licorne-exact on / off (Stack.set_licorne_exact); the combos
         follow."""
@@ -1514,10 +1536,7 @@ class SimulationTab(QtWidgets.QWidget):
                 self.stack.resolution['licorne_fun'] = fun
             if mode == 'tof':
                 self.stack.resolution['tof_angles'] = self._tof_angles()
-            # ticked only while every Licorne choice holds
-            self.lic_exact.blockSignals(True)
-            self.lic_exact.setChecked(self.stack.is_licorne_exact())
-            self.lic_exact.blockSignals(False)
+            self._sync_licorne_exact()
             self.stack.build_sublayers()
             self._compute_profile()
             self._show_profile()
