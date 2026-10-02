@@ -938,7 +938,8 @@ class SimulationTab(QtWidgets.QWidget):
             'clipped at half thicknesses,\n  thin layers renormalised, jumps '
             'at the window edges (Licorne manual, App. 10.1).')
 
-        self.lic_exact = QtWidgets.QCheckBox('Licorne-exact')
+        self.lic_exact = QtWidgets.QCheckBox(
+            'exact (roughness, M smearing, resolution)')
         self.lic_exact.setChecked(self.stack.is_licorne_exact())
         self.lic_exact.setToolTip(
             'Every choice Licorne 1.4.2 makes, to reproduce its curves: '
@@ -1042,10 +1043,8 @@ class SimulationTab(QtWidgets.QWidget):
             row.addWidget(cb)
             f.addRow(label, row)
         f.addRow('Q reference', self.q_fronting)
-        rrow = QtWidgets.QHBoxLayout()
-        rrow.addWidget(self.rscheme, 1)
-        rrow.addWidget(self.lic_exact)
-        f.addRow('Roughness', rrow)
+        f.addRow('Licorne', self.lic_exact)
+        f.addRow('Roughness', self.rscheme)
         f.addRow('M smearing', self.msmear)
         resrow = QtWidgets.QHBoxLayout()
         resrow.addWidget(self.res_on)
