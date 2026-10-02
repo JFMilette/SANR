@@ -172,7 +172,7 @@ class DEWindow(QtWidgets.QWidget):
         p.showAxis('right')
         p.scene().addItem(self.prof_vb2)
         p.getAxis('right').linkToView(self.prof_vb2)
-        p.getAxis('right').setLabel('MSLD θ, φ (deg)')
+        p.getAxis('right').setLabel('MSLD φ, θ (deg)')
         p.getAxis('right').enableAutoSIPrefix(False)
         self.prof_vb2.setXLink(p)
 

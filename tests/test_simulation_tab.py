@@ -102,3 +102,17 @@ def test_session_restores_the_box(app):
     assert not other.lic_exact.isChecked()
     other.restore_state(state)
     assert other.lic_exact.isChecked() and other.stack.is_licorne_exact()
+
+
+def test_angle_letters(app):
+    """The GUI writes the in-plane angle (MSLD_theta) as φ and the
+    out-of-plane one (MSLD_phi) as θ, Licorne's letters."""
+    from tabs.simulation import (EDITOR_PARAMS, PARAM_DISPLAY,
+                                 PROFILE_QUANTITIES, shown_names)
+    labels = {p[0]: p[1] for p in EDITOR_PARAMS}
+    assert labels['MSLD_theta'] == 'MSLD φ' and labels['MSLD_phi'] == 'MSLD θ'
+    assert PARAM_DISPLAY['MSLD_theta'][0] == 'MSLD φ'
+    assert [q[0] for q in PROFILE_QUANTITIES[2:]] == ['φ', 'θ']
+    assert 'in plane' in PROFILE_QUANTITIES[2][1]
+    assert shown_names('Fe.MSLD_theta, Co.MSLD_phi, stack.scale') == \
+        'Fe.MSLD φ, Co.MSLD θ, stack.scale'

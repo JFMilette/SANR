@@ -5,7 +5,9 @@ Simulation tab: build a Stack by hand and look at its profile and reflectivity.
             reorder), property editor of the selected layer below
     right : depth profile on top, reflectivity below, both wide.
             The profile overlays NSLD / MSLD |M| (left axis) and the
-            magnetic angles θ, φ (right axis), each toggled by a checkbox:
+            magnetic angles φ (in plane) and θ (out of plane; Licorne's
+            letters, see ANGLE_LETTERS) on the right axis, each toggled by a
+            checkbox:
             solid line = Stack.profile(z), bars = Stack.build_sublayers(),
             shaded bands = layers (selected one's name in bold, click a band
             to select it), grey verticals = nominal interfaces.
@@ -42,8 +44,8 @@ HP_COLOURS = ['#1f77b4', '#ff7f0e']    # half-polarized R↑, R↓
 PROFILE_QUANTITIES = [
     ('NSLD', 'NSLD real (10⁻⁶ Å⁻²)', '#5b9bd5'),
     ('MSLD ρ', 'MSLD ρ = |M| (10⁻⁶ Å⁻²)', '#4fc08d'),
-    ('θ', 'MSLD θ, in plane (deg)', '#e0a458'),
-    ('φ', 'MSLD φ, out of plane (deg)', '#e36fa8'),
+    ('φ', 'MSLD φ, in plane (deg)', '#e0a458'),
+    ('θ', 'MSLD θ, out of plane (deg)', '#e36fa8'),
 ]
 RIGHT = (2, 3)                        # PROFILE_QUANTITIES on the angle axis
 # combo label, axis label (None = raw reflectivities), formula beside the combo.
@@ -451,11 +453,24 @@ EDITOR_PARAMS = [
     ('NSLD_real', 'NSLD real', -100, 100, 6, 0.1, '', 1 / SLD_SCALE),
     ('NSLD_img', 'NSLD imag', -100, 100, 7, 0.001, '', 1 / SLD_SCALE),
     ('MSLD_rho', 'MSLD ρ', 0, 100, 6, 0.1, '', 1 / SLD_SCALE),
-    ('MSLD_theta', 'MSLD θ', -360, 360, 4, 5.0, ' °', 360.0),
-    ('MSLD_phi', 'MSLD φ', -90, 90, 4, 5.0, ' °', 360.0),
+    ('MSLD_theta', 'MSLD φ', -360, 360, 4, 5.0, ' °', 360.0),
+    ('MSLD_phi', 'MSLD θ', -90, 90, 4, 5.0, ' °', 360.0),
     ('roughness_sigma', 'Roughness σ', 0.0, 1e4, 4, 0.5, ' Å', 1.0),
 ]
 # attr -> (label, display scale, unit) for the parameter tables
+# the GUI writes the magnetisation angles with Licorne's letters: the
+# in-plane angle MSLD_theta as φ (Licorne's azimuth), the elevation
+# MSLD_phi as θ (0 = in plane; Licorne's θ is measured from its z axis)
+ANGLE_LETTERS = {'MSLD_theta': 'MSLD φ', 'MSLD_phi': 'MSLD θ'}
+
+
+def shown_names(text):
+    """text with the attribute names MSLD_theta / MSLD_phi written as the
+    GUI shows them (ANGLE_LETTERS), e.g. 'Fe.MSLD_theta' -> 'Fe.MSLD φ'."""
+    return re.sub(r'MSLD_(theta|phi)\b',
+                  lambda m: ANGLE_LETTERS[m.group(0)], str(text))
+
+
 PARAM_DISPLAY = {attr: (label.split(' (')[0], scale,
                         suffix.strip() or ('Å' if attr == 'thickness' else
                                            '10⁻⁶ Å⁻²'))
@@ -668,13 +683,13 @@ class LayerEditor(QtWidgets.QGroupBox):
                 lambda pos, a=attr: self._slider_moved(a, pos))
             self.sliders[attr] = sl
         self.rows['MSLD_theta'][4].setToolTip(
-            'θ_M: in-plane angle of M from the sample x axis towards y '
+            'φ: in-plane angle of M from the sample x axis towards y '
             '(Majkrzak Fig. 1.14)')
         self.rows['MSLD_rho'][4].setToolTip(
             'ρ_M = |M|, including any out-of-plane part')
         self.rows['MSLD_phi'][4].setToolTip(
-            'φ_M: elevation of M out of the film plane (+90° = +z). Only '
-            'ρ cos φ is seen by neutrons (Halperin)')
+            'θ: elevation of M out of the film plane (0 = in plane, +90° = '
+            '+z). Only ρ cos θ is seen by neutrons (Halperin)')
 
         g = QtWidgets.QGridLayout(self)
         g.setColumnStretch(1, 1)
@@ -916,12 +931,12 @@ class SimulationTab(QtWidgets.QWidget):
             SMEARING_MODES.index(self.stack.magnetic_smearing))
         self.msmear.setToolTip(
             'How the magnetisation crosses a rough interface.\n'
-            'vector: the components ρ cos θ, ρ sin θ are smeared (lateral '
+            'vector: the components ρ cos φ, ρ sin φ are smeared (lateral '
             'average of a rough interface);\n  a non-magnetic neighbour only '
-            'fades |M|, its θ has no effect.\n'
-            'angle: ρ and θ are smeared separately, so M turns towards the '
-            'next layer\'s θ\n  over the roughness width (magnetic twist); a '
-            'non-magnetic layer\'s θ then matters; φ is interpolated the '
+            'fades |M|, its φ has no effect.\n'
+            'angle: ρ and φ are smeared separately, so M turns towards the '
+            'next layer\'s φ\n  over the roughness width (magnetic twist); a '
+            'non-magnetic layer\'s φ then matters; θ is interpolated the '
             'same way.\n'
             'step: ρ is smeared like the NSLD and each slab takes the whole '
             'angle of one layer\n  (the angle jumps at the interface; a '
@@ -1235,7 +1250,7 @@ class SimulationTab(QtWidgets.QWidget):
         p.showAxis('right')
         p.scene().addItem(self.prof_vb2)
         p.getAxis('right').linkToView(self.prof_vb2)
-        p.getAxis('right').setLabel('MSLD θ, φ (deg)')
+        p.getAxis('right').setLabel('MSLD φ, θ (deg)')
         p.getAxis('right').enableAutoSIPrefix(False)
         self.prof_vb2.setXLink(p)
 

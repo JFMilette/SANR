@@ -40,7 +40,7 @@ from fit.dream.dream_fit import (SIGMA_NAME, format_summary, posterior_warnings,
                          predictive_bands, profile_bands, sample, save_result,
                          summary_table)
 from tabs.simulation import (CH_COLOURS, HP_COLOURS, PARAM_DISPLAY,
-                             PROFILE_QUANTITIES)
+                             PROFILE_QUANTITIES, shown_names)
 
 OK, BAD = '#4ade80', '#f87171'
 PROGRESS_EVERY = 0.2                     # s between progress signals
@@ -89,7 +89,7 @@ def display_info(problem):
     out = []
     for (_, attr, *_), name in zip(problem.fit.params, problem.names):
         _, scale, unit = PARAM_DISPLAY[attr]
-        out.append((name, scale, unit))
+        out.append((shown_names(name), scale, unit))
     if problem.sigma_free:
         out.append((SIGMA_NAME, 1.0, ''))
     return out
@@ -697,7 +697,7 @@ class ProfilePanel(pg.GraphicsLayoutWidget):
         self.addItem(p)
         for bands, col, name in ((nuc, NSLD_COLOUR, 'NSLD'),
                                  (mag, MSLD_COLOUR,
-                                  'MSLD in plane (ρ cos φ)')):
+                                  'MSLD in plane (ρ cos θ)')):
             lo95, lo68, med, hi68, hi95 = bands / 1e-6
             band(p, z, lo95, hi95, col, A_95)
             band(p, z, lo68, hi68, col, A_68)
@@ -950,7 +950,8 @@ class DreamWindow(QtWidgets.QWidget):
                                   rhat_max=target)
         head = ''.join(['Warnings:\n'] + ['  • %s\n' % w for w in warn]
                        + ['\n']) if warn else ''
-        self.summary.setPlainText(head + format_summary(result, self.problem))
+        self.summary.setPlainText(
+            shown_names(head + format_summary(result, self.problem)))
         ok = rhat is not None and bool(np.all(rhat < target))
         text = '<span style="color:%s">● %s</span>' % (
             (OK, 'Converged: R̂ &lt; %g for every parameter' % target) if ok

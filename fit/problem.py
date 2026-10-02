@@ -71,9 +71,10 @@ class FitProblem:
             varied = {p[1] for p in self.params if p[0] == i}
             if {'MSLD_rho', 'MSLD_phi'} <= varied:
                 warnings.warn(
-                    '%s: MSLD_rho and MSLD_phi are both varied, but only '
-                    'rho cos(phi) is measurable (Halperin) and the sign of '
-                    'phi is never determined' % self.stack.layers[i].name,
+                    '%s: MSLD ρ and the out-of-plane angle MSLD θ '
+                    '(MSLD_phi) are both varied, but only ρ cos θ is '
+                    'measurable (Halperin) and the sign of θ is never '
+                    'determined' % self.stack.layers[i].name,
                     stacklevel=2)
         self.lo = np.array([p[3] for p in self.params], dtype=float)
         self.hi = np.array([p[4] for p in self.params], dtype=float)

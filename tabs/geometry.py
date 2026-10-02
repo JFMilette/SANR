@@ -10,12 +10,16 @@ one layer of the Simulation tab's stack and one of its channels.
               polarisation Pi on k_i and the analysed one Pa on k_f
               (length = efficiency; no Pa arrow without an analyser) and
               the polarisation axis (along Pi) through the origin
-    M         the layer's magnetisation rho (cos phi cos theta,
-              cos phi sin theta, sin phi), its in-plane projection (the only
+    M         the layer's magnetisation, its in-plane projection (the only
               part the neutrons see, model.stack HALPERIN) and that
               projection split along P (non-spin-flip: splits R++ / R--)
               and perpendicular to P (spin-flip: R+- / R-+ go as its
-              square), with the angles theta and phi as arcs
+              square), with its angles as arcs: phi in the film plane from
+              x (MSLD_theta) and theta, either SANR's elevation out of the
+              film plane (MSLD_phi, 0 = in plane) or, with 'Licorne
+              angles', Licorne's polar angle from z: 90 deg - elevation
+              (90 = in plane), as in Licorne's msld = [rho, phi, theta]
+              when the import kept Licorne's axes (model.licorne_io ANGLES)
 
 The specular reflectivity does not depend on the beam azimuth (only M
 relative to P enters the transfer matrix); 90 deg, the default, puts the
@@ -174,9 +178,19 @@ class GeometryTab(QtWidgets.QWidget):
                                   'real angles are a few degrees at most')
         self.incidence.valueChanged.connect(self.redraw)
         self.show_split = QtWidgets.QCheckBox('M ∥ P and M ⊥ P', checked=True)
-        self.show_angles = QtWidgets.QCheckBox('angles θ, φ', checked=True)
+        self.show_angles = QtWidgets.QCheckBox('angles φ, θ', checked=True)
         self.show_labels = QtWidgets.QCheckBox('labels', checked=True)
-        for cb in (self.show_split, self.show_angles, self.show_labels):
+        self.licorne_angles = QtWidgets.QCheckBox('Licorne angles')
+        self.licorne_angles.setToolTip(
+            'θ as in Licorne\'s msld = [ρ, φ, θ]: the polar angle from the '
+            'film normal z,\n  θ = 90° − elevation (90° = in plane), instead '
+            'of the elevation out of the plane (0 = in plane).\n'
+            'φ (in plane, from x) is the same in both.  The values equal '
+            'Licorne\'s file when the import kept\n  Licorne\'s axes (M in '
+            'Licorne\'s x-y plane, P along x); otherwise Licorne\'s axes were '
+            'rotated.')
+        for cb in (self.show_split, self.show_angles, self.show_labels,
+                   self.licorne_angles):
             cb.toggled.connect(self.redraw)
 
         views = QtWidgets.QHBoxLayout()
@@ -193,7 +207,8 @@ class GeometryTab(QtWidgets.QWidget):
         form.addRow('Beam azimuth', self.azimuth)
         form.addRow('Incidence (drawn)', self.incidence)
         shows = QtWidgets.QVBoxLayout()
-        for cb in (self.show_split, self.show_angles, self.show_labels):
+        for cb in (self.show_split, self.show_angles, self.show_labels,
+                   self.licorne_angles):
             shows.addWidget(cb)
         form.addRow('Show', shows)
 
@@ -353,17 +368,21 @@ class GeometryTab(QtWidgets.QWidget):
                 label(v, (far + 0.15) * e, name, MUTED, 12)
 
     def _arcs(self, v, M, labels):
-        """theta in the film plane from x, phi up from the film plane, of the
-        drawn M (rho < 0 turns it by 180 deg)."""
+        """phi in the film plane from x and theta, up from the film plane or
+        (Licorne angles) down from z, of the drawn M (rho < 0 turns it by
+        180 deg)."""
         t = np.arctan2(M[1], M[0])
         f = np.arctan2(M[2], np.hypot(M[0], M[1]))
+        if self.licorne_angles.isChecked():
+            self._polar_arc(v, M, t, labels)
+            f = 0.0                     # no elevation arc
         r = 0.75
         s = np.linspace(0, t, 40)
         line(v, np.c_[r * np.cos(s), r * np.sin(s), np.zeros_like(s)],
              THETA_COLOUR)
         if labels and abs(t) > 0.05:
             label(v, [1.1 * r * np.cos(t / 2), 1.1 * r * np.sin(t / 2), 0.05],
-                  'θ', THETA_COLOUR)
+                  'φ', THETA_COLOUR)
         if abs(f) > 1e-3:
             d = np.array([np.cos(t), np.sin(t), 0.0])
             r = 1.05
@@ -371,7 +390,22 @@ class GeometryTab(QtWidgets.QWidget):
             pts = r * (np.outer(np.cos(s), d) + np.outer(np.sin(s), [0, 0, 1]))
             line(v, pts, PHI_COLOUR)
             if labels:
-                label(v, 1.12 * pts[20], 'φ', PHI_COLOUR)
+                label(v, 1.12 * pts[20], 'θ', PHI_COLOUR)
+
+    def _polar_arc(self, v, M, t, labels):
+        """Licorne's theta: from the z axis down to M, in the vertical plane
+        that holds M."""
+        polar = np.arccos(np.clip(M[2] / np.linalg.norm(M), -1, 1))
+        if polar < 1e-3:
+            return
+        d = np.array([np.cos(t), np.sin(t), 0.0])
+        r = 1.05
+        s = np.linspace(0, polar, 40)
+        pts = r * (np.outer(np.sin(s), d) + np.outer(np.cos(s), [0, 0, 1]))
+        line(v, pts, PHI_COLOUR)
+        dashed(v, [0, 0, 0], [0, 0, r], PHI_COLOUR, 0.6)
+        if labels:
+            label(v, 1.12 * pts[20], 'θ (Licorne)', PHI_COLOUR)
 
     def _readout(self, st, k, ch, Pi, Pa):
         L = st.layers[k]
@@ -381,13 +415,22 @@ class GeometryTab(QtWidgets.QWidget):
         mz = rho * sin_turns(L.MSLD_phi)
         mip = ip * np.array([cos_turns(L.MSLD_theta),
                              sin_turns(L.MSLD_theta), 0.0])
-        rows = ['<b>%s</b>  (layer %d)' % (html.escape(L.name), k),
-                'ρ = |M| = %s,  θ = %.4g°,  φ = %.4g°' % (fmt(rho), th, ph),
+        lic = self.licorne_angles.isChecked()
+        if lic:
+            angles = ('Licorne msld = [ρ, φ, θ] = [%s, %.4g°, %.4g°]'
+                      '  (θ from z: 90° = in plane)'
+                      % (fmt(rho), (th + 180) % 360 - 180, 90 - ph))
+        else:
+            angles = ('ρ = |M| = %s,  φ = %.4g° (in plane),  θ = %.4g° (out '
+                      'of plane)' % (fmt(rho), th, ph))
+        rows = ['<b>%s</b>  (layer %d)' % (html.escape(L.name), k), angles,
                 '<span style="color:%s">Seen by the neutrons (in plane): '
-                'ρ cos φ = %s</span>' % (M_COLOUR, fmt(ip))]
+                'ρ %s θ = %s</span>' % (M_COLOUR, 'sin' if lic else 'cos',
+                                       fmt(ip))]
         if abs(mz) > 1e-9:
-            rows.append('M<sub>z</sub> = ρ sin φ = %s: not seen (B<sub>z</sub> '
-                        'is continuous across the surface)' % fmt(mz))
+            rows.append('M<sub>z</sub> = ρ %s θ = %s: not seen (B<sub>z</sub> '
+                        'is continuous across the surface)'
+                        % ('cos' if lic else 'sin', fmt(mz)))
         rows.append('')
         rows.append('<b>R%s</b>: %s' % (ch, CHANNEL_NOTES[ch]))
         rows.append('<span style="color:%s">Pi = %s, |Pi| = %.3g</span>'
