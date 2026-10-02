@@ -20,8 +20,9 @@ sys.path.insert(0, str(HERE.parent))
 
 import model.roughness as rg                                    # noqa: E402
 import model.stack as S                                         # noqa: E402
-from model.licorne_io import (licorne_direction,                # noqa: E402
-                              load_licorne_model, read_table)
+from model.licorne_io import (licorne_axis_map,                 # noqa: E402
+                              licorne_direction, load_licorne_model,
+                              read_assignments, read_parameters, read_table)
 import licorne_reference as lic                                 # noqa: E402
 from licorne_reference import expandrough                       # noqa: E402
 from licorne_inputs import oracle_inputs, stack_inputs          # noqa: E402
@@ -593,16 +594,18 @@ def oracle_slabs(st, layers, sub, R=np.eye(3)):
 @pytest.mark.parametrize('name', ['fixture1'] + V127)
 def test_slabs_match_oracle(name):
     """Every slab (thickness, NSLD, rho, direction) as Licorne's
-    expandrough.m builds it, ported in tests/licorne_reference.py.  The
-    direction floor is wrap_turns rounding the angles to 1e-9 turn."""
+    expandrough.m builds it, ported in tests/licorne_reference.py; the
+    directions compared in Licorne's axes (licorne_axis_map)."""
     d = DATA / name
     st = licorne_exact(load_licorne_model(d / 'parameters.m',
-                                          d / 'profile.dat',
-                                          axis_map=np.eye(3)))
+                                          d / 'profile.dat'))
     st.build_sublayers()
-    t, n, r, u = oracle_slabs(st, *oracle_inputs(d))
+    R = licorne_axis_map(read_parameters(d / 'parameters.m'),
+                         read_assignments(d / 'parameters.m'),
+                         read_table(d / 'profile.dat'))
+    t, n, r, u = oracle_slabs(st, *oracle_inputs(d), R=R)
     assert t <= 1e-12 and n <= 1e-12 and r <= 1e-12
-    assert u <= 1e-8
+    assert u <= 1e-12
 
 
 def _outer_stacks():
@@ -669,9 +672,13 @@ def test_outer_pseudo_layer(case):
         assert d > 1e-2
 
 
-def test_fixture1_angles_stay_zero():
-    _, _, _, _, th, ph = cols(fixture1())
-    assert np.all(th == 0) and np.all(ph == 0)
+def test_fixture1_angles_collinear():
+    """Fixture 1 is collinear (every M along Licorne z, P along x): the
+    import puts every M in the film plane at one angle perpendicular to
+    sample x (model.licorne_io ANGLES)."""
+    _, _, _, rho, th, ph = cols(fixture1())
+    mag = rho != 0
+    assert np.all(th[mag] == 0.75) and np.all(ph == 0)
     assert np.all(REF1[:, 5:7] == 0)
 
 
@@ -693,21 +700,31 @@ def test_import_parameters_only():
 
 def test_import_axis_map(tmp_path):
     p = DATA / V127[0] / 'parameters.m'
-    with pytest.raises(ValueError, match='axis_map'):
-        load_licorne_model(p)
+    # no axis_map needed: the model's plane is put onto the film plane
+    st = load_licorne_model(p)
+    L2 = st.layers[2]
+    u = unit(L2.MSLD_theta, L2.MSLD_phi)
+    assert np.allclose(u, licorne_direction(4.72957, 90), atol=1e-12)
     with pytest.raises(ValueError, match='orthogonal'):
         load_licorne_model(p, axis_map=2 * np.eye(3))
-    # Licorne x -> sample x, Licorne z -> sample y, Licorne y -> sample -z:
-    # theta = 90, phi = phi_L lies at turns (cos phi_L, 0, -sin phi_L)
+    # an explicit axis_map is used as given; Licorne x -> sample x, Licorne
+    # z -> sample y, Licorne y -> sample -z: theta = 90, phi = phi_L lies at
+    # (cos phi_L, 0, -sin phi_L), out of the film plane
     R = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], dtype=float)
-    st = load_licorne_model(p, axis_map=R)
+    with pytest.warns(UserWarning, match='out of the film plane'):
+        st = load_licorne_model(p, axis_map=R)
     L2 = st.layers[2]
     u = unit(L2.MSLD_theta, L2.MSLD_phi)
     assert np.allclose(u, R @ licorne_direction(4.72957, 90), atol=1e-12)
+    # 'NC' is a sharp interface in the supermatrix, refused with Parratt
     bad = tmp_path / 'parameters.m'
     bad.write_text(p.read_text().replace("'tanh'", "'NC'"))
+    st = load_licorne_model(bad)
+    assert {l.roughness_model for l in st.layers[1:]} == {'none'}
+    bad.write_text(bad.read_text().replace("Formalism='Supermatrix';",
+                                           "Formalism='Parratt';"))
     with pytest.raises(NotImplementedError):
-        load_licorne_model(bad, axis_map=np.eye(3))
+        load_licorne_model(bad)
 
 
 # -- 8.5 the angle rule against Licorne ---------------------------------------

@@ -534,13 +534,17 @@ def dataset_series(D, k, line=False):
     return [(name, None) + res], ''
 
 
-def simulation_channels(stack, Q, vectors):
+def simulation_channels(stack, Q, vectors, norms=None):
     """Channels dict of the stack's reflectivity on Q, one channel per
-    {name: [Pi, Pa]} of vectors (see model.polarisation.vectors_pair); zero errors."""
+    {name: [Pi, Pa]} of vectors (see model.polarisation.vectors_pair); zero errors.
+    norms: {name: fixed factor} of channels that have one (Licorne's
+    Norm_factor), 1 for the others."""
     names = [c for c in PLOT_ORDER if c in vectors]
     # a transverse P is reported by the Simulation tab and the fit
+    norms = norms or {}
     R = stack.reflectivities(Q, [vectors_pair(*vectors[c]) for c in names],
-                             warn=False)
+                             warn=False,
+                             norms=[norms.get(c, 1.0) for c in names])
     zero = np.zeros_like(Q)
     return {ch: dict(Q=Q, R=R[:, j], dR=zero, dQ=zero,
                      theta=np.full_like(Q, np.nan), path='simulation')
@@ -829,6 +833,9 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                 tip += '\n%s%s' % (vec_text(self.channel_vectors(s, ch)),
                                    '' if own is not None else
                                    ' (Simulation tab)')
+                if d.get('norm', 1.0) != 1.0:
+                    tip += '\nnorm = %g (fixed factor on the model, ' \
+                           'Licorne Norm_factor)' % d['norm']
                 it.setToolTip(0, tip)
                 top.addChild(it)
                 if select == (i, ch):
@@ -1113,6 +1120,8 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                                                            'dQ')},
                                  path=d['path'])
                     c['pol'] = d.get('pol')
+                    if d.get('norm', 1.0) != 1.0:
+                        c['norm'] = d['norm']
                     e['channels'][ch] = c
             sets.append(e)
         return dict(
@@ -1156,7 +1165,8 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                     except (OSError, ValueError) as exc:
                         missing.append('%s — R%s: %s' % (e['name'], ch, exc))
                         continue
-                s['channels'][ch] = dict(d, pol=c.get('pol'))
+                s['channels'][ch] = dict(d, pol=c.get('pol'),
+                                         norm=float(c.get('norm', 1.0)))
             self.sets.append(s)
         sim = self.simulation
         for s in self.sets:

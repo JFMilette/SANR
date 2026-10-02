@@ -31,20 +31,46 @@ Its substrate has no magnetisation.
 
 ANGLES -- Licorne's msld = [rho, phi_deg, theta_deg] with
 m = rho (sin theta cos phi, sin theta sin phi, cos theta) in Licorne's axes.
-How these axes map onto this code's sample frame (z = film normal) is NOT
-known (TODO: Licorne's x is in plane -- the manual's superlattice example
-uses theta = 90, phi = 0/180 with P along x -- but whether its y or z is the
-film normal cannot be told from the manual's figure).  So axis_map, an
-orthogonal 3x3 matrix with m_sample = axis_map @ m_licorne, is required as
-soon as two magnetic layers point differently.  Without it a collinear model
-is loaded with every M along sample +x (theta = phi = 0): only the relative
-directions are then meaningful, and the polarisation must be set along x.
-load_licorne_session does so: a channel's Polarization / Analysis must lie
-along one Licorne axis and becomes the same signed length along sample x.
+Licorne has no film normal: all three components of every M enter its
+supermatrix, and only directions relative to each other and to P matter (a
+common rotation of every M and P changes nothing).  So the import picks the
+rotation R (m_sample = R m_Licorne, licorne_axis_map) that puts the plane of
+the model's vectors onto the film plane, where SANR (HALPERIN) sees all of
+them: the directions of every magnetic layer, every Polarization /
+Analysis row in use, and every non-magnetic interior layer that shares a
+rough interface with a magnetic one (its stored angle shows in its half of
+that window, model.stack 'step' with step_fallback False).  Their SVD gives
+the rank r:
+  r <= 2  R = [e1; e2; n]: e1 the first polarisation (sample x), n the
+          normal of their plane (smallest singular vector; for r = 1 any
+          vector perpendicular to e1), e2 = n x e1; det R = +1
+  r = 3   the vectors are not coplanar: Licorne lets a component along the
+          film normal act, which specular PNR cannot see.  Refused (ValueError)
+          unless axis_map is given, which then warns that the out-of-plane
+          parts are lost.
+An explicit axis_map (orthogonal 3x3) replaces R.
+
+NORMALISATION -- Licorne returns (R++ + R+-)/2 for a channel without
+analyser (spin_av with rho = 1: trace / 4), compensated by its per-channel
+Norm_factor (2 by default); SANR's no-analyser channel is R++ + R+-.  Channel
+k therefore gets the fixed norm Norm_factor(k) / 2 without analyser,
+Norm_factor(k) with one (fit.problem DATA 'norm', Stack.reflectivities
+norms); when every channel in use has the same norm it becomes the stack's
+scale instead, and the norms stay 1.
+
+NOT REPRODUCED -- reported in the session notes: Formalism 'Parratt' (SANR
+computes the supermatrix), a second incoherent fraction (Fraction < 100,
+Layers2), Q-dependent polariser / analyser efficiencies (Polarizer /
+Analyser = 1, pol.dat / an.dat; |P| of Polarization / Analysis is used),
+Q_mult / Rexp_mult other than 1 (not applied).  An 'NC' (Nevot-Croce)
+interface is sharp in Licorne's supermatrix (expandrough.m skips it,
+reflection_s never reads it) and is imported as 'none'; with Formalism
+'Parratt' it is refused (NotImplementedError).
 """
 
 import os
 import re
+import warnings
 
 import numpy as np
 
@@ -129,60 +155,147 @@ def sample_angles(u):
             float(np.arctan2(u[2], np.hypot(u[0], u[1])) / (2*np.pi)))
 
 
-def _function(name):
+def _function(name, formalism='Supermatrix'):
+    """SANR roughness_model of a Licorne roughness_fun.  'NC' is a sharp
+    interface in the supermatrix (see NOT REPRODUCED)."""
     key = str(name).lower()
     if key == 'nc':
-        raise NotImplementedError("Licorne's 'NC' roughness (Nevot-Croce "
-                                  "inside Parratt) is not supported")
+        if str(formalism).lower() == 'parratt':
+            raise NotImplementedError("Licorne's 'NC' roughness (Nevot-Croce "
+                                      "inside Parratt) is not supported")
+        return 'none'
     if key not in _FUNCS:
         raise ValueError('unknown Licorne roughness_fun %r' % (name,))
     return _FUNCS[key]
 
 
+def _channel_rows(top):
+    """(Polarization, Analysis) rows of the Pol_num channels in use."""
+    pols = [np.asarray(v, dtype=float) for v in top.get('Polarization', [])]
+    ans = [np.asarray(v, dtype=float) for v in top.get('Analysis', [])]
+    n = int(top.get('Pol_num', len(pols)))
+    return pols[:n], ans[:n]
+
+
+def _msld(par, profile=None):
+    """(rho, phi_deg, theta_deg) arrays of the layers and the substrate,
+    from profile.dat's table if given (6 figures), else parameters.m; the
+    substrate has no magnetisation in Licorne."""
+    lay_p = par['layers'] + [par['substrate']]
+    if profile is not None:
+        rho, phi, theta = (np.array(profile[:, c], dtype=float)
+                           for c in (4, 5, 6))
+    else:
+        msld = [p.get('msld', [0.0, 0.0, 0.0]) for p in lay_p]
+        rho, phi, theta = (np.array([float(m[i]) for m in msld])
+                           for i in range(3))
+    rho[-1] = 0.0
+    return rho, phi, theta
+
+
+def _rough(p):
+    """A Licorne interface is rough with sigma_L > 0 and a function other
+    than NC."""
+    return float(p.get('roughness', 0.0)) > 0 and \
+        str(p.get('roughness_fun', 'none')).lower() not in ('nc', 'none')
+
+
+def model_vectors(par, top, profile=None):
+    """Unit vectors (Licorne axes) that fix the model's orientation (see
+    ANGLES): magnetic layers, a non-magnetic interior layer that shares a
+    rough interface with a magnetic one, the channels' P; the first P
+    (else the first M) is returned first."""
+    rho, phi, theta = _msld(par, profile)
+    lay_p = par['layers'] + [par['substrate']]
+    n = len(lay_p) - 1                       # interior layers 0..n-1
+    mag = [i for i in range(n) if rho[i] != 0]
+    shared = [i for i in range(n) if rho[i] == 0 and (
+        (i > 0 and rho[i - 1] != 0 and _rough(lay_p[i])) or
+        (i + 1 < n and rho[i + 1] != 0 and _rough(lay_p[i + 1])))]
+    m = [licorne_direction(phi[i], theta[i]) for i in mag + shared]
+    pols, ans = _channel_rows(top)
+    p = [v / np.linalg.norm(v) for v in pols + ans if np.any(v)]
+    return p + m
+
+
+def licorne_axis_map(par, top, profile=None):
+    """R with m_sample = R m_Licorne (see ANGLES); ValueError for a model
+    whose vectors are not coplanar."""
+    vecs = model_vectors(par, top, profile)
+    if not vecs:
+        return np.eye(3)
+    V = np.array(vecs)
+    _, sv, Vt = np.linalg.svd(V)
+    sv = np.r_[sv, np.zeros(3 - len(sv))]
+    rank = int(np.sum(sv > 1e-9 * sv[0]))
+    if rank == 3:
+        raise ValueError('the Licorne model\'s magnetisations and '
+                         'polarisations are not coplanar: Licorne lets a '
+                         'component along the film normal act, which specular '
+                         'reflectivity cannot see; give axis_map to import it '
+                         'anyway (that component is then lost)')
+    e1 = V[0]
+    if rank == 2:
+        n = Vt[2]
+    else:                       # any normal: the axis least along e1
+        a = np.eye(3)[np.argmin(np.abs(e1))]
+        n = np.cross(a, e1)
+        n /= np.linalg.norm(n)
+    n = n * np.sign(n[np.argmax(np.abs(n))])     # a fixed sign: v127 -> I
+    R = np.vstack([e1, np.cross(n, e1), n])
+    assert np.allclose(R @ R.T, np.eye(3), atol=1e-12)
+    assert abs(np.linalg.det(R) - 1) < 1e-12
+    return R
+
+
+def _out_of_plane(R, vecs):
+    """Largest film-normal component of the mapped vectors."""
+    return max((abs((R @ v)[2]) for v in vecs), default=0.0)
+
+
 def load_licorne_model(parameters_m_path, profile_dat_path=None,
-                       axis_map=None):
+                       axis_map=None, notes=None):
     """Stack (roughness_scheme 'licorne', magnetic_smearing 'step') of a
     Licorne export: vacuum fronting, the layers, the substrate as backing.
-    See FILES for which file each value comes from and ANGLES for axis_map.
-    """
+    See FILES for which file each value comes from and ANGLES for the axes
+    (licorne_axis_map unless axis_map is given).  What is not reproduced is
+    appended to `notes` (a list) if given."""
     par = read_parameters(parameters_m_path)
+    top = read_assignments(parameters_m_path)
     lay_p = par['layers'] + [par['substrate']]          # interface owners
     n = len(lay_p)
+    tab = None
     if profile_dat_path is not None:
         tab = read_table(profile_dat_path)
         if len(tab) != n:
             raise ValueError('%s has %d rows, parameters.m %d layers + '
                              'substrate' % (profile_dat_path, len(tab), n - 1))
         thick, re_n, im_n = tab[:, 1], tab[:, 2], tab[:, 3]
-        rho, phi, theta = tab[:, 4], tab[:, 5], tab[:, 6]
     else:
         nsld = [complex(p['nsld']) for p in lay_p]
-        msld = [p.get('msld', [0.0, 0.0, 0.0]) for p in lay_p]
         thick = np.array([p.get('thickness', 0.0) for p in lay_p])
         re_n = np.array([v.real for v in nsld])
         im_n = np.array([v.imag for v in nsld])
-        rho, phi, theta = (np.array([float(m[i]) for m in msld])
-                           for i in range(3))
-    # the substrate has no magnetisation in Licorne
-    rho = np.array(rho, dtype=float)
-    rho[-1] = 0.0
+    rho, phi, theta = _msld(par, tab)
 
-    dirs = [licorne_direction(p, t) for p, t in zip(phi, theta)]
-    mag = [i for i in range(n) if rho[i] != 0]
-    collinear = all(np.allclose(dirs[i], dirs[mag[0]], atol=1e-12)
-                    for i in mag)
-    if axis_map is None and not collinear:
-        raise ValueError('the magnetic layers point in different directions:'
-                         ' axis_map (Licorne axes -> sample frame) is '
-                         'required, see licorne_io ANGLES')
-    if axis_map is not None:
+    if axis_map is None:
+        R = licorne_axis_map(par, top, tab)
+    else:
         R = np.asarray(axis_map, dtype=float)
         if R.shape != (3, 3) or not np.allclose(R @ R.T, np.eye(3)):
             raise ValueError('axis_map must be an orthogonal 3x3 matrix')
-        angles = [sample_angles(R @ u) for u in dirs]
-    else:
-        angles = [(0.0, 0.0)] * n
+        if _out_of_plane(R, model_vectors(par, top, tab)) > 1e-9:
+            warnings.warn('axis_map leaves magnetisations or polarisations '
+                          'out of the film plane: that component is not seen '
+                          'here (HALPERIN), Licorne used it', stacklevel=2)
+    angles = [sample_angles(R @ licorne_direction(p, t))
+              for p, t in zip(phi, theta)]
 
+    formalism = top.get('Formalism', 'Supermatrix')
+    funs = [str(p.get('roughness_fun', 'none')) for p in lay_p]
+    if notes is not None and any(f.lower() == 'nc' for f in funs):
+        notes.append("'NC' interfaces are sharp in Licorne's supermatrix: "
+                     "imported as 'none'.")
     layers = [Layer('vacuum', 0.0, 0.0, 0.0, 0.0, 0.0)]
     for i, p in enumerate(lay_p):
         last = i == n - 1
@@ -193,19 +306,25 @@ def load_licorne_model(parameters_m_path, profile_dat_path=None,
             MSLD_rho=float(rho[i]), MSLD_theta=angles[i][0],
             MSLD_phi=angles[i][1],
             roughness_sigma=float(p.get('roughness', 0.0)),
-            roughness_model=_function(p.get('roughness_fun', 'none')),
+            roughness_model=_function(funs[i], formalism),
             roughness_sublayer=int(p.get('roughness_nbound', 1))))
     return Stack(layers, roughness_scheme='licorne')
 
 
 def read_resolution(path):
-    """Stack.resolution entries ('tof' mode) of a resolution.m written in
-    Licorne's TOF template: Theta<i>, DTheta<i> (rad) per angle, Q<i> the
-    upper Q of angle i (the last one open-ended) and DLambda (A).  None if the
-    script is not that template."""
+    """Stack.resolution entries of a resolution.m written in one of
+    Licorne's templates, None for any other script:
+      TOF   Theta<i>, DTheta<i> (rad) per angle, Q<i> the upper Q of angle i
+            (the last one open-ended) and DLambda (A) -> mode 'tof'
+      MONO  Lambda, DLambda (A), DTheta (rad, as DTheta=... or
+            DTheta(Q > 0)=...), Theta = asin(Q Lambda / 4 pi) and
+            Sigma=Q.*sqrt((DTheta./Theta).^2+(DLambda/Lambda)^2)
+            -> mode 'mono'"""
     v = read_assignments(path)
     idx = sorted(int(k[5:]) for k in v if re.fullmatch(r'Theta\d+', k))
-    if not idx or idx != list(range(1, len(idx) + 1)) or \
+    if not idx:
+        return _read_mono(path, v)
+    if idx != list(range(1, len(idx) + 1)) or \
             not isinstance(v.get('DLambda'), float):
         return None
     angles = []
@@ -220,19 +339,78 @@ def read_resolution(path):
             'tof_angles': angles}
 
 
-def licorne_channel(pol, an):
-    """(name, [Pi, Pa], axis) of a Licorne channel from its Polarization
-    and Analysis rows: both along one Licorne axis (index `axis`), which
-    becomes sample x (ANGLES).  Pa = (0, 0, 0) is no analyser."""
+_MONO_SIGMA = 'sigma=q.*sqrt((dtheta./theta).^2+(dlambda/lambda)^2);'
+_MONO_THETA = re.compile(r'theta=asin\((q\.?\*lambda|lambda\.?\*q)'
+                         r'(/4/pi|/\(4\*pi\)|\./4\./pi)\);')
+_DTHETA = re.compile(r'(?:^|;)\s*DTheta\s*(?:\(\s*Q\s*>\s*0\s*\))?\s*=\s*'
+                     r'([-+0-9.eE]+)\s*;', re.M)
+
+
+def _read_mono(path, v):
+    """MONO template of read_resolution, None if the script is not it."""
+    with open(path) as fh:
+        text = re.sub(r'%.*', '', fh.read())
+    flat = re.sub(r'\s+', '', text).lower()
+    dth = _DTHETA.findall(text)
+    lam, dlam = v.get('Lambda'), v.get('DLambda')
+    if _MONO_SIGMA not in flat or not _MONO_THETA.search(flat) or \
+            len(dth) != 1 or not isinstance(lam, float) or \
+            not isinstance(dlam, float) or lam <= 0:
+        return None
+    return {'enabled': True, 'mode': 'mono', 'wavelength': lam,
+            'dlambda_rel': dlam / lam, 'dtheta': float(dth[0])}
+
+
+def licorne_channel(pol, an, R=np.eye(3)):
+    """(name, [Pi, Pa]) of a Licorne channel from its Polarization and
+    Analysis rows mapped into the sample frame by R (see ANGLES); named by
+    the signs along sample x (the first polarisation).  Pa = (0, 0, 0) is
+    no analyser."""
     pol, an = np.asarray(pol, dtype=float), np.asarray(an, dtype=float)
-    axes = set(np.flatnonzero(pol)) | set(np.flatnonzero(an))
-    if not np.any(pol) or len(axes) != 1:
-        raise ValueError('Polarization %s / Analysis %s do not lie along one '
-                         'axis' % (pol.tolist(), an.tolist()))
-    ax = axes.pop()
-    p, a = float(pol[ax]), float(an[ax])
-    name = ('+' if p > 0 else '-') + ('' if a == 0 else '+' if a > 0 else '-')
-    return name, [[p, 0.0, 0.0], [a, 0.0, 0.0]], int(ax)
+    if not np.any(pol):
+        raise ValueError('Polarization %s is zero' % pol.tolist())
+    Pi, Pa = R @ pol, R @ an
+    Pi, Pa = (np.where(np.abs(v) < 1e-12, 0.0, v) for v in (Pi, Pa))
+    if Pi[0] == 0 or (np.any(Pa) and Pa[0] == 0):
+        raise ValueError('Polarization %s / Analysis %s have no component '
+                         'along the first polarisation'
+                         % (pol.tolist(), an.tolist()))
+    name = ('+' if Pi[0] > 0 else '-') + \
+        ('' if not np.any(Pa) else '+' if Pa[0] > 0 else '-')
+    return name, [[float(c) for c in Pi], [float(c) for c in Pa]]
+
+
+def channel_norms(top, pols, ans):
+    """Fixed norm of each channel in use (see NORMALISATION)."""
+    nf = top.get('Norm_factor', [])
+    nf = [float(x) for x in (nf if isinstance(nf, list) else [nf])]
+    return [(nf[k] if k < len(nf) else 1.0) / (1.0 if np.any(a) else 2.0)
+            for k, a in enumerate(ans[:len(pols)])]
+
+
+def import_notes(top):
+    """What Licorne computed that SANR does not reproduce (NOT
+    REPRODUCED)."""
+    notes = []
+    if str(top.get('Formalism', 'Supermatrix')).lower() == 'parratt':
+        notes.append("Licorne used the Parratt formalism (M along z only, no "
+                     "spin flip, Nevot-Croce on 'NC' interfaces); SANR "
+                     "computes the supermatrix.")
+    if float(top.get('Fraction', 100)) < 100:
+        notes.append('Second incoherent fraction (Fraction = %g %%, Layers2) '
+                     'ignored.' % float(top['Fraction']))
+    if top.get('Polarizer') == 1 or top.get('Analyser') == 1:
+        notes.append('Q-dependent polariser / analyser efficiency '
+                     '(pol.dat / an.dat) ignored; |P| from Polarization / '
+                     'Analysis is used.')
+    pols, _ = _channel_rows(top)
+    rm = top.get('Rexp_mult', [])
+    rm = rm if isinstance(rm, list) else [rm]
+    qm = top.get('Q_mult', 1.0)
+    if qm != 1 or any(float(x) != 1 for x in rm[:len(pols)]):
+        notes.append('Q_mult = %g, Rexp_mult = %s are not applied.'
+                     % (qm, [float(x) for x in rm[:len(pols)]]))
+    return notes
 
 
 def _set_fit(stack, par):
@@ -257,24 +435,32 @@ def _curve(path):
 def load_licorne_session(folder, axis_map=None):
     """A saved Licorne session folder (FILES) as a dict:
       stack     load_licorne_model of it, with the fit flags and bounds,
-                the background and, if resolution.m is Licorne's TOF
-                template, the resolution
+                the background, the scale (a common Norm_factor, see
+                NORMALISATION) and, if resolution.m is one of Licorne's
+                templates, the resolution (Licorne's own convolution,
+                ResolutionFun)
       name      the folder's name
       q_path    q.dat
-      channels  [{'channel', 'path' (rexp<k>.dat), 'pol' [Pi, Pa]}]
+      channels  [{'channel', 'path' (rexp<k>.dat), 'pol' [Pi, Pa],
+                  'norm', 'k'}]
       theory    [{'channel', 'path', 'Q', 'R', 'pol'}] from rtheory<k>.dat
       qrange    (min, max) of q.dat
+      axis_map  R, m_sample = R m_Licorne (see ANGLES)
       notes     what was not carried over, as text
     Only the first Pol_num rows of Polarization / Analysis are used."""
     folder = os.path.abspath(folder)
     par_path = os.path.join(folder, 'parameters.m')
     prof = os.path.join(folder, 'profile.dat')
-    stack = load_licorne_model(par_path,
-                               prof if os.path.isfile(prof) else None,
-                               axis_map)
+    prof = prof if os.path.isfile(prof) else None
     par = read_parameters(par_path)
     top = read_assignments(par_path)
-    notes = []
+    if axis_map is None:
+        R = licorne_axis_map(par, top,
+                             None if prof is None else read_table(prof))
+    else:
+        R = np.asarray(axis_map, dtype=float)
+    notes = import_notes(top)
+    stack = load_licorne_model(par_path, prof, R, notes)
     _set_fit(stack, par)
     if any(any(p.get('msld_fit', [0, 0, 0])[1:]) for p in par['layers']):
         notes.append('Fitted magnetisation angles are not carried over.')
@@ -284,24 +470,23 @@ def load_licorne_session(folder, axis_map=None):
     res = read_resolution(res_path) if os.path.isfile(res_path) else None
     if res is not None:
         stack.resolution.update(res)
+        fun = top.get('ResolutionFun')
+        if fun in (1, 2, 3):
+            stack.resolution.update(scheme='licorne', licorne_fun=int(fun))
     else:
         stack.resolution['enabled'] = False
-        notes.append('resolution.m is not Licorne\'s TOF template: the '
-                     'resolution is off.')
+        notes.append('resolution.m is not one of Licorne\'s templates (TOF, '
+                     'MONO): the resolution is off.')
 
     q_path = os.path.join(folder, 'q.dat')
     Q = _curve(q_path)[:, 0]
-    pols = top.get('Polarization', [])
-    ans = top.get('Analysis', [])
-    n = int(top.get('Pol_num', len(pols)))
-    # Licorne direction of every magnetic layer, to check it lies along P
-    mag = [licorne_direction(m[1], m[2]) for m in
-           (p.get('msld', [0, 0, 0]) for p in par['layers']) if m[0] != 0]
-    channels, theory, seen, skew = [], [], set(), set()
-    for k in range(1, n + 1):
+    pols, ans = _channel_rows(top)
+    norms = channel_norms(top, pols, ans)
+    channels, theory, seen = [], [], set()
+    for k in range(1, int(top.get('Pol_num', len(pols))) + 1):
         rexp = os.path.join(folder, 'rexp%d.dat' % k)
         try:
-            ch, pol, ax = licorne_channel(pols[k - 1], ans[k - 1])
+            ch, pol = licorne_channel(pols[k - 1], ans[k - 1], R)
         except (IndexError, ValueError) as exc:
             notes.append('Channel %d left out: %s' % (k, exc))
             continue
@@ -314,20 +499,31 @@ def load_licorne_session(folder, axis_map=None):
             notes.append('Channel %d left out: no rexp%d.dat.' % (k, k))
             continue
         seen.add(ch)
-        channels.append({'channel': ch, 'path': rexp, 'pol': pol, 'k': k})
-        if any(abs(abs(u[ax]) - 1) > 1e-9 for u in mag):
-            skew.add('xyz'[ax])
+        channels.append({'channel': ch, 'path': rexp, 'pol': pol,
+                         'norm': norms[k - 1], 'k': k})
         th = os.path.join(folder, 'rtheory%d.dat' % k)
         if os.path.isfile(th):
-            R = _curve(th)[:, 0]
-            if len(R) == len(Q):
+            Rt = _curve(th)[:, 0]
+            if len(Rt) == len(Q):
                 theory.append({'channel': ch, 'path': th, 'Q': Q.copy(),
-                               'R': R, 'pol': pol})
-    if skew and axis_map is None:
-        notes.append('In Licorne the polarisation (along its %s) is not '
-                     'parallel to the magnetisation (msld phi, theta); here '
-                     'both lie along sample x, so the reflectivity can differ '
-                     'from rtheory*.dat.' % ', '.join(sorted(skew)))
+                               'R': Rt, 'pol': pol})
+    # one common norm is the stack's scale
+    if channels and len({c['norm'] for c in channels}) == 1:
+        stack.scale = channels[0]['norm']
+        for c in channels:
+            c['norm'] = 1.0
+    # no splitting possible: P perpendicular to every magnetisation
+    m = [stack.inplane_rho(l) != 0 for l in stack.layers[1:-1]]
+    dirs = [np.array([np.cos(2*np.pi*l.MSLD_theta),
+                      np.sin(2*np.pi*l.MSLD_theta), 0.0])
+            for l, on in zip(stack.layers[1:-1], m) if on]
+    P = [np.asarray(c['pol'][0]) for c in channels]
+    if dirs and P and all(abs(u @ p) < 1e-9 * np.linalg.norm(p)
+                          for u in dirs for p in P):
+        notes.append('In this Licorne model the polarisation is '
+                     'perpendicular to every magnetisation: R+ = R- (no spin '
+                     'splitting) in Licorne and here.')
     return {'stack': stack, 'name': os.path.basename(folder),
             'q_path': q_path, 'channels': channels, 'theory': theory,
-            'qrange': (float(Q.min()), float(Q.max())), 'notes': notes}
+            'qrange': (float(Q.min()), float(Q.max())), 'axis_map': R,
+            'notes': notes}

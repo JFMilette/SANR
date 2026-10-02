@@ -22,7 +22,6 @@ from model.licorne_resolution import kernel                     # noqa: E402
 
 FIX1 = HERE / 'data' / 'licorne' / 'fixture1'
 X = np.array([1.0, 0.0, 0.0])
-Z = np.array([0.0, 0.0, 1.0])
 # fixture 1's q.dat grid and the TOF resolution of IPTS 27232 S1 best_103
 Q1 = np.linspace(0.0106348, 0.24841, 204)
 BEST_103 = {'enabled': True, 'mode': 'tof', 'tof_dlambda': 0.005,
@@ -101,16 +100,16 @@ def fixture1_stack(scheme='licorne'):
 
 def test_fixture1_resolution_benchmark():
     """D3 on fixture 1's grid with the best_103 TOF resolution.  The
-    'licorne' scheme equals the oracle end to end (M along Licorne z, P
-    along it: the import puts both along sample x); against a converged
-    Gaussian average it is ~10 % off just above the critical edge, while
-    the quadrature stays within 0.5 %."""
+    'licorne' scheme equals the oracle end to end (P along Licorne x, which
+    the import keeps as sample x); against a converged Gaussian average it
+    is ~10 % off just above the critical edge, while the quadrature stays
+    within 0.5 %."""
     st = fixture1_stack()
     st.background = 1e-6
     sigma = st.resolution_sigma(Q1)
     layers, sub = oracle_inputs(FIX1)
     for s in (1, -1):
-        ref = lic.licorne_R(Q1, sigma, layers, sub, s * Z, np.zeros(3),
+        ref = lic.licorne_R(Q1, sigma, layers, sub, s * X, np.zeros(3),
                             norm=2, background=1e-6, res_mode=3)
         R = st.reflectivities(Q1, [(s * X, None)])[:, 0]
         assert np.max(np.abs(R / ref - 1)) <= 1e-12

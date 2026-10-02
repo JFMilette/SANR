@@ -152,7 +152,8 @@ returns one column per pair (Ruehm, Toperverg & Dosch, PRB 60, 16073,
 Eq. 2): R = Tr{rho r rho0 r^+}, rho0 = (1 + P0.sigma)/2,
 rho = (1 + P.sigma)/2, or rho = 1 for P=None (all reflected spins counted).
 The background is added once per pair, after the scale factor: R+ = (n, None)
-is scale (R++ + R+-) + background.  model.polarisation names the usual pairs.
+is scale (R++ + R+-) + background (times a fixed per-pair norm before the
+background if given).  model.polarisation names the usual pairs.
 
 With a non-magnetic fronting this holds for any backing, and all pairs share
 one transfer-matrix evaluation.  With a magnetic fronting the two eigenspins
@@ -233,10 +234,15 @@ RES_EDGE_WIDTH = 8
 TM_BLOCK = 256
 
 
-def wrap_turns(t):
-    """Angle in turns folded into [0, 1); rounding first keeps -1e-17 at 0
-    instead of 1 (i.e. 0 deg, not 360)."""
-    return np.round(np.asarray(t, dtype=float), 9) % 1.0
+def wrap_turns(t, decimals=9):
+    """Angle in turns folded into [0, 1); rounding first (to `decimals`)
+    keeps -1e-17 at 0 instead of 1 (i.e. 0 deg, not 360)."""
+    return np.round(np.asarray(t, dtype=float), decimals) % 1.0
+
+
+# wrap_turns rounding in the Licorne scheme: fine enough not to limit the
+# agreement with Licorne (1e-9 turn costs ~1e-7 on a small spin-flip channel)
+LICORNE_DECIMALS = 15
 
 
 # |M| below M_TINY of the largest layer rho has no meaningful direction: its
@@ -760,13 +766,15 @@ class Stack:
             mp = v[3] + 1j * v[4]
             a = np.abs(mp)
             return (nsld, np.hypot(a, v[5]),
-                    wrap_turns(np.angle(mp) / (2*np.pi)),
+                    wrap_turns(np.angle(mp) / (2*np.pi), LICORNE_DECIMALS),
                     np.arctan2(v[5], a) / (2*np.pi))
         if mode == 'angle':
             # angles interpolated with the profile fraction, never
             # renormalised (an angle has no amount of material)
             return (nsld, v[2],
-                    wrap_turns(A.MSLD_theta + (B.MSLD_theta - A.MSLD_theta) * s),
+                    wrap_turns(A.MSLD_theta
+                               + (B.MSLD_theta - A.MSLD_theta) * s,
+                               LICORNE_DECIMALS),
                     A.MSLD_phi + (B.MSLD_phi - A.MSLD_phi) * s)
         # 'step': the upper layer for x <= 0, the lower for x > 0, or the
         # other one when that layer has no angle
@@ -778,7 +786,8 @@ class Stack:
         theta = np.array([l.MSLD_theta for l in self.layers])[k]
         phi = np.array([l.MSLD_phi for l in self.layers])[k]
         none = ~has[k]
-        return (nsld, v[2], wrap_turns(np.where(none, 0.0, theta)),
+        return (nsld, v[2], wrap_turns(np.where(none, 0.0, theta),
+                                       LICORNE_DECIMALS),
                 np.where(none, 0.0, phi))
 
     def _licorne_regions(self, geo):
@@ -800,7 +809,8 @@ class Stack:
     @staticmethod
     def _nominal(layer):
         return (complex(layer.NSLD_real, layer.NSLD_img), layer.MSLD_rho,
-                float(wrap_turns(layer.MSLD_theta)), layer.MSLD_phi)
+                float(wrap_turns(layer.MSLD_theta, LICORNE_DECIMALS)),
+                layer.MSLD_phi)
 
     def _build_licorne(self):
         """Licorne slabs (see ROUGHNESS SCHEME): N equal slabs per window at
@@ -1010,10 +1020,12 @@ class Stack:
         """reflectivities for the single pair (P0, P), shape (nQ,)."""
         return self.reflectivities(Q, [(P0, P)])[:, 0]
 
-    def reflectivities(self, Q, pairs, warn=True):
-        """scale x reflectivity + background of each (P0, P) in pairs (see
-        POLARISATION), averaged over the Q resolution when it is enabled.
-        Shape (nQ, len(pairs)).  warn=False silences the warning about a
+    def reflectivities(self, Q, pairs, warn=True, norms=None):
+        """norm x scale x reflectivity + background of each (P0, P) in
+        pairs (see POLARISATION), averaged over the Q resolution when it is
+        enabled.  Shape (nQ, len(pairs)).  norms: a fixed factor per pair
+        (default 1; Licorne's per-channel Norm_factor, model.licorne_io
+        NORMALISATION).  warn=False silences the warning about a
         polarisation transverse to a magnetic fronting's M."""
         pairs = _check_pairs(pairs)
         m = self.fronting_direction()
@@ -1022,6 +1034,11 @@ class Stack:
         else:
             w = self._lab_weights(pairs, m, warn)
             R = _weigh(self._resolve(Q, self._lab_channels), w)
+        if norms is not None:
+            norms = np.asarray(norms, dtype=float)
+            if norms.shape != (len(pairs),):
+                raise ValueError('one norm per pair')
+            R = norms * R
         return self.scale * R + self.background
 
     def critical_edges(self):

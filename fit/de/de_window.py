@@ -248,6 +248,9 @@ class DEWindow(QtWidgets.QWidget):
         self.polish, self.cost_label = polish, cost_label
         self.stack = copy.deepcopy(problem.stack)
         self.data, self.vectors, self.model_Q = data, vectors, Q
+        # the fitted channels' fixed norms (Licorne's Norm_factor)
+        self.norms = {name[1:]: n for (name, *_), n
+                      in zip(problem.channels, problem.norms)}
         self.entries = []
         self.running = True
         self.setWindowTitle('Fit — %s' % title)
@@ -359,7 +362,7 @@ class DEWindow(QtWidgets.QWidget):
             # imported here: the Experimental tab imports this module
             from tabs.experimental import simulation_channels
             self._model = simulation_channels(self.stack, self.model_Q,
-                                              self.vectors)
+                                              self.vectors, self.norms)
             self._redraw_reflectance()
         except Exception as exc:                      # keep the window alive
             self.status.setText('Cannot draw this entry: %s' % exc)

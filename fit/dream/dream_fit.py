@@ -272,8 +272,8 @@ def save_result(path, result, problem, sources=()):
     data of every channel (ch<k>_Q, ch<k>_R, ch<k>_dR: the points and
     errors the likelihood used), the sampler state (state_<name>, so that
     the run can be continued), and as JSON the names, bounds, each
-    channel's name and polarisation pair, data hash, data `sources` (e.g.
-    file names), git hash, stack mode flags and the stack itself, so that
+    channel's name, polarisation pair and norm, data hash, data `sources`
+    (e.g. file names), git hash, stack mode flags and the stack itself, so that
     load_run can rebuild the PosteriorProblem (not its `priors`, which are
     functions)."""
     st = problem.fit.stack
@@ -284,8 +284,10 @@ def save_result(path, result, problem, sources=()):
                 roughness_scheme=st.roughness_scheme,
                 magnetic_smearing=st.magnetic_smearing,
                 resolution=st.resolution, stack=st.to_dict(),
-                channels=[dict(name=name, P0=P0, P=P) for (name, *_), (P0, P)
-                          in zip(problem.fit.channels, problem.fit.pairs)])
+                channels=[dict(name=name, P0=P0, P=P, norm=norm)
+                          for (name, *_), (P0, P), norm
+                          in zip(problem.fit.channels, problem.fit.pairs,
+                                 problem.fit.norms)])
     data = {}
     for k, (_, idx, R, dR) in enumerate(problem.fit.channels):
         data.update({'ch%d_Q' % k: problem.fit.Q[idx], 'ch%d_R' % k: R,
@@ -351,7 +353,8 @@ def load_run(path):
                      dR=f['ch%d_dR' % k], name=c['name'],
                      P0=np.asarray(c['P0'], dtype=float),
                      P=None if c['P'] is None
-                     else np.asarray(c['P'], dtype=float))
+                     else np.asarray(c['P'], dtype=float),
+                     norm=float(c.get('norm', 1.0)))
                 for k, c in enumerate(meta['channels'])]
     problem = posterior_problem(Stack.from_dict(meta['stack']), data,
                                 sigma_free=meta['sigma_free'])

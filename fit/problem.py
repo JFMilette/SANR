@@ -10,9 +10,12 @@ x = min + u (max - min) (FitProblem.to_x / to_u), so SLDs (~1e-6) and
 thicknesses (~100) are on the same footing.
 
 DATA -- a list of measured channels, each a dict
-  {'Q', 'R', 'dR', 'P0': vector, 'P': vector or None, 'name' (optional)}
+  {'Q', 'R', 'dR', 'P0': vector, 'P': vector or None, 'name' (optional),
+   'norm' (optional, default 1)}
 with (P0, P) its polarisation pair (see model.stack POLARISATION and
-model.polarisation); 'name' labels it in warnings.  Channels measured along
+model.polarisation); 'name' labels it in warnings; 'norm' is a fixed factor
+on that channel's model before the background (Licorne's Norm_factor, see
+model.licorne_io NORMALISATION), never a fit parameter.  Channels measured along
 different axes can be fitted together.  The model is ONE
 Stack.reflectivities call per trial on the union of every channel's Q
 points, with the stack's own resolution, scale and background (added once
@@ -77,6 +80,7 @@ class FitProblem:
 
         self.channels = []                 # [(name, idx, R, sigma)]
         self.pairs = []                    # (P0, P) of each channel
+        self.norms = []                    # fixed factor of each channel
         Qs = []
         for k, e in enumerate(data):
             Q, R, dR = (np.asarray(e[c], dtype=float) for c in ('Q', 'R', 'dR'))
@@ -93,6 +97,7 @@ class FitProblem:
                 self.pairs.append((np.asarray(e['P0'], dtype=float),
                                    None if P is None else
                                    np.asarray(P, dtype=float)))
+                self.norms.append(float(e.get('norm', 1.0)))
                 self.channels.append((e.get('name', 'channel %d' % k),
                                       R[ok], sigma))
                 Qs.append(Q[ok])
@@ -167,8 +172,10 @@ class FitProblem:
         self.stack.build_sublayers()
         out = [None] * len(self.channels)
         for Q, members in self.groups:
+            norms = [self.norms[k] for k, _ in members]
             R = self.stack.reflectivities(
-                Q, [self.pairs[k] for k, _ in members], warn=False)
+                Q, [self.pairs[k] for k, _ in members], warn=False,
+                norms=None if all(n == 1 for n in norms) else norms)
             for c, (k, idx) in enumerate(members):
                 out[k] = R[idx, c]
         return out

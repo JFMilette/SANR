@@ -310,7 +310,7 @@ class FitPanel:
         s = self.sets[i]
         vec = {ch: self.channel_vectors(s, ch) for ch in s['channels']}
         data = [dict(zip(('P0', 'P'), vectors_pair(*vec[ch])), name='R' + ch,
-                     Q=d['Q'], R=d['R'], dR=d['dR'])
+                     Q=d['Q'], R=d['R'], dR=d['dR'], norm=d.get('norm', 1.0))
                 for ch, d in s['channels'].items()]
         # the Simulation tab's Q range selects the fitted points
         return s, vec, data, sim.qmin.value(), sim.qmax.value()
