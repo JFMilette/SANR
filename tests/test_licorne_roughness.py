@@ -22,6 +22,9 @@ import model.roughness as rg                                    # noqa: E402
 import model.stack as S                                         # noqa: E402
 from model.licorne_io import (licorne_direction,                # noqa: E402
                               load_licorne_model, read_table)
+import licorne_reference as lic                                 # noqa: E402
+from licorne_reference import expandrough                       # noqa: E402
+from licorne_inputs import oracle_inputs, stack_inputs          # noqa: E402
 
 DATA = HERE / 'data' / 'licorne'
 FIX1 = DATA / 'fixture1'
@@ -524,14 +527,16 @@ def test_fixture1_unclipped_windows():
 
 
 def test_fixture1_clipped_window():
-    """Layer 1 / layer 2: clipped on the layer-2 side, which Licorne
-    renormalises by ~93 % of the manual formula (TODO: J_eff, unexplained)."""
+    """Layer 1 / layer 2: clipped on the layer-2 side.  Licorne takes the
+    window integral J with its 50-point rule (renorm 'licorne'): the slabs
+    then equal Licorne's to the file's 6 figures.  The exact J ('manual')
+    renormalises by ~93 % of that, the documented difference."""
     err = {}
-    for renorm in ('manual', 'none'):
+    for renorm in ('licorne', 'manual', 'none'):
         _, re_, _, rho, _, _ = cols(fixture1(renorm))
         err[renorm] = (rel(re_[CLIPPED], REF1[CLIPPED, 2]),
                        rel(rho[CLIPPED], REF1[CLIPPED, 4]))
-    assert err['manual'][0] <= 1e-3 and err['manual'][1] <= 1e-3
+    assert err['licorne'][0] <= 1e-5 and err['licorne'][1] <= 1e-5
     assert abs(err['manual'][0] - 4.6e-4) < 1e-5
     assert abs(err['manual'][1] - 2.7e-4) < 1e-5
     assert err['none'][0] > 5e-3 > 10 * err['manual'][0]
@@ -539,17 +544,129 @@ def test_fixture1_clipped_window():
     w = st._licorne_interfaces()[1]
     assert abs(w['Fb'][0] - 1.55113e-6) < 5e-12
     assert abs(w['Fb'][2] - 2.30705e-6) < 1e-11     # 2.3070446e-6 exactly
-    # Licorne's own F_b: renormalised the same way, by ~93 %
+    # Licorne's own F_b, fitted to its slabs, gives back its J
     s = rg.profile_fraction(window_slabs(st, 1)[1], w['sigma'], 'tanh')
-    for c, ours, nominal in ((2, w['Fb'][0], 1.53998e-6),
-                             (4, w['Fb'][2], 2.31522e-6)):
-        fa = REF1[CORES[0], c]
-        F_lic = licorne_fitted_F(REF1[CLIPPED, c], s, fa)
-        assert 0.90 < (F_lic - nominal) / (ours - nominal) < 0.95
     F_lic = licorne_fitted_F(REF1[CLIPPED, 2], s, 4.69889e-6)
     tb, fa, fb = 41.5003, 4.69889e-6, 1.53998e-6
     J_eff = tb * (fb - fa) / (F_lic - fa) - tb / 2 - w['la']
-    assert abs(J_eff - (-3.4357)) < 2e-3
+    J_lic = rg.window_integral_licorne(w['la'], w['lb'],
+                                       rg.scale_k(w['sigma'], 'tanh'), 'tanh')
+    assert abs(J_eff - J_lic) < 2e-4
+
+
+def test_rect_J_fixture1():
+    """Licorne's int_tanh: 50-point rectangle rule on fixture 1's clipped
+    window, against the exact J = -3.42469."""
+    k = rg.scale_k(9.82371, 'tanh')
+    assert abs(rg.window_integral_licorne(24.32190, 20.75015, k, 'tanh')
+               - (-3.435789)) < 1e-6
+    assert abs(rg.window_integral(24.32190, 20.75015, k, 'tanh')
+               - (-3.424686)) < 1e-6
+    with pytest.raises(ValueError):
+        rg.renormalised(3.0, 8.0, 10.0, 100.0, 8.0, 'tanh', 'exact')
+
+
+def licorne_exact(st):
+    """The Licorne-exact settings of a stack in the Licorne scheme."""
+    st.magnetic_smearing = 'step'
+    st.step_fallback = False
+    st.licorne_renorm = 'licorne'
+    st.licorne_outer = 'licorne'
+    return st
+
+
+def oracle_slabs(st, layers, sub, R=np.eye(3)):
+    """Max relative difference of thickness, NSLD and rho and max |du| of
+    the directions (Licorne axes, R maps them to the sample frame) of the
+    slabs of st against licorne_reference.expandrough(layers, sub)."""
+    M = expandrough(layers, sub)
+    assert len(st.sublayers) == len(M)
+    thick, re_, im_, rho, th, ph = cols(st)
+    mag = M[:, 2].real != 0
+    lic = np.array([licorne_direction(p, t) for p, t in M[:, 3:5].real])
+    u = unit(th, ph) @ np.asarray(R)                 # back to Licorne axes
+    return (rel(thick, M[:, 0].real), rel(re_ + 1j * im_, M[:, 1]),
+            rel(rho[mag], M[mag, 2].real),
+            float(np.max(np.abs(u[mag] - lic[mag]), initial=0)))
+
+
+@pytest.mark.parametrize('name', ['fixture1'] + V127)
+def test_slabs_match_oracle(name):
+    """Every slab (thickness, NSLD, rho, direction) as Licorne's
+    expandrough.m builds it, ported in tests/licorne_reference.py.  The
+    direction floor is wrap_turns rounding the angles to 1e-9 turn."""
+    d = DATA / name
+    st = licorne_exact(load_licorne_model(d / 'parameters.m',
+                                          d / 'profile.dat',
+                                          axis_map=np.eye(3)))
+    st.build_sublayers()
+    t, n, r, u = oracle_slabs(st, *oracle_inputs(d))
+    assert t <= 1e-12 and n <= 1e-12 and r <= 1e-12
+    assert u <= 1e-8
+
+
+def _outer_stacks():
+    """vacuum / 20 A cap (sigma_L 10) / ..., a 20 A bottom layer under a
+    sigma_L = 12 substrate interface, and an unclipped control."""
+    def mag():
+        return S.Layer('mag', 100, 8e-6, 0, 4e-6, 0.25, 4.0, 'tanh', 6)
+    cap = [S.Layer('vac', 0),
+           S.Layer('cap', 20, 3.5e-6, -1e-8, 0, 0, 10.0, 'tanh', 6), mag(),
+           S.Layer('mid', 80, 2e-6, 0, 0, 0, 3.0, 'erf', 5),
+           S.Layer('Si', 0, 2.07e-6, 0, 0, 0, 2.0, 'tanh', 6)]
+    bottom = [S.Layer('vac', 0),
+              S.Layer('top', 60, 3.5e-6, 0, 0, 0, 3.0, 'tanh', 6), mag(),
+              S.Layer('thin', 20, 1e-6, 0, 1e-6, 0.25, 3.0, 'erf', 5),
+              S.Layer('Si', 0, 2.07e-6, 0, 0, 0, 12.0, 'tanh', 6)]
+    control = [S.Layer('vac', 0),
+               S.Layer('cap', 90, 3.5e-6, 0, 0, 0, 3.0, 'tanh', 6), mag(),
+               S.Layer('bot', 90, 1e-6, 0, 0, 0, 3.0, 'erf', 5),
+               S.Layer('Si', 0, 2.07e-6, 0, 0, 0, 2.0, 'tanh', 6)]
+    return {'cap': cap, 'bottom': bottom, 'control': control}
+
+
+@pytest.mark.parametrize('case', ['cap', 'bottom', 'control'])
+def test_outer_pseudo_layer(case):
+    """Licorne's fronting / substrate pseudo-layers are 1.5 t_1 / 1.5 t_N
+    thick (licorne_outer 'licorne'): a thin outer layer's window is clipped
+    and renormalised.  Slabs and R against the oracle; 'infinite' (the
+    default) differs when an outer window is clipped."""
+    Y = np.array([0.0, 1.0, 0.0])
+    pairs = [(X, X), (X, -X), (-X, -X), (Y, Y), (-Y, -Y)]
+    q = np.linspace(0.005, 0.2, 300)
+    R = {}
+    for outer in ('licorne', 'infinite'):
+        st = licorne_exact(S.Stack(_outer_stacks()[case],
+                                   roughness_scheme='licorne'))
+        st.licorne_outer = outer
+        st.build_sublayers()
+        layers, sub = stack_inputs(st)
+        r = lic.reflection_s(q, expandrough(layers, sub), sub['nsld'])
+        ref = np.stack([lic.spin_av(r, a, b) for a, b in pairs], -1)
+        R[outer] = st.reflectivities(q, pairs)
+        err = rel(R[outer], ref)
+        if outer == 'licorne' or case == 'control':
+            assert max(oracle_slabs(st, layers, sub)) <= 1e-10
+            assert err <= 1e-10
+        else:
+            assert err > 1e-2
+    # the fronting and backing are never renormalised, only the thinner
+    # outer layer
+    st = licorne_exact(S.Stack(_outer_stacks()[case],
+                               roughness_scheme='licorne'))
+    geo = st._licorne_interfaces()
+    f, b = st.fronting, st.backing
+    assert geo[0]['Fa'][0] == f.NSLD_real and geo[-1]['Fb'][0] == b.NSLD_real
+    clipped_top = geo[0]['lb'] == st.layers[1].thickness / 2
+    clipped_bot = geo[-1]['la'] == st.layers[-2].thickness / 2
+    assert (case == 'cap') == clipped_top and \
+        (case == 'bottom') == clipped_bot
+    if case != 'control':
+        nsf = [0, 2]
+        d = np.max(np.abs(R['infinite'][:, nsf] / R['licorne'][:, nsf] - 1))
+        print('\n%s: max |R_infinite / R_licorne - 1| (NSF) = %.3g'
+              % (case, d))
+        assert d > 1e-2
 
 
 def test_fixture1_angles_stay_zero():

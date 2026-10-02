@@ -35,7 +35,21 @@ thinner, clipped side is renormalised to keep its amount of material
 core slab at its nominal value.  Licorne's jumps are kept, in the slabs and
 in Stack.profile alike: 1.5 % of the step at every unclipped window edge, and
 at the midpoint of a thin layer whose two interfaces renormalise it
-differently.  In this scheme a layer's roughness_sigma is Licorne's sigma_L,
+differently.  Stack.licorne_renorm 'licorne' takes the window integral J of
+the renormalisation with Licorne's 50-point rule instead of exactly
+(model.roughness RENORMALISATION).  Stack.licorne_outer says how thick the
+fronting and backing are for the windows: 'infinite' (default), so their
+windows are never clipped; or 'licorne', Licorne's pseudo-layers of 1.5 t_1
+above and 1.5 t_N below (expandrough.m: M.Layers(1).thickness*1.5 for the
+top row, M.Layers(N).thickness*1.5 for the substrate row), so the outer
+windows are clipped at 0.75 t_1 / 0.75 t_N.  The renormalisation then only
+ever changes layer 1 at the top interface and layer N at the bottom one (the
+thinner side), never the fronting or backing.  Only the window geometry
+changes: the cores and the semi-infinite media keep their own thickness and
+values.  Licorne's top pseudo-layer is vacuum and its substrate row has
+rho = 0, i.e. SANR's vacuum fronting and non-magnetic backing; for any other
+fronting or backing there is no Licorne equivalent and SANR's own values
+are used.  In this scheme a layer's roughness_sigma is Licorne's sigma_L,
 roughness_model its roughness_fun ('tanh', 'erf' or 'none') and
 roughness_sublayer its roughness_nbound, all for the interface at the TOP of
 the layer; Stack.tail is unused.  model.licorne_io reads a Licorne export.
@@ -216,6 +230,9 @@ def wrap_turns(t):
 M_TINY = 1e-3
 
 ROUGHNESS_SCHEMES = ('rms', 'licorne')
+# Stack.licorne_outer: thickness of the fronting / backing for the Licorne
+# windows (see ROUGHNESS SCHEME)
+LICORNE_OUTER = ('infinite', 'licorne')
 SMEARING_MODES = ('vector', 'angle', 'step')
 # magnetic_smearing when none is given, per roughness scheme
 DEFAULT_SMEARING = {'rms': 'vector', 'licorne': 'step'}
@@ -428,7 +445,11 @@ class Stack:
         self.tail = tail                 # unclipped window half-width = tail*sigma
         # 'rms' or 'licorne' (see ROUGHNESS SCHEME)
         self.roughness_scheme = roughness_scheme
-        self.licorne_renorm = 'manual'   # or 'none' (Licorne scheme only)
+        # 'manual', 'licorne' or 'none' (Licorne scheme only, see
+        # model.roughness RENORMALISATION)
+        self.licorne_renorm = 'manual'
+        # 'infinite' or 'licorne' (Licorne scheme only, see ROUGHNESS SCHEME)
+        self.licorne_outer = 'infinite'
         self.sublayers = None
         self.scale = 1.0                     # factor on every channel
         self.background = 0.0                # constant added to every channel
@@ -459,6 +480,7 @@ class Stack:
                 'magnetic_smearing': self.magnetic_smearing,
                 'roughness_scheme': self.roughness_scheme,
                 'licorne_renorm': self.licorne_renorm,
+                'licorne_outer': self.licorne_outer,
                 'step_fallback': self.step_fallback,
                 'layers': [dict(vars(l), fit={k: dict(v)
                                               for k, v in l.fit.items()})
@@ -477,6 +499,7 @@ class Stack:
         s.q_in_fronting = bool(d['q_in_fronting'])
         s.resolution.update(copy.deepcopy(d['resolution']))
         s.licorne_renorm = d.get('licorne_renorm', 'manual')
+        s.licorne_outer = d.get('licorne_outer', 'infinite')
         s.step_fallback = bool(d.get('step_fallback', True))
         return s
 
@@ -678,8 +701,13 @@ class Stack:
     def _licorne_interfaces(self):
         """Per interface j (the top of layer j+1, which owns sigma_L, the
         function and N): its depth Z, window la / lb, renormalised values
-        Fa / Fb (_licorne_values) and the indices a = j, b = j+1."""
+        Fa / Fb (_licorne_values) and the indices a = j, b = j+1.  The
+        fronting and backing take the thickness licorne_outer gives them."""
+        if self.licorne_outer not in LICORNE_OUTER:
+            raise ValueError('unknown licorne_outer %r' % (self.licorne_outer,))
         t = self._thicknesses()
+        if self.licorne_outer == 'licorne' and len(t) > 2:
+            t[0], t[-1] = 1.5 * t[1], 1.5 * t[-2]
         vals = [self._licorne_values(l) for l in self.layers]
         out = []
         for j, Zj in enumerate(self._interfaces()):

@@ -25,10 +25,15 @@ value F is changed so that the layer keeps its nominal amount of material:
     F_b = f_a + t_b (f_b - f_a) / (t_b/2 + l_a + J)   if t_a > t_b, gamma > t_b/2
 
 otherwise F = f; never for t_a == t_b, never for a semi-infinite medium
-(t = inf).  J = int_{-l_a}^{l_b} g(k x) dx, in closed form through the even
-antiderivative G (J = G(l_b) - G(l_a)).  A thin layer clipped on both sides
-therefore has a different F at each of its interfaces and jumps at its
-midpoint.
+(t = inf; Stack.licorne_outer 'licorne' passes Licorne's finite 1.5 t
+pseudo-thickness for the fronting and backing instead, see model.stack).  J = int_{-l_a}^{l_b} g(k x) dx.  renorm 'manual' takes J in
+closed form through the even antiderivative G (J = G(l_b) - G(l_a));
+renorm 'licorne' takes it as Licorne does (int_tanh.m / int_erf.m, called
+from roughsublayer.m): a 50-point rectangle rule, x = linspace(-l_a, l_b,
+50), J = sum(g(k x)) (x(2) - x(1)), which counts both end points in full and
+so differs from the exact J by about h (g(k l_b) + g(-k l_a))/2 (fixture 1:
+-3.43579 against -3.42469).  A thin layer clipped on both sides therefore
+has a different F at each of its interfaces and jumps at its midpoint.
 
 All values f are stacked scalars smeared with the same geometry, e.g.
 [Re NSLD, Im NSLD, rho]; the renormalisation is affine in (f_a, f_b) with
@@ -39,6 +44,8 @@ import numpy as np
 from scipy.special import erf, erfinv
 
 KINDS = ('tanh', 'erf', 'none')
+# renormalisation of a clipped window (see RENORMALISATION)
+RENORMS = ('manual', 'licorne', 'none')
 
 LICORNE_SIGMA_FACTOR = 1.3                 # sigma = 1.3 sigma_L (Nevot-Croce)
 EDGE = 0.97                                # g(k gamma) at the window edge
@@ -88,6 +95,13 @@ def window_integral(la, lb, k, kind):
     return float(antiderivative(lb, k, kind) - antiderivative(la, k, kind))
 
 
+def window_integral_licorne(la, lb, k, kind):
+    """J as Licorne computes it (int_tanh.m / int_erf.m): the rectangle rule
+    on 50 points linspace(-la, lb, 50), sum(g(k x)) (x(2) - x(1))."""
+    x = np.linspace(-la, lb, 50)
+    return float(np.sum(g_licorne(k * x, kind)) * (x[1] - x[0]))
+
+
 def window_limits(ta, tb, sigma_L, kind):
     """(l_a, l_b, gamma): the window clipped at half of each thickness."""
     gamma = gamma_licorne(sigma_L, kind)
@@ -96,24 +110,22 @@ def window_limits(ta, tb, sigma_L, kind):
 
 def renormalised(fa, fb, ta, tb, sigma_L, kind='tanh', renorm='manual'):
     """(F_a, F_b, l_a, l_b, J): the effective values of both sides (see
-    RENORMALISATION).  renorm 'none' keeps F = f."""
-    if renorm not in ('manual', 'none'):
-        raise ValueError("renorm must be 'manual' or 'none'")
+    RENORMALISATION).  renorm 'manual' uses the exact J, 'licorne' Licorne's
+    50-point J, 'none' keeps F = f."""
+    if renorm not in RENORMS:
+        raise ValueError("renorm must be one of %s" % ', '.join(RENORMS))
     fa = np.asarray(fa, dtype=float)
     fb = np.asarray(fb, dtype=float)
     la, lb, gamma = window_limits(ta, tb, sigma_L, kind)
     if gamma == 0.0:
         return fa, fb, 0.0, 0.0, 0.0
     k = scale_k(sigma_L, kind)
-    J = window_integral(la, lb, k, kind)
+    J = (window_integral_licorne if renorm == 'licorne'
+         else window_integral)(la, lb, k, kind)
     Fa, Fb = fa, fb
-    # TODO: Licorne's J differs (J_eff above); unexplained.  On fixture 1
-    # (sigma_L = 9.82371, t_a = 71.3237, t_b = 41.5003, tanh) Licorne's
-    # output corresponds to J_eff = -3.4357 +- 1e-4 against the exact
-    # J = -3.42469: it applies ~93 % of this correction.  Licorne-Py
-    # (generateSublayers.py) uses this same exact formula.  No empirical
-    # factor is applied here.
-    if renorm == 'manual':
+    # Licorne's own J is its 50-point rule (renorm 'licorne'), hence the
+    # small difference from the exact J of 'manual'
+    if renorm != 'none':
         if ta < tb and gamma > ta / 2.0:
             Fa = fb - ta * (fb - fa) / (lb + ta / 2.0 - J)
         elif ta > tb and gamma > tb / 2.0:
