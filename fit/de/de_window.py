@@ -1,6 +1,6 @@
 """
-Fit window: follows a running fit of the Experimental tab generation by
-generation.
+DE window: follows a running differential-evolution fit (fit.de.de_fit, run
+in a DEThread) of the Experimental tab generation by generation.
 
 The history lists the best cost of every generation (and the polished
 result at the end).  Selecting an entry draws its depth profile (with its
@@ -22,16 +22,12 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from .simulation import (ASYM_COLOUR, EDITOR_PARAMS, PROFILE_QUANTITIES,
-                         REFL_QUANTITIES, RIGHT, LayerLabels, plot_widget,
-                         profile_data)
+from fit.de.de_fit import run_de
+from tabs.simulation import (ASYM_COLOUR, PARAM_DISPLAY, PROFILE_QUANTITIES,
+                             REFL_QUANTITIES, RIGHT, LayerLabels, plot_widget,
+                             profile_data)
 
 
-# attr -> (label, display scale, unit) for the parameter tables
-PARAM_DISPLAY = {attr: (label.split(' (')[0], scale,
-                        suffix.strip() or ('Å' if attr == 'thickness' else
-                                           '10⁻⁶ Å⁻²'))
-                 for attr, label, *_, suffix, scale in EDITOR_PARAMS}
 AT_BOUND = QtGui.QColor('#f87171')
 
 
@@ -40,7 +36,33 @@ def at_bound(v, lo, hi):
     return min(v - lo, hi - v) < 1e-3 * (hi - lo)
 
 
-class FitWindow(QtWidgets.QWidget):
+class DEThread(QtCore.QThread):
+    """Runs fit.de.de_fit.run_de on a FitProblem off the GUI thread."""
+
+    progress = QtCore.pyqtSignal(object, float, int)      # x, cost, generation
+    finished_fit = QtCore.pyqtSignal(object, float, int, str)
+    failed = QtCore.pyqtSignal(str)
+
+    def __init__(self, problem, **options):
+        super().__init__()
+        self.problem, self.options = problem, options
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        try:
+            x, cost, gen, msg = run_de(
+                self.problem, callback=self.progress.emit,
+                cancelled=lambda: self._stop, **self.options)
+        except Exception as exc:                  # report, don't kill the app
+            self.failed.emit('%s: %s' % (type(exc).__name__, exc))
+            return
+        self.finished_fit.emit(x, cost, gen, str(msg))
+
+
+class DEWindow(QtWidgets.QWidget):
     """History of one fit with its profile and reflectivity plots."""
 
     stopRequested = QtCore.pyqtSignal()
@@ -335,7 +357,7 @@ class FitWindow(QtWidgets.QWidget):
             self._fill_params()
             self._draw_profile()
             # imported here: the Experimental tab imports this module
-            from .experimental import simulation_channels
+            from tabs.experimental import simulation_channels
             self._model = simulation_channels(self.stack, self.model_Q,
                                               self.vectors)
             self._redraw_reflectance()
@@ -350,7 +372,8 @@ class FitWindow(QtWidgets.QWidget):
         for (i, attr, _, lo, hi), v in zip(self.problem.params, self._x):
             label, scale, unit = PARAM_DISPLAY[attr]
             it = QtWidgets.QTreeWidgetItem(
-                [layers[i].name, label, '%.6g' % (v * scale), unit])
+                ['(stack)' if i is None else layers[i].name, label,
+                 '%.6g' % (v * scale), unit])
             it.setTextAlignment(2, QtCore.Qt.AlignmentFlag.AlignRight
                                 | QtCore.Qt.AlignmentFlag.AlignVCenter)
             if at_bound(v, lo, hi):
@@ -404,7 +427,7 @@ class FitWindow(QtWidgets.QWidget):
 
     def _redraw_reflectance(self, *_):
         # imported here: the Experimental tab imports this module
-        from .experimental import dataset_series
+        from tabs.experimental import dataset_series
         p = self.refl_plot
         for item in self._refl_items:
             p.removeItem(item)

@@ -11,11 +11,17 @@ thickness at its own value -- literally the slab stack fed to the matrices.
 Dashed verticals mark the nominal interface depths.
 """
 
+import os
+import sys
+
 import numpy as np
 import matplotlib.pyplot as plt
 
-from model.polarisation import channel_pair
-from model.stack import Layer, Stack
+# run from anywhere: the project root holds the model package
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from model.polarisation import channel_pair                  # noqa: E402
+from model.stack import Layer, Stack                         # noqa: E402
 
 
 # ------------------------------------------------------------- the sample --

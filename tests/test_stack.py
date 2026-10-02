@@ -129,6 +129,54 @@ def test_no_analyser_counts_background_once(res):
     assert rel(R[:, 5], R[:, 3] + R[:, 2] - st.background) <= 1e-12
 
 
+@pytest.mark.parametrize('res', [False, True])
+def test_batched_equals_single_magnetic_backing(res):
+    """Magnetic substrate at an angle to both films: its eigenbasis enters
+    the boundary condition; batching must not change any channel."""
+    st = mk(PH)
+    b = st.backing
+    b.MSLD_rho, b.MSLD_theta, b.MSLD_phi = 1.5e-6, 0.3, 0.05
+    st.build_sublayers()
+    st.resolution['enabled'] = res
+    st.background = 2e-7
+    p = pairs(NAMES)
+    R = st.reflectivities(Q, p)
+    single = np.stack([st.reflectivity(Q, *pp) for pp in p], -1)
+    assert rel(R, single) <= 1e-14
+    assert rel(R[:, 4], R[:, 0] + R[:, 1] - st.background) <= 1e-12
+
+
+@pytest.mark.parametrize('res', [False, True])
+def test_scale_then_background(res):
+    st = mk(PH)
+    st.resolution['enabled'] = res
+    R1 = st.reflectivities(Q, pairs(NAMES))
+    st.scale, st.background = 0.97, 3e-7
+    R2 = st.reflectivities(Q, pairs(NAMES))
+    assert rel(R2, 0.97 * R1 + 3e-7) <= 1e-13
+    # R+ still holds the background once
+    assert rel(R2[:, 4], R2[:, 0] + R2[:, 1] - 3e-7) <= 1e-12
+
+
+def test_stack_parameters_are_free_parameters():
+    st = mk(PH)
+    assert st.free_parameters() == []
+    st.fit_entry('background')['vary'] = True
+    st.layers[1].fit['thickness'] = {'vary': True, 'min': 70, 'max': 90}
+    st.fit['scale'] = {'vary': True, 'min': 0.9, 'max': 1.1}
+    assert [(i, a) for i, a, *_ in st.free_parameters()] == \
+        [(1, 'thickness'), (None, 'scale'), (None, 'background')]
+    assert st.owner(None) is st and st.owner(1) is st.layers[1]
+    st.scale = 0.95
+    back = S.Stack.from_dict(json.loads(json.dumps(st.to_dict())))
+    assert back.scale == 0.95 and back.fit == st.fit
+    # files written before scale existed
+    d = st.to_dict()
+    del d['scale'], d['fit']
+    old = S.Stack.from_dict(d)
+    assert old.scale == 1.0 and old.free_parameters()[1:] == []
+
+
 def test_efficiency():
     st = mk(PH)
     R = st.reflectivities(Q, [(0.95*X, X), (X, X), (-X, X)])
@@ -176,7 +224,7 @@ def test_to_dict_round_trip():
     assert back.to_dict() == st.to_dict()
 
 
-@pytest.mark.parametrize('f', ['Cr2Te3.json', 'CrSb.json'])
+@pytest.mark.parametrize('f', ['session_Cr2Te3.json', 'session_Cr2Te3_2.json'])
 def test_example_models_load(f):
     with open(HERE.parent / f) as fh:
         st = S.Stack.from_dict(json.load(fh))
@@ -231,3 +279,32 @@ def test_resolution_grid_follows_local_sigma():
         Ri = st._trace(Qn.ravel(), p).reshape(len(Q), len(x), -1)
         brute = (Ri * w[None, :, None]).sum(1) / w.sum()
         assert rel(st.reflectivities(Q, p), brute) <= 1e-2
+
+
+@pytest.mark.parametrize('res_mode', ['mono', 'tof'])
+@pytest.mark.parametrize('magnetic_backing', [False, True])
+def test_resolution_grid_accuracy(res_mode, magnetic_backing, monkeypatch):
+    """The coarse grid refined at the critical edges stays within a small
+    fraction of a 1 % error bar of a 16x finer uniform grid."""
+    st = mk(PH)
+    if magnetic_backing:
+        b = st.backing
+        b.MSLD_rho, b.MSLD_theta, b.MSLD_phi = 1.5e-6, 0.3, 0.05
+        st.build_sublayers()
+    st.resolution.update(enabled=True, mode=res_mode)
+    q = np.linspace(0.004, 0.15, 600)
+    p = pairs(NAMES)
+    R = st.reflectivities(q, p)
+    monkeypatch.setattr(S, 'RES_GRID_STEP', 16 * S.RES_GRID_STEP)
+    monkeypatch.setattr(S.Stack, 'critical_edges', lambda self: [])
+    ref = st.reflectivities(q, p)
+    assert np.max(np.abs(R - ref) / (0.01 * ref + 1e-7)) < 0.3
+
+
+def test_critical_edges():
+    st = mk(PH)                                     # vacuum / ... / Si
+    assert st.critical_edges() == pytest.approx([np.sqrt(16 * np.pi * 2.07e-6)])
+    b = st.backing
+    b.MSLD_rho = 1e-6                               # in plane: two edges
+    assert st.critical_edges() == pytest.approx(
+        [np.sqrt(16 * np.pi * 1.07e-6), np.sqrt(16 * np.pi * 3.07e-6)])

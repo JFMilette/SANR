@@ -455,6 +455,13 @@ EDITOR_PARAMS = [
     ('MSLD_phi', 'MSLD φ', -90, 90, 4, 5.0, ' °', 360.0),
     ('roughness_sigma', 'Roughness σ', 0.0, 1e4, 4, 0.5, ' Å', 1.0),
 ]
+# attr -> (label, display scale, unit) for the parameter tables
+PARAM_DISPLAY = {attr: (label.split(' (')[0], scale,
+                        suffix.strip() or ('Å' if attr == 'thickness' else
+                                           '10⁻⁶ Å⁻²'))
+                 for attr, label, *_, suffix, scale in EDITOR_PARAMS}
+PARAM_DISPLAY.update(scale=('Scale', 1.0, ''),
+                     background=('Background', 1.0, ''))
 OUT_OF_BOUNDS = 'QDoubleSpinBox { background: #4a1f22; border: 1px solid #f87171 }'
 RES_MODES = ('mono', 'tof')     # res_mode combo order
 # instrument setups of the fixed-angle mode: name -> (dlambda (A), angles)
@@ -814,6 +821,7 @@ class SimulationTab(QtWidgets.QWidget):
         self.last_Q = self.last_R = None     # latest Q, {channel: R}
         self._refl_note = ''                 # warning of the last reflectivity
         self._profile = None        # (z, edges, [curves], [slab values])
+        self._locked = False        # a fit is running: see set_locked
 
         self._timer = QtCore.QTimer(self, singleShot=True, interval=120)
         self._timer.timeout.connect(self.recompute)
@@ -843,7 +851,7 @@ class SimulationTab(QtWidgets.QWidget):
         v = QtWidgets.QVBoxLayout(panel)
 
         # general parameters
-        gen = QtWidgets.QGroupBox('General parameters')
+        gen = self.gen_box = QtWidgets.QGroupBox('General parameters')
         f = QtWidgets.QFormLayout(gen)
         self.qmin = dspin(1e-5, 10, 5, 0.001)
         self.qmax = dspin(1e-4, 10, 4, 0.01)
@@ -860,6 +868,26 @@ class SimulationTab(QtWidgets.QWidget):
         self.background.setValue(self.stack.background)
         self.background.setToolTip('Constant background added to every '
                                    'reflectivity channel (e.g. 1e-7)')
+        self.scale = dspin(0.0, 100.0, 4, 0.01)
+        self.scale.setValue(self.stack.scale)
+        self.scale.setToolTip('Factor on every reflectivity channel, applied '
+                              'before the background')
+        # fit settings of the stack's own parameters (Stack.fit):
+        # attr -> (value, min, max, Fit check box)
+        self.stack_rows = {}
+        for attr, val, make in (
+                ('scale', self.scale, lambda: dspin(0.0, 100.0, 4, 0.01)),
+                ('background', self.background, SciSpinBox)):
+            bmin, bmax = make(), make()
+            for b in (bmin, bmax):
+                b.setButtonSymbols(
+                    QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
+            bmin.setToolTip('Fit minimum')
+            bmax.setToolTip('Fit maximum')
+            cb = QtWidgets.QCheckBox('Fit')
+            cb.setToolTip('Vary %s in the fit, between the two bounds' % attr)
+            self.stack_rows[attr] = (val, bmin, bmax, cb)
+        self._load_stack_fit()
 
         self.q_fronting = QtWidgets.QCheckBox('Q in fronting')
         self.q_fronting.setChecked(self.stack.q_in_fronting)
@@ -967,7 +995,15 @@ class SimulationTab(QtWidgets.QWidget):
         f.addRow('Q (Å⁻¹)', qrange)
         f.addRow('Q points', self.nq)
         f.addRow('Window tail', self.tail)
-        f.addRow('Background', self.background)
+        for attr, label in (('scale', 'Scale'), ('background', 'Background')):
+            val, bmin, bmax, cb = self.stack_rows[attr]
+            row = QtWidgets.QHBoxLayout()
+            row.addWidget(val, 3)
+            row.addWidget(bmin, 2)
+            row.addWidget(QtWidgets.QLabel('–'))
+            row.addWidget(bmax, 2)
+            row.addWidget(cb)
+            f.addRow(label, row)
         f.addRow('Q reference', self.q_fronting)
         f.addRow('Roughness', self.rscheme)
         f.addRow('M smearing', self.msmear)
@@ -1006,6 +1042,10 @@ class SimulationTab(QtWidgets.QWidget):
                   self.background, self.res_lambda, self.res_dlambda,
                   self.res_dtheta, self.res_tof_dl):
             w.valueChanged.connect(self.schedule)
+        for val, bmin, bmax, cb in self.stack_rows.values():
+            for w in (val, bmin, bmax):
+                w.valueChanged.connect(self.schedule)
+            cb.toggled.connect(self.schedule)
         self.nq.valueChanged.connect(self.schedule)
         self.msmear.currentIndexChanged.connect(self.schedule)
         self.rscheme.activated.connect(self._scheme_changed)
@@ -1049,7 +1089,8 @@ class SimulationTab(QtWidgets.QWidget):
         v.addWidget(lay)
 
         # polarisation of every channel: Pi, Pa pairs
-        pol = QtWidgets.QGroupBox('Polarisation (Pi incident, Pa analysed)')
+        pol = self.pol_box = QtWidgets.QGroupBox(
+            'Polarisation (Pi incident, Pa analysed)')
         pv = QtWidgets.QVBoxLayout(pol)
         self.pol = PairTable(CHANNEL_NAMES)
         self.pol.changed.connect(self.schedule)
@@ -1255,11 +1296,26 @@ class SimulationTab(QtWidgets.QWidget):
         self.toolbox.setItemText(0, 'Layer properties — %s'
                                  % self.stack.layers[row].name if ok
                                  else 'Layer properties')
-        interior = ok and 0 < row < n - 1
+        interior = ok and 0 < row < n - 1 and not self._locked
         self.btn_del.setEnabled(interior)
         self.btn_up.setEnabled(interior and row > 1)
         self.btn_dn.setEnabled(interior and row < n - 2)
+        if self._locked:                 # shown, greyed, not editable
+            self.editor.setEnabled(False)
         self.prof_layers.style()
+
+    def set_locked(self, locked):
+        """While a fit or sampling runs: nothing that changes the model can
+        be edited (layer values, general parameters, polarisation, adding /
+        removing / moving layers), but layers can still be selected and
+        their values read, the tool-box pages switched and the plots used."""
+        self._locked = bool(locked)
+        for w in (self.gen_box, self.pol_box, self.btn_add):
+            w.setEnabled(not self._locked)
+        self.list.setDragDropMode(
+            QtWidgets.QAbstractItemView.DragDropMode.NoDragDrop if self._locked
+            else QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
+        self._on_select(self.list.currentRow())   # editor, move buttons
 
     def add_layer(self):
         row = self.list.currentRow()
@@ -1315,9 +1371,41 @@ class SimulationTab(QtWidgets.QWidget):
         """Write values x of Stack.free_parameters() entries `params` into
         the stack (e.g. from a fit) and refresh the editor and plots."""
         for (i, attr, *_), v in zip(params, x):
-            setattr(self.stack.layers[i], attr, float(v))
+            setattr(self.stack.owner(i), attr, float(v))
+        self._load_stack_fit()             # recompute reads these boxes
         self.refresh_list(select=self.list.currentRow())
         self.schedule()
+
+    def set_bounds(self, params, lo, hi):
+        """Write fit bounds [lo, hi] of Stack.free_parameters() entries
+        `params`, clipped to what the editor's boxes can hold, and refresh
+        the editor."""
+        limits = {attr: (a / scale, b / scale)
+                  for attr, _, a, b, *_, scale in EDITOR_PARAMS}
+        limits.update(scale=(self.scale.minimum(), self.scale.maximum()),
+                      background=(self.background.minimum(),
+                                  self.background.maximum()))
+        for (i, attr, *_), a, b in zip(params, lo, hi):
+            lim_lo, lim_hi = sorted(limits[attr])
+            e = self.stack.owner(i).fit_entry(attr)
+            e['min'] = float(min(max(a, lim_lo), lim_hi))
+            e['max'] = float(min(max(b, lim_lo), lim_hi))
+        self._load_stack_fit()
+        self.refresh_list(select=self.list.currentRow())
+        self.schedule()
+
+    def _load_stack_fit(self):
+        """Show the stack's scale and background and their fit settings."""
+        for attr, (val, bmin, bmax, cb) in self.stack_rows.items():
+            e = self.stack.fit_entry(attr)
+            for w in (val, bmin, bmax, cb):
+                w.blockSignals(True)
+            val.setValue(getattr(self.stack, attr))
+            bmin.setValue(e['min'])
+            bmax.setValue(e['max'])
+            cb.setChecked(e['vary'])
+            for w in (val, bmin, bmax, cb):
+                w.blockSignals(False)
 
     def _on_layer_edit(self):
         row = self.list.currentRow()
@@ -1340,6 +1428,11 @@ class SimulationTab(QtWidgets.QWidget):
         try:
             self.stack.tail = self.tail.value()
             self.stack.background = self.background.value()
+            self.stack.scale = self.scale.value()
+            for attr, (_, bmin, bmax, cb) in self.stack_rows.items():
+                self.stack.fit[attr] = {'vary': cb.isChecked(),
+                                        'min': bmin.value(),
+                                        'max': bmax.value()}
             self.stack.q_in_fronting = self.q_fronting.isChecked()
             self.stack.magnetic_smearing = SMEARING_MODES[
                 self.msmear.currentIndex()]
@@ -1661,6 +1754,8 @@ class SimulationTab(QtWidgets.QWidget):
         self.stack.layers = new.layers
         self.stack.tail = new.tail
         self.stack.background = new.background
+        self.stack.scale = new.scale
+        self.stack.fit = new.fit
         self.stack.q_in_fronting = new.q_in_fronting
         self.stack.resolution = new.resolution
         self.stack.magnetic_smearing = new.magnetic_smearing
@@ -1680,7 +1775,7 @@ class SimulationTab(QtWidgets.QWidget):
         self.nq.setValue(sim.get('nq', self.nq.value()))
         self.tail.setValue(new.tail)
         self.pol.set_vectors(sim.get('polarisation', default_vectors()))
-        self.background.setValue(new.background)
+        self._load_stack_fit()
         self.q_fronting.setChecked(new.q_in_fronting)
         self.msmear.setCurrentIndex(
             SMEARING_MODES.index(new.magnetic_smearing))

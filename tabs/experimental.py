@@ -38,29 +38,23 @@ assuming independent channels.  R+ / R- are used as imported when present,
 otherwise built as R+ = R++ + R+-, R- = R-- + R-+ (a simulated dataset
 always holds R+ / R- themselves, with the background counted once).
 
-The Fit box fits the Simulation tab's model to every channel of one dataset
-with differential evolution (model.fit), varying the parameters ticked Fit
-in the Simulation tab within their bounds.  It runs in a background thread,
-each generation spread over "workers" processes (model.fit WORKERS), and is
-followed in a separate window (tabs.fitwindow): the best cost of
-every generation, with the profile and reflectivity of the selected one.
-The Simulation tab only changes when an entry is sent to it from there.
+The Fit tool box (fit.panel.FitPanel, a mixin of this tab) fits the
+Simulation tab's model to every channel of one dataset: by differential
+evolution (fit.de, followed in fit.de.de_window) or by sampling its
+posterior with DREAM (fit.dream, followed in fit.dream.dream_window).
 """
 
 import os
 import re
-import warnings
-from html import escape as html_escape
 
 import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from model.fit import FitProblem, run_de
+from fit.panel import FitPanel
 from model.polarisation import CHANNEL_NAMES, default_vectors, vectors_pair
-from .fitwindow import FitWindow
-from .simulation import (CH_COLOURS, HP_COLOURS, REFL_QUANTITIES, Crosshair, PairTable, dspin, fmt,
-                         plot_widget)
+from .simulation import (CH_COLOURS, HP_COLOURS, REFL_QUANTITIES, Crosshair,
+                         PairTable, fmt, plot_widget)
 
 
 DATA_FILTER = 'Data files (*.dat *.txt *.csv *.refl);;All files (*)'
@@ -542,7 +536,7 @@ def dataset_series(D, k, line=False):
 
 def simulation_channels(stack, Q, vectors):
     """Channels dict of the stack's reflectivity on Q, one channel per
-    {name: [Pi, Pa]} of vectors (see model.fit.vectors_pair); zero errors."""
+    {name: [Pi, Pa]} of vectors (see model.polarisation.vectors_pair); zero errors."""
     names = [c for c in PLOT_ORDER if c in vectors]
     # a transverse P is reported by the Simulation tab and the fit
     R = stack.reflectivities(Q, [vectors_pair(*vectors[c]) for c in names],
@@ -585,36 +579,6 @@ class PairDialog(QtWidgets.QDialog):
 
     def vectors(self):
         return self.table.vectors()
-
-
-# ------------------------------------------------------------- fit ----
-FIT_COSTS = [('chi2', 'χ² (weighted by dR)'), ('log', 'log R (per decade)')]
-
-
-class FitThread(QtCore.QThread):
-    """Runs model.fit.run_de on a FitProblem off the GUI thread."""
-
-    progress = QtCore.pyqtSignal(object, float, int)      # x, cost, generation
-    finished_fit = QtCore.pyqtSignal(object, float, int, str)
-    failed = QtCore.pyqtSignal(str)
-
-    def __init__(self, problem, **options):
-        super().__init__()
-        self.problem, self.options = problem, options
-        self._stop = False
-
-    def stop(self):
-        self._stop = True
-
-    def run(self):
-        try:
-            x, cost, gen, msg = run_de(
-                self.problem, callback=self.progress.emit,
-                cancelled=lambda: self._stop, **self.options)
-        except Exception as exc:                  # report, don't kill the app
-            self.failed.emit('%s: %s' % (type(exc).__name__, exc))
-            return
-        self.finished_fit.emit(x, cost, gen, str(msg))
 
 
 # ------------------------------------------------------- data tree ----
@@ -701,7 +665,7 @@ def read_channel(ref, q_ref, start, base):
 
 
 # ------------------------------------------------- experimental tab ----
-class ExperimentalTab(QtWidgets.QWidget):
+class ExperimentalTab(FitPanel, QtWidgets.QWidget):
 
     def __init__(self, simulation=None, parent=None):
         super().__init__(parent)
@@ -789,113 +753,6 @@ class ExperimentalTab(QtWidgets.QWidget):
         v.addWidget(self.status)
         return panel
 
-    def _build_fit_box(self):
-        box = QtWidgets.QGroupBox('Fit (differential evolution)')
-        f = QtWidgets.QFormLayout(box)
-        f.setVerticalSpacing(3)
-        self.fit_set = QtWidgets.QComboBox()
-        self.fit_set.setToolTip('Every channel of this dataset is fitted')
-        self.fit_cost = QtWidgets.QComboBox()
-        self.fit_cost.addItems([c[1] for c in FIT_COSTS])
-        self.fit_cost.setToolTip(
-            'χ²: residuals divided by dR (points without dR use a relative '
-            'residual).\nlog R: residuals of log10 R, every decade weighted '
-            'equally.')
-        self.fit_maxiter = QtWidgets.QSpinBox()
-        self.fit_maxiter.setRange(1, 100000)
-        self.fit_maxiter.setValue(200)
-        self.fit_maxiter.setToolTip('Maximum number of generations')
-        self.fit_pop = QtWidgets.QSpinBox()
-        self.fit_pop.setRange(5, 200)
-        self.fit_pop.setValue(15)
-        self.fit_pop.setToolTip('Population = this × number of free '
-                                'parameters')
-        self.fit_tol = dspin(0, 1, 4, 0.001)
-        self.fit_tol.setValue(0.01)
-        self.fit_tol.setToolTip('Stop when the spread of the population\'s '
-                                'cost falls below tol × its mean')
-        # mutation F: a random value in [min, max] each generation (dithering,
-        # scipy's default 0.5 – 1); min = max is a constant F
-        self.fit_mut_lo = dspin(0, 1.99, 2, 0.05)
-        self.fit_mut_hi = dspin(0, 1.99, 2, 0.05)
-        self.fit_mut_lo.setValue(0.5)
-        self.fit_mut_hi.setValue(1.0)
-        for w in (self.fit_mut_lo, self.fit_mut_hi):
-            w.setToolTip(
-                'Mutation F: trial = best + F × (difference of two members).\n'
-                'A new F is drawn in [min, max] every generation (dithering); '
-                'min = max keeps it constant.\nLarger F searches wider but '
-                'converges more slowly.')
-        self.fit_workers = QtWidgets.QSpinBox()
-        self.fit_workers.setRange(1, os.cpu_count() or 1)
-        self.fit_workers.setValue(max(1, (os.cpu_count() or 2) // 2))
-        self.fit_workers.setToolTip(
-            'Processes evaluating each generation in parallel (1 = in this '
-            'process).\nStarting them takes about a second; beyond the '
-            'number of performance cores it no longer helps.')
-        self.fit_polish = QtWidgets.QCheckBox('polish (L-BFGS-B)')
-        self.fit_polish.setChecked(True)
-        self.fit_polish.setToolTip('Refine the best member with a local '
-                                   'gradient minimiser at the end')
-
-        orow = QtWidgets.QHBoxLayout()
-        for lab, w in (('max iter', self.fit_maxiter), ('pop', self.fit_pop),
-                       ('tol', self.fit_tol)):
-            if orow.count():
-                orow.addSpacing(10)
-            orow.addWidget(QtWidgets.QLabel(lab))
-            orow.addSpacing(4)
-            orow.addWidget(w, 1)
-        f.addRow('Dataset', self.fit_set)
-        f.addRow('Cost', self.fit_cost)
-        f.addRow('Options', orow)
-        mrow = QtWidgets.QHBoxLayout()
-        mrow.addWidget(self.fit_mut_lo, 1)
-        mrow.addSpacing(6)
-        mrow.addWidget(QtWidgets.QLabel('–'))
-        mrow.addSpacing(6)
-        mrow.addWidget(self.fit_mut_hi, 1)
-        f.addRow('Mutation', mrow)
-        prow = QtWidgets.QHBoxLayout()
-        prow.addWidget(self.fit_polish)
-        prow.addStretch(1)
-        prow.addWidget(QtWidgets.QLabel('workers'))
-        prow.addSpacing(4)
-        prow.addWidget(self.fit_workers)
-        f.addRow('', prow)
-        f.addRow(QtWidgets.QLabel(
-            '<i>Q range: Q min – Q max of the Simulation tab; its Q points '
-            'set the fit window\'s model curves.</i>', wordWrap=True))
-
-        row = QtWidgets.QHBoxLayout()
-        self.btn_fit = QtWidgets.QPushButton('Fit')
-        self.btn_fit.setToolTip('Fit in the fit window; stop it there')
-        self.btn_window = QtWidgets.QPushButton('Window')
-        self.btn_window.setToolTip('Show the window of the last fit')
-        self.btn_revert = QtWidgets.QPushButton('Revert')
-        self.btn_revert.setToolTip('Restore the parameters from before the '
-                                   'last fit was sent to the Simulation tab')
-        for b in (self.btn_fit, self.btn_window, self.btn_revert):
-            row.addWidget(b)
-        f.addRow(row)
-        self.btn_fit.clicked.connect(self.start_fit)
-        self.btn_revert.clicked.connect(self.revert_fit)
-        self.btn_window.clicked.connect(self._show_fit_window)
-        self.btn_window.setEnabled(False)
-        self.btn_revert.setEnabled(False)
-        box.setEnabled(self.simulation is not None)
-
-        self.fit_report = QtWidgets.QLabel()
-        self.fit_report.setWordWrap(True)
-        self.fit_report.setTextInteractionFlags(
-            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-        f.addRow(self.fit_report)
-        self._fit = None               # running FitThread
-        self._fit_start = None         # (params, x) before the last fit
-        self._fit_warnings = ''        # html, shown above the fit report
-        self.fit_window = None         # FitWindow, made by the first fit
-        return box
-
     def _build_plot(self):
         box = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(box)
@@ -982,19 +839,6 @@ class ExperimentalTab(QtWidgets.QWidget):
             t.setCurrentItem(current)
         self._update_buttons()
         self._refresh_fit_sets()
-
-    def _refresh_fit_sets(self):
-        """Datasets that can be fitted: static ones holding channels."""
-        c = self.fit_set
-        keep = c.currentText()
-        c.blockSignals(True)
-        c.clear()
-        for s in self.sets:
-            if s['channels'] and not s.get('line'):
-                c.addItem(s['name'])
-        i = c.findText(keep)
-        c.setCurrentIndex(max(i, 0))
-        c.blockSignals(False)
 
     def _selected(self):
         it = self.tree.currentItem()
@@ -1348,166 +1192,6 @@ class ExperimentalTab(QtWidgets.QWidget):
         self.btn_revert.setEnabled(False)
         self.redraw()
         return missing
-
-    # -- fitting ------------------------------------------------------------
-    def start_fit(self):
-        sim = self.simulation
-        if sim is None or self._fit is not None:
-            return
-        i = self._set_index(self.fit_set.currentText())
-        if i is None:
-            self.fit_report.setText(self._error('Import data to fit first.'))
-            return
-        sim.recompute()                 # push the tab's settings into the stack
-        # the Simulation tab's Q range selects the fitted points
-        qmin, qmax = sim.qmin.value(), sim.qmax.value()
-        mut = (self.fit_mut_lo.value(), self.fit_mut_hi.value())
-        if mut[0] > mut[1]:
-            self.fit_report.setText(self._error(
-                'Mutation: min must not exceed max.'))
-            return
-        s = self.sets[i]
-        vec = {ch: self.channel_vectors(s, ch) for ch in s['channels']}
-        data = [dict(zip(('P0', 'P'), vectors_pair(*vec[ch])), name='R' + ch,
-                     Q=d['Q'], R=d['R'], dR=d['dR'])
-                for ch, d in s['channels'].items()]
-        try:
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter('always')
-                problem = FitProblem(
-                    sim.stack, data,
-                    FIT_COSTS[self.fit_cost.currentIndex()][0], qmin, qmax)
-        except ValueError as exc:
-            self.fit_report.setText(self._error(exc))
-            return
-        # e.g. rho and phi of one layer both varied: kept above every report
-        self._fit_warnings = ''.join(self._error(w.message) + '<br>'
-                                     for w in caught)
-        self._fit_problem = problem
-        self._fit_start = (problem.params, [p[2] for p in problem.params])
-        # layer names at the start: a sent result only fits the same stack
-        self._fit_layers = [l.name for l in sim.stack.layers]
-        # the fitted points (Q range, R > 0 for log R) for the fit window
-        shown = {}
-        for ch, d in s['channels'].items():
-            ok = np.isfinite(d['Q']) & np.isfinite(d['R']) & \
-                (d['Q'] >= qmin) & (d['Q'] <= qmax)
-            if problem.cost == 'log':
-                ok &= d['R'] > 0
-            if ok.any():
-                shown[ch] = {c: d[c][ok] for c in ('Q', 'R', 'dR', 'dQ')}
-        if self.fit_window is None:
-            self.fit_window = FitWindow(self)
-            self.fit_window.stopRequested.connect(self.stop_fit)
-            self.fit_window.sendRequested.connect(self._send_fit)
-        # the model's other channels use the Simulation tab's pairs
-        self.fit_window.start(
-            problem, shown, dict(self.sim_vectors(), **vec),
-            np.linspace(qmin, qmax, sim.nq.value()), s['name'],
-            'χ²' if problem.cost == 'chi2' else 'cost (log R)',
-            polish=self.fit_polish.isChecked())
-        self.btn_window.setEnabled(True)
-        # a live simulation dataset, computed from the same pairs as the
-        # fit, shows a result sent from the fit window against the data
-        if not any(t.get('live') for t in self.sets):
-            self.add_simulation()
-        for t in self.sets:
-            if t.get('live'):
-                t['pairs'] = dict(vec)
-        self._update_live()
-        self._fit = FitThread(problem, maxiter=self.fit_maxiter.value(),
-                              popsize=self.fit_pop.value(),
-                              tol=self.fit_tol.value(),
-                              mutation=mut[0] if mut[0] == mut[1] else mut,
-                              polish=self.fit_polish.isChecked(),
-                              workers=self.fit_workers.value())
-        self._fit.progress.connect(self._fit_progress)
-        self._fit.progress.connect(self.fit_window.add_generation)
-        self._fit.finished_fit.connect(self._fit_done)
-        self._fit.failed.connect(self._fit_failed)
-        self._fit.finished.connect(self._fit_cleanup)
-        # a result is only sent to the stack the fit started from
-        sim.setEnabled(False)
-        self.btn_fit.setEnabled(False)
-        self.btn_revert.setEnabled(False)
-        self.fit_report.setText(
-            self._fit_warnings + 'Fitting %d parameter(s) to %d points of %s '
-            '(Q %.4g – %.4g Å⁻¹)…' % (len(problem.params), problem.npoints,
-                                     s['name'], qmin, qmax))
-        self._fit.start()
-
-    def stop_fit(self):
-        if self._fit is not None:
-            self._fit.stop()
-            self.fit_window.btn_stop.setEnabled(False)
-
-    def _show_fit_window(self):
-        if self.fit_window is not None:
-            self.fit_window.show()
-            self.fit_window.raise_()
-            self.fit_window.activateWindow()
-
-    def _send_fit(self, x, label):
-        """Write an entry of the fit window into the Simulation tab."""
-        if self._fit is not None:
-            return
-        if [l.name for l in self.simulation.stack.layers] != self._fit_layers:
-            QtWidgets.QMessageBox.warning(
-                self.fit_window, 'Send to Simulation',
-                'The layers of the Simulation tab changed since the fit '
-                'started;\nthese parameters no longer match them.')
-            return
-        self.simulation.set_parameters(self._fit_problem.params, x)
-        self.fit_report.setText(self._fit_header(
-            'Sent <b>%s</b> to the Simulation tab' % html_escape(
-                'generation ' + label if label.isdigit() else label)))
-        self.btn_revert.setEnabled(True)
-
-    def revert_fit(self):
-        if self._fit_start is not None and self._fit is None:
-            self.simulation.set_parameters(*self._fit_start)
-            self.fit_report.setText('Parameters restored to their values '
-                                    'before the fit.')
-            self.btn_revert.setEnabled(False)
-
-    def _fit_progress(self, x, cost, gen):
-        self.fit_report.setText(self._fit_header(
-            'Generation %d — cost %.5g' % (gen, cost)))
-
-    def _fit_done(self, x, cost, gen, msg):
-        self.fit_window.finish(x, cost, gen, msg)
-        self.fit_report.setText(self._fit_header(
-            '<b>%s</b> after %d generation(s) — cost %.5g<br><i>%s</i><br>'
-            'Send an entry from the fit window to use it.'
-            % ('Stopped' if msg == 'stopped' else 'Done', gen, cost,
-               html_escape(msg))))
-
-    def _fit_failed(self, msg):
-        self.fit_window.fail(msg)
-        self.fit_report.setText(self._error('Fit failed: %s' % msg))
-
-    def _fit_cleanup(self):
-        self._fit.deleteLater()
-        self._fit = None
-        self.simulation.setEnabled(True)
-        self.btn_fit.setEnabled(True)
-
-    def _fit_header(self, header):
-        """The fit's warnings above a status line; the parameters are in
-        the fit window."""
-        return self._fit_warnings + header
-
-    @staticmethod
-    def _error(msg):
-        return '<span style="color:#f87171">%s</span>' % html_escape(str(msg))
-
-    def shutdown(self):
-        """Stop a running fit; call before the application quits."""
-        if self.fit_window is not None:     # it would keep the app alive
-            self.fit_window.hide()
-        if self._fit is not None:
-            self._fit.stop()
-            self._fit.wait()
 
     # -- drawing ------------------------------------------------------------
     def redraw(self, *_):

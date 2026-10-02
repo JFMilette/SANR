@@ -10,8 +10,11 @@ __pycache__/
 
 # OS / editor
 .DS_Store
-.vscode/*
-!.vscode/settings.json
+.vscode/
+.claude/
 
 # Scratch models
 bizar*.json
+
+# macOS launcher, machine-specific (python make_app.py)
+SANR.app/

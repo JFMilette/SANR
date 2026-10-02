@@ -1,4 +1,5 @@
-"""model.fit: fits of polarised channels.
+"""fit.problem and fit.de.de_fit: differential-evolution fits of polarised
+channels.
 
 Run from the repo root: python -m pytest tests
 """
@@ -12,7 +13,8 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import model.stack as S                                 # noqa: E402
-from model.fit import FitProblem, run_de                # noqa: E402
+from fit.de.de_fit import run_de                       # noqa: E402
+from fit.problem import FitProblem                      # noqa: E402
 from model.polarisation import channel_pair, in_plane   # noqa: E402
 
 LAB = ['++', '+-', '-+', '--']
@@ -156,3 +158,26 @@ def test_fit_stays_inside_bounds():
     X = np.array(seen)
     assert np.all(X >= prob.lo) and np.all(X <= prob.hi)
     assert x[0] == pytest.approx(70.0)
+
+
+def test_fit_recovers_scale_and_background():
+    """Half-polarised data: the background is counted once per channel, so
+    scale and background are found together with the film."""
+    Q = np.linspace(0.004, 0.2, 300)
+    truth = film()
+    truth.scale, truth.background = 0.97, 2e-6
+    n = in_plane(0.0)
+    p = [channel_pair(c, n) for c in ('+', '-')]
+    R = truth.reflectivities(Q, p, warn=False)
+    data = [dict(Q=Q, R=R[:, j], dR=0.01 * R[:, j], P0=P0, P=P)
+            for j, (P0, P) in enumerate(p)]
+    st = film()
+    st.fit['scale'] = {'vary': True, 'min': 0.8, 'max': 1.2}
+    st.fit['background'] = {'vary': True, 'min': 0.0, 'max': 1e-5}
+    vary(st, 'thickness', 60.0, 100.0)
+    prob = FitProblem(st, data)
+    x, cost, *_ = run_de(prob, seed=0, tol=1e-8)
+    assert [a for _, a, *_ in prob.params] == ['thickness', 'scale',
+                                               'background']
+    assert x == pytest.approx([80.0, 0.97, 2e-6], rel=1e-3)
+    assert cost < 1e-6

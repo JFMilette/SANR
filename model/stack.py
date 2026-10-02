@@ -105,10 +105,15 @@ where resolution['mode'] says which of theta, lambda is fixed
             in increasing qmax.  Angle i is used for qmax_{i-1} <= Q <
             qmax_i; the last angle's qmax is ignored (open-ended).
 The average is a fixed quadrature
-over +-RES_SPAN sigma.  The ideal reflectivity is computed once on a uniform
-Q grid of step (smallest sigma) / RES_GRID_STEP and linearly interpolated at
-the quadrature nodes; about 10x cheaper than evaluating every node and more
-accurate (<= 0.3 % at the critical edge, where R has a square-root kink).
+over +-RES_SPAN sigma.  The ideal reflectivity is computed once on a Q grid
+of local step sigma / RES_GRID_STEP, refined around the critical edges
+(Stack.critical_edges, the square-root kinks of total reflection), and
+linearly interpolated at the quadrature nodes: several times cheaper than
+evaluating every node.  Against a uniform grid 16x finer, the error is a
+few 0.1 % of R at most, and smaller than that of a uniform grid 4x finer at
+the critical edge (the worst place for interpolation).  A magnetic fronting
+with q_in_fronting False uses a uniform grid of step sigma /
+RES_GRID_STEP_UNIFORM instead (see RES_GRID_STEP_UNIFORM).
 A channel that is undefined (NaN) at some nodes is averaged over the others.
 
 POLARISATION -- a measured quantity is a pair (P0, P): incident polarisation
@@ -117,8 +122,8 @@ the efficiency, P = None for no analyser.  Stack.reflectivities(Q, pairs)
 returns one column per pair (Ruehm, Toperverg & Dosch, PRB 60, 16073,
 Eq. 2): R = Tr{rho r rho0 r^+}, rho0 = (1 + P0.sigma)/2,
 rho = (1 + P.sigma)/2, or rho = 1 for P=None (all reflected spins counted).
-The background is added once per pair: R+ = (n, None) is
-R++ + R+- + background.  model.polarisation names the usual pairs.
+The background is added once per pair, after the scale factor: R+ = (n, None)
+is scale (R++ + R+-) + background.  model.polarisation names the usual pairs.
 
 With a non-magnetic fronting this holds for any backing, and all pairs share
 one transfer-matrix evaluation.  With a magnetic fronting the two eigenspins
@@ -149,6 +154,9 @@ from model import roughness as rough
 # bounds in the same units as the attribute (Angstrom, A^-2, turns).
 FIT_PARAMS = ('thickness', 'NSLD_real', 'NSLD_img', 'MSLD_rho', 'MSLD_theta',
               'MSLD_phi', 'roughness_sigma')
+# Stack attributes a fit may vary, in Stack.fit the same way; their
+# free_parameters() entries have layer index None.
+STACK_FIT_PARAMS = ('scale', 'background')
 
 
 # Default fit bounds, the same for every layer: attr -> (min, max).
@@ -160,6 +168,8 @@ DEFAULT_BOUNDS = {
     'MSLD_theta':      (0.0, 1.0),         # turns
     'MSLD_phi':        (-0.25, 0.25),      # turns, out of plane
     'roughness_sigma': (0.0, 10.0),        # Angstrom
+    'scale':           (0.5, 1.5),
+    'background':      (0.0, 1e-5),
 }
 
 
@@ -171,11 +181,23 @@ def default_fit(attr):
 
 # Resolution quadrature: RES_NODES points evenly spread over +-RES_SPAN sigma,
 # interpolated from a grid of step sigma_min / RES_GRID_STEP (at most
-# RES_GRID_MAX points).
+# RES_GRID_MAX points), refined around every critical edge (Stack.
+# critical_edges) where R has a square-root kink: RES_EDGE_POINTS more points
+# on each side, geometrically closer towards the edge, over RES_EDGE_WIDTH
+# coarse steps.  Away from the edges the coarse step is within a few % of an
+# error bar of a 16x finer grid; at the edges the refinement makes it better
+# than a uniform grid 4x finer (see RESOLUTION).  A magnetic fronting with
+# vacuum-referenced Q (q_in_fronting False) keeps the uniform fine grid of
+# step sigma / RES_GRID_STEP_UNIFORM and no edge refinement: its flipped
+# channels start at the fronting's edges (NaN below, a 1/sqrt flux factor
+# above), a boundary only that grid handles well.
 RES_NODES = 101
 RES_SPAN = 3.5
-RES_GRID_STEP = 32
+RES_GRID_STEP = 8
+RES_GRID_STEP_UNIFORM = 32
 RES_GRID_MAX = 50000
+RES_EDGE_POINTS = 40
+RES_EDGE_WIDTH = 8
 # Q points per block of the transfer-matrix product (see
 # Stack.build_transfer_matrix); set from a benchmark
 TM_BLOCK = 256
@@ -289,19 +311,22 @@ def _sigma_tof(Q, res):
 RESOLUTION_MODES = {'mono': _sigma_mono, 'tof': _sigma_tof}
 
 
-def _res_grid(Qn, sigma, bins=2048):
+def _res_grid(Qn, sigma, bins=2048, edges_q=(), step=None):
     """Q grid on which the ideal R is computed for the quadrature nodes Qn
     (nQ, RES_NODES) of widths sigma (nQ,): the local step is sigma /
     RES_GRID_STEP of the finest Gaussian whose nodes fall there, so a
     resolution that is sharp in one Q band (TOF at low Q) only refines that
-    band.  At most RES_GRID_MAX points."""
+    band.  At most RES_GRID_MAX points, plus the refinement around each
+    critical edge in `edges_q` (see RES_EDGE_POINTS).  `step` replaces
+    RES_GRID_STEP."""
+    step = RES_GRID_STEP if step is None else step
     lo, hi = Qn.min(), Qn.max()
     edges = np.linspace(lo, hi, bins + 1)
     h = np.full(bins, np.inf)
     ok = sigma > 0
     idx = np.minimum(((Qn[ok] - lo) / (hi - lo) * bins).astype(int), bins - 1)
     np.minimum.at(h, idx.ravel(),
-                  np.repeat(sigma[ok] / RES_GRID_STEP, Qn.shape[1]))
+                  np.repeat(sigma[ok] / step, Qn.shape[1]))
     # a bin between two nodes of a wide Gaussian takes its neighbours' step
     i = np.arange(bins)
     fin = np.isfinite(h)
@@ -311,7 +336,19 @@ def _res_grid(Qn, sigma, bins=2048):
     h = np.maximum(h, (hi - lo) / (RES_GRID_MAX - 1))
     # points evenly spaced in u = integral dq / h(q)
     u = np.concatenate([[0.0], np.cumsum(np.diff(edges) / h)])
-    return np.interp(np.linspace(0, u[-1], int(np.ceil(u[-1])) + 1), u, edges)
+    grid = np.interp(np.linspace(0, u[-1], int(np.ceil(u[-1])) + 1), u, edges)
+    # the kink of R at a critical edge: the edge itself and points closing in
+    # on it from both sides
+    extra = []
+    for qc in edges_q:
+        if lo < qc < hi:
+            k = min(int((qc - lo) / (hi - lo) * bins), bins - 1)
+            width = RES_EDGE_WIDTH * h[k]
+            d = width * np.geomspace(1e-4, 1.0, RES_EDGE_POINTS)
+            extra.append(np.concatenate([[qc], qc - d, qc + d]))
+    if extra:
+        grid = np.unique(np.clip(np.concatenate([grid] + extra), lo, hi))
+    return grid
 
 
 # ---------------------------------------------------------------- Layer ----
@@ -393,8 +430,11 @@ class Stack:
         self.roughness_scheme = roughness_scheme
         self.licorne_renorm = 'manual'   # or 'none' (Licorne scheme only)
         self.sublayers = None
+        self.scale = 1.0                     # factor on every channel
         self.background = 0.0                # constant added to every channel
-        self.q_in_fronting = False           # True: Q is measured inside the fronting
+        self.fit = {}                        # STACK_FIT_PARAMS, as Layer.fit
+        # True (default): Q is measured inside the fronting; False: vacuum Q
+        self.q_in_fronting = True
         # instrumental resolution (see RESOLUTION): enabled, mode and the
         # parameters of each mode
         self.resolution = copy.deepcopy(DEFAULT_RESOLUTION)
@@ -407,11 +447,13 @@ class Stack:
 
     # -- serialisation ------------------------------------------------------
     def to_dict(self):
-        """Plain-JSON description of the sample (layers, tail, background,
-        resolution, smearing).  No polarisation: it belongs to each
-        measurement."""
+        """Plain-JSON description of the sample (layers, tail, scale,
+        background, resolution, smearing).  No polarisation: it belongs to
+        each measurement."""
         return {'tail': self.tail,
+                'scale': self.scale,
                 'background': self.background,
+                'fit': {k: dict(v) for k, v in self.fit.items()},
                 'q_in_fronting': self.q_in_fronting,
                 'resolution': copy.deepcopy(self.resolution),
                 'magnetic_smearing': self.magnetic_smearing,
@@ -430,6 +472,8 @@ class Stack:
                 roughness_scheme=d.get('roughness_scheme', 'rms'),
                 magnetic_smearing=d.get('magnetic_smearing'))
         s.background = d['background']
+        s.scale = float(d.get('scale', 1.0))
+        s.fit = {k: dict(v) for k, v in d.get('fit', {}).items()}
         s.q_in_fronting = bool(d['q_in_fronting'])
         s.resolution.update(copy.deepcopy(d['resolution']))
         s.licorne_renorm = d.get('licorne_renorm', 'manual')
@@ -447,15 +491,33 @@ class Stack:
             return i > 0
         return True
 
+    def fit_entry(self, attr):
+        """{'vary', 'min', 'max'} of the stack parameter `attr`, created
+        from default_fit if unset."""
+        if attr not in self.fit:
+            self.fit[attr] = default_fit(attr)
+        return self.fit[attr]
+
     def free_parameters(self):
-        """[(layer index, attr, value, min, max)] of every varied parameter."""
+        """[(layer index, attr, value, min, max)] of every varied parameter:
+        the layers' in order, then the stack's own (layer index None)."""
         out = []
         for i, l in enumerate(self.layers):
             for attr in FIT_PARAMS:
                 e = l.fit.get(attr)
                 if e and e['vary'] and self.fit_allowed(i, attr):
                     out.append((i, attr, getattr(l, attr), e['min'], e['max']))
+        for attr in STACK_FIT_PARAMS:
+            e = self.fit.get(attr)
+            if e and e['vary']:
+                out.append((None, attr, getattr(self, attr), e['min'],
+                            e['max']))
         return out
+
+    def owner(self, i):
+        """The object a free_parameters() entry with layer index i sets:
+        layer i, or the stack itself for None."""
+        return self if i is None else self.layers[i]
 
     # -- geometry -----------------------------------------------------------
     @property
@@ -897,7 +959,7 @@ class Stack:
         return self.reflectivities(Q, [(P0, P)])[:, 0]
 
     def reflectivities(self, Q, pairs, warn=True):
-        """Reflectivity + background of each (P0, P) in pairs (see
+        """scale x reflectivity + background of each (P0, P) in pairs (see
         POLARISATION), averaged over the Q resolution when it is enabled.
         Shape (nQ, len(pairs)).  warn=False silences the warning about a
         polarisation transverse to a magnetic fronting's M."""
@@ -908,7 +970,21 @@ class Stack:
         else:
             w = self._lab_weights(pairs, m, warn)
             R = _weigh(self._resolve(Q, self._lab_channels), w)
-        return R + self.background
+        return self.scale * R + self.background
+
+    def critical_edges(self):
+        """Q of the critical edges, where R has a square-root kink: total
+        reflection by the backing for each spin pair of backing and fronting
+        (in-plane magnetic SLD +-, HALPERIN).  A candidate that is not a real
+        kink only costs a few grid points (see RES_EDGE_POINTS).  The edges
+        of a magnetic fronting's own spins are left out on purpose: there a
+        flipped channel starts (NaN below, a 1/sqrt flux factor above) and
+        the coarse grid's handling of that boundary is the one to keep."""
+        f, b = self.fronting, self.backing
+        mf, mb = abs(self.inplane_rho(f)), abs(self.inplane_rho(b))
+        v = [b.NSLD_real + sb * mb - f.NSLD_real - sf * mf
+             for sb in (1, -1) for sf in (1, -1)]
+        return sorted({float(np.sqrt(16 * np.pi * x)) for x in v if x > 0})
 
     def _resolve(self, Q, ideal):
         """Average ideal(Q) -> (nQ, k) over the Q resolution (see RESOLUTION)."""
@@ -920,7 +996,10 @@ class Stack:
         w = np.exp(-0.5 * x**2)
         # reflectivity is even in Q; keep the nodes off Q = 0
         Qn = np.maximum(np.abs(Q[:, None] + x[None, :] * sigma[:, None]), 1e-6)
-        grid = _res_grid(Qn, sigma)
+        if self.fronting_direction() is not None and not self.q_in_fronting:
+            grid = _res_grid(Qn, sigma, step=RES_GRID_STEP_UNIFORM)
+        else:
+            grid = _res_grid(Qn, sigma, edges_q=self.critical_edges())
         Rg = ideal(grid)
         R = np.stack([np.interp(Qn, grid, Rg[:, c])
                       for c in range(Rg.shape[1])], -1)
