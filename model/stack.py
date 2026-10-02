@@ -117,8 +117,23 @@ where resolution['mode'] says which of theta, lambda is fixed
             lambda = 4 pi sin(theta) / Q; 'tof_dlambda' (A, absolute) and
             'tof_angles' = [{'theta', 'dtheta' (rad), 'qmax' (A^-1)}, ...]
             in increasing qmax.  Angle i is used for qmax_{i-1} <= Q <
-            qmax_i; the last angle's qmax is ignored (open-ended).
-The average is a fixed quadrature
+            qmax_i; the last angle's qmax is ignored (open-ended).  With
+            two or more limits, Q equal to the last one stays with the
+            angle below it, as in Licorne's TOF template
+            (QP2=(Q>=Q1)&(Q<=Q2)).
+resolution['scheme'] says how the average is taken:
+  'quadrature' (default) -- the Gaussian average below, independent of the
+            Q points asked for.
+  'licorne' -- Licorne's own convolution (model.licorne_resolution,
+            reflection_m.m resolut, mode resolution['licorne_fun'] 1, 2 or
+            3): a sum over the Q points of the call themselves, within
+            +-3 sigma, unnormalised, with constant tails past the ends.
+            The result therefore depends on the Q grid it is evaluated on,
+            which is Licorne's behaviour: compute on the data Q to compare
+            with Licorne.  Q must have no duplicates (any order); a magnetic
+            fronting is refused (Licorne has none).  The weight matrix is
+            cached per (Q, sigma, mode).
+The quadrature average is a fixed quadrature
 over +-RES_SPAN sigma.  The ideal reflectivity is computed once on a Q grid
 of local step sigma / RES_GRID_STEP, refined around the critical edges
 (Stack.critical_edges, the square-root kinks of total reflection), and
@@ -162,6 +177,7 @@ import numpy as np
 from scipy.special import erf
 
 from model import roughness as rough
+from model.licorne_resolution import kernel as licorne_kernel
 
 
 # Layer attributes a fit may vary.  Layer.fit[attr] = {'vary', 'min', 'max'},
@@ -298,7 +314,12 @@ DEFAULT_RESOLUTION = {
     'tof_angles': [{'theta': 0.006, 'dtheta': 3e-4, 'qmax': 0.04},
                    {'theta': 0.010, 'dtheta': 5e-4, 'qmax': 0.12},
                    {'theta': 0.017, 'dtheta': 5e-4, 'qmax': None}],
+    'scheme': 'quadrature', 'licorne_fun': 3,
 }
+# resolution['scheme'] (see RESOLUTION)
+RES_SCHEMES = ('quadrature', 'licorne')
+# Licorne weight matrices kept per stack (one per Q grid, sigma and mode)
+LICORNE_W_CACHE = 4
 
 
 def _sigma_mono(Q, res):
@@ -320,6 +341,8 @@ def _sigma_tof(Q, res):
     if np.any(np.diff(edges) <= 0):
         raise ValueError('TOF Q limits must increase')
     k = np.searchsorted(edges, Q, side='right')
+    if len(edges) >= 2:              # Licorne's template: Q <= Q2 is angle 2
+        k = np.where(Q == edges[-1], k - 1, k)
     lam = 4*np.pi*np.sin(theta[k]) / Q
     return Q * np.hypot(dtheta[k] / theta[k], res['tof_dlambda'] / lam)
 
@@ -465,6 +488,7 @@ class Stack:
                                   if magnetic_smearing is None
                                   else magnetic_smearing)
         self.step_fallback = True        # 'step': a rho = 0 layer has no angle
+        self._licorne_W = {}             # cached Licorne resolution kernels
 
     # -- serialisation ------------------------------------------------------
     def to_dict(self):
@@ -1020,6 +1044,11 @@ class Stack:
         sigma = self.resolution_sigma(Q)
         if not np.any(sigma > 0):
             return ideal(Q)
+        scheme = self.resolution.get('scheme', 'quadrature')
+        if scheme not in RES_SCHEMES:
+            raise ValueError('unknown resolution scheme %r' % (scheme,))
+        if scheme == 'licorne':
+            return self._resolve_licorne(Q, sigma, ideal)
         x = np.linspace(-RES_SPAN, RES_SPAN, RES_NODES)
         w = np.exp(-0.5 * x**2)
         # reflectivity is even in Q; keep the nodes off Q = 0
@@ -1037,6 +1066,31 @@ class Stack:
             return np.where(W.sum(1) > 0,
                             (np.where(ok, R, 0.0) * W).sum(1) / W.sum(1),
                             np.nan)
+
+    def _resolve_licorne(self, Q, sigma, ideal):
+        """Licorne's convolution on the points Q themselves (see
+        RESOLUTION 'licorne')."""
+        if self.fronting_direction() is not None:
+            raise ValueError("the 'licorne' resolution scheme has no "
+                             "magnetic fronting (Licorne has none)")
+        order = np.argsort(Q, kind='stable')
+        Qs, ss = Q[order], sigma[order]
+        if np.any(np.diff(Qs) == 0):
+            raise ValueError("the 'licorne' resolution scheme needs distinct "
+                             "Q points")
+        mode = int(self.resolution.get('licorne_fun', 3))
+        key = (Qs.tobytes(), ss.tobytes(), mode)
+        cache = self._licorne_W
+        W = cache.get(key)
+        if W is None:
+            W = licorne_kernel(Qs, ss, mode)
+            if len(cache) >= LICORNE_W_CACHE:
+                cache.pop(next(iter(cache)))
+            cache[key] = W
+        Rs = W @ ideal(Qs)
+        R = np.empty_like(Rs)
+        R[order] = Rs
+        return R
 
     def _trace(self, Q, pairs):
         """Non-magnetic fronting: Tr{rho r rho0 r^+} of every pair from ONE

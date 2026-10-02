@@ -464,6 +464,18 @@ PARAM_DISPLAY.update(scale=('Scale', 1.0, ''),
                      background=('Background', 1.0, ''))
 OUT_OF_BOUNDS = 'QDoubleSpinBox { background: #4a1f22; border: 1px solid #f87171 }'
 RES_MODES = ('mono', 'tof')     # res_mode combo order
+# res_conv combo: label, resolution['scheme'], resolution['licorne_fun']
+RES_CONVOLUTIONS = [('quadrature', 'quadrature', None),
+                    ('Licorne 1 (data grid)', 'licorne', 1),
+                    ('Licorne 2 (data grid)', 'licorne', 2),
+                    ('Licorne 3 (data grid)', 'licorne', 3)]
+
+
+def res_convolution(res):
+    """Index in RES_CONVOLUTIONS of a resolution dict."""
+    if res.get('scheme', 'quadrature') != 'licorne':
+        return 0
+    return [c[2] for c in RES_CONVOLUTIONS].index(res.get('licorne_fun', 3))
 # instrument setups of the fixed-angle mode: name -> (dlambda (A), angles)
 RES_PRESETS = {
     'Mono (3 angles)': (0.005, [{'theta': 0.006, 'dtheta': 3e-4, 'qmax': 0.04},
@@ -942,6 +954,19 @@ class SimulationTab(QtWidgets.QWidget):
             'fixed θ per Q band: one or more fixed angles, each used over a '
             'Q band, λ = 4π sin θ / Q\n(presets: Mono with 3 angles, ToF '
             'with 1).')
+        self.res_conv = QtWidgets.QComboBox()
+        self.res_conv.addItems([c[0] for c in RES_CONVOLUTIONS])
+        self.res_conv.setCurrentIndex(res_convolution(res))
+        self.res_conv.setToolTip(
+            'How the reflectivity is averaged over σ_Q.\n'
+            'quadrature: a Gaussian average, independent of the Q points '
+            'computed.\n'
+            'Licorne (data grid): Licorne\'s own sum over the computed Q '
+            'points themselves\n  (resolut, mode 1 mean within ±σ/2, 2 '
+            'rectangle rule, 3 midpoint rule), unnormalised,\n  constant '
+            'tails past the ends: the result depends on the Q grid.  The fit '
+            'uses the data Q;\n  the curve here uses this tab\'s Q grid, so '
+            'it can differ from Licorne\'s.')
         self.res_lambda = dspin(0.1, 50, 3, 0.1, ' Å')
         self.res_lambda.setValue(res['wavelength'])
         self.res_lambda.setToolTip('Neutron wavelength λ')
@@ -1011,6 +1036,7 @@ class SimulationTab(QtWidgets.QWidget):
         resrow.addWidget(self.res_on)
         resrow.addSpacing(10)
         resrow.addWidget(self.res_mode, 1)
+        resrow.addWidget(self.res_conv, 1)
         f.addRow('Resolution', resrow)
 
         # one page of parameters per mode, in RES_MODES order
@@ -1052,6 +1078,7 @@ class SimulationTab(QtWidgets.QWidget):
         self.q_fronting.toggled.connect(self.schedule)
         self.res_on.toggled.connect(self._sync_resolution)
         self.res_mode.currentIndexChanged.connect(self._sync_resolution)
+        self.res_conv.currentIndexChanged.connect(self.schedule)
         self._sync_resolution()
 
         # layer list
@@ -1446,6 +1473,10 @@ class SimulationTab(QtWidgets.QWidget):
                 dlambda_rel=self.res_dlambda.value() / 100,
                 dtheta=self.res_dtheta.value() / 1e3,
                 tof_dlambda=self.res_tof_dl.value())
+            scheme, fun = RES_CONVOLUTIONS[self.res_conv.currentIndex()][1:]
+            self.stack.resolution['scheme'] = scheme
+            if fun is not None:
+                self.stack.resolution['licorne_fun'] = fun
             if mode == 'tof':
                 self.stack.resolution['tof_angles'] = self._tof_angles()
             self.stack.build_sublayers()
@@ -1469,6 +1500,7 @@ class SimulationTab(QtWidgets.QWidget):
     def _sync_resolution(self, *_):
         on = self.res_on.isChecked()
         self.res_mode.setEnabled(on)
+        self.res_conv.setEnabled(on)
         self.res_pages.setCurrentIndex(self.res_mode.currentIndex())
         self.res_pages.setEnabled(on)
         self.schedule()
@@ -1761,12 +1793,13 @@ class SimulationTab(QtWidgets.QWidget):
         self.stack.magnetic_smearing = new.magnetic_smearing
         self.stack.roughness_scheme = new.roughness_scheme
         self.stack.licorne_renorm = new.licorne_renorm
+        self.stack.licorne_outer = new.licorne_outer
         self.stack.step_fallback = new.step_fallback
         sim = d.get('simulation', {})
         widgets = [self.qmin, self.qmax, self.nq, self.tail, self.pol,
                    self.background, self.q_fronting, self.res_on,
                    self.msmear, self.rscheme, self.res_mode,
-                   self.res_tof_dl,
+                   self.res_conv, self.res_tof_dl,
                    self.res_lambda, self.res_dlambda, self.res_dtheta]
         for w in widgets:
             w.blockSignals(True)
@@ -1787,6 +1820,7 @@ class SimulationTab(QtWidgets.QWidget):
         self.res_dlambda.setValue(100 * res['dlambda_rel'])
         self.res_dtheta.setValue(1e3 * res['dtheta'])
         self.res_mode.setCurrentIndex(RES_MODES.index(res['mode']))
+        self.res_conv.setCurrentIndex(res_convolution(res))
         self.res_tof_dl.setValue(res['tof_dlambda'])
         self._set_tof_angles(res['tof_angles'])
         disp = sim.get('display', {})

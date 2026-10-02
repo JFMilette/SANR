@@ -16,7 +16,10 @@ model.polarisation); 'name' labels it in warnings.  Channels measured along
 different axes can be fitted together.  The model is ONE
 Stack.reflectivities call per trial on the union of every channel's Q
 points, with the stack's own resolution, scale and background (added once
-per channel).
+per channel).  With the 'licorne' resolution scheme the convolution depends
+on the grid it runs on (model.stack RESOLUTION), so each distinct grid of
+fitted points is evaluated on its own instead (one call per grid; a warning
+says so when the channels' grids differ).
 
 COST -- mean over all points of the squared residual:
   'chi2' : (R_model - R) / dR, i.e. the reduced chi^2 up to the number of
@@ -101,6 +104,7 @@ class FitProblem:
         self.channels = [(n, idx, R, s) for (n, R, s), idx
                          in zip(self.channels, np.split(inv, splits))]
         self.npoints = sum(len(ch[2]) for ch in self.channels)
+        self.groups = self._groups(Qs)
 
         # said once here; the cost function itself never warns
         m = self.stack.fronting_direction()
@@ -115,6 +119,28 @@ class FitProblem:
                     'transverse to its magnetisation; that part precesses '
                     'and is averaged out, only the projection on M_f is '
                     'fitted' % ', '.join(lost), stacklevel=2)
+
+    def _groups(self, Qs):
+        """[(Q grid, [(channel k, indices of its points in the grid)])]: the
+        union of every channel's Q, or one grid per distinct channel grid
+        with the 'licorne' resolution scheme (see DATA)."""
+        res = self.stack.resolution
+        if not (res.get('enabled') and res.get('scheme') == 'licorne'):
+            return [(self.Q, [(k, ch[1]) for k, ch
+                              in enumerate(self.channels)])]
+        grids = {}
+        for k, (q, ch) in enumerate(zip(Qs, self.channels)):
+            g = np.unique(q)
+            if len(g) != len(q):
+                raise ValueError('%s has repeated Q points: the Licorne '
+                                 'resolution scheme needs distinct Q' % ch[0])
+            grids.setdefault(g.tobytes(), (g, []))[1].append(
+                (k, np.searchsorted(g, q)))
+        if len(grids) > 1:
+            warnings.warn('Licorne resolution scheme: the channels are on '
+                          'different Q grids; each grid is convolved on its '
+                          'own', stacklevel=3)
+        return list(grids.values())
 
     # -- parameters ---------------------------------------------------------
     def to_x(self, u):
@@ -139,8 +165,13 @@ class FitProblem:
         """Model reflectivity of each channel at its data points."""
         self.apply(x)
         self.stack.build_sublayers()
-        R = self.stack.reflectivities(self.Q, self.pairs, warn=False)
-        return [R[idx, k] for k, (_, idx, _, _) in enumerate(self.channels)]
+        out = [None] * len(self.channels)
+        for Q, members in self.groups:
+            R = self.stack.reflectivities(
+                Q, [self.pairs[k] for k, _ in members], warn=False)
+            for c, (k, idx) in enumerate(members):
+                out[k] = R[idx, c]
+        return out
 
     def residuals(self, x):
         out = []
