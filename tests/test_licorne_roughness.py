@@ -268,6 +268,22 @@ def test_defaults_unchanged():
     st = S.Stack(L)
     assert st.roughness_scheme == 'rms' and st.magnetic_smearing == 'vector'
     assert st.step_fallback and st.licorne_renorm == 'manual'
+    assert st.licorne_outer == 'infinite'
+    assert st.resolution['scheme'] == 'quadrature'
+    assert not st.is_licorne_exact()
+    # Licorne-exact on, then off: the physical defaults come back, the
+    # scheme and the smearing stay
+    st.set_licorne_exact()
+    assert st.is_licorne_exact() and st.roughness_scheme == 'licorne'
+    assert (st.magnetic_smearing, st.step_fallback, st.licorne_renorm,
+            st.licorne_outer, st.resolution['scheme']) == \
+        ('step', False, 'licorne', 'licorne', 'licorne')
+    st.set_licorne_exact(False)
+    assert not st.is_licorne_exact()
+    assert (st.roughness_scheme, st.magnetic_smearing, st.step_fallback,
+            st.licorne_renorm, st.licorne_outer, st.resolution['scheme']) == \
+        ('licorne', 'step', True, 'manual', 'infinite', 'quadrature')
+    st = S.Stack(L)
     assert S.Stack(L, roughness_scheme='licorne').magnetic_smearing == 'step'
     assert S.Stack(L, roughness_scheme='licorne',
                    magnetic_smearing='angle').magnetic_smearing == 'angle'
@@ -568,11 +584,7 @@ def test_rect_J_fixture1():
 
 
 def licorne_exact(st):
-    """The Licorne-exact settings of a stack in the Licorne scheme."""
-    st.magnetic_smearing = 'step'
-    st.step_fallback = False
-    st.licorne_renorm = 'licorne'
-    st.licorne_outer = 'licorne'
+    st.set_licorne_exact()
     return st
 
 
@@ -686,6 +698,7 @@ def test_import_parameters_only():
     st = load_licorne_model(FIX1 / 'parameters.m')
     assert st.roughness_scheme == 'licorne'
     assert st.magnetic_smearing == 'step'
+    assert st.is_licorne_exact()
     assert st.layers[0].name == 'vacuum' and st.layers[0].NSLD_real == 0
     assert st.layers[2].NSLD_real == 1.54e-6       # 5 figures in parameters.m
     assert [l.roughness_model for l in st.layers[1:]] == ['tanh'] * 5

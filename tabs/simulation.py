@@ -938,6 +938,18 @@ class SimulationTab(QtWidgets.QWidget):
             'clipped at half thicknesses,\n  thin layers renormalised, jumps '
             'at the window edges (Licorne manual, App. 10.1).')
 
+        self.lic_exact = QtWidgets.QCheckBox('Licorne-exact')
+        self.lic_exact.setChecked(self.stack.is_licorne_exact())
+        self.lic_exact.setToolTip(
+            'Every choice Licorne 1.4.2 makes, to reproduce its curves: '
+            'Licorne roughness, step M smearing\n  without fallback, '
+            'Licorne\'s 50-point window integral, its 1.5·t fronting / '
+            'substrate pseudo-layers\n  and its resolution convolution on '
+            'the data grid.  Unticked: the physical defaults\n  (exact '
+            'integral, semi-infinite outer media, quadrature).  Changing any '
+            'of these unticks it.')
+        self.lic_exact.toggled.connect(self._licorne_exact)
+
         # instrumental resolution, Gaussian in Q (see model.stack RESOLUTION)
         res = self.stack.resolution
         self.res_on = QtWidgets.QCheckBox('smear')
@@ -1030,7 +1042,10 @@ class SimulationTab(QtWidgets.QWidget):
             row.addWidget(cb)
             f.addRow(label, row)
         f.addRow('Q reference', self.q_fronting)
-        f.addRow('Roughness', self.rscheme)
+        rrow = QtWidgets.QHBoxLayout()
+        rrow.addWidget(self.rscheme, 1)
+        rrow.addWidget(self.lic_exact)
+        f.addRow('Roughness', rrow)
         f.addRow('M smearing', self.msmear)
         resrow = QtWidgets.QHBoxLayout()
         resrow.addWidget(self.res_on)
@@ -1445,6 +1460,22 @@ class SimulationTab(QtWidgets.QWidget):
             SMEARING_MODES.index(DEFAULT_SMEARING[ROUGHNESS_SCHEMES[i]]))
         self.schedule()
 
+    def _licorne_exact(self, on):
+        """Licorne-exact on / off (Stack.set_licorne_exact); the combos
+        follow."""
+        self.stack.set_licorne_exact(on)
+        res = self.stack.resolution
+        for w in (self.rscheme, self.msmear, self.res_conv):
+            w.blockSignals(True)
+        self.rscheme.setCurrentIndex(
+            ROUGHNESS_SCHEMES.index(self.stack.roughness_scheme))
+        self.msmear.setCurrentIndex(
+            SMEARING_MODES.index(self.stack.magnetic_smearing))
+        self.res_conv.setCurrentIndex(res_convolution(res))
+        for w in (self.rscheme, self.msmear, self.res_conv):
+            w.blockSignals(False)
+        self.schedule()
+
     # -- computation --------------------------------------------------------
     def schedule(self, *_):
         # throttle, not debounce: a dragged slider still redraws as it moves
@@ -1479,6 +1510,10 @@ class SimulationTab(QtWidgets.QWidget):
                 self.stack.resolution['licorne_fun'] = fun
             if mode == 'tof':
                 self.stack.resolution['tof_angles'] = self._tof_angles()
+            # ticked only while every Licorne choice holds
+            self.lic_exact.blockSignals(True)
+            self.lic_exact.setChecked(self.stack.is_licorne_exact())
+            self.lic_exact.blockSignals(False)
             self.stack.build_sublayers()
             self._compute_profile()
             self._show_profile()

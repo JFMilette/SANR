@@ -255,8 +255,8 @@ def _out_of_plane(R, vecs):
 
 def load_licorne_model(parameters_m_path, profile_dat_path=None,
                        axis_map=None, notes=None):
-    """Stack (roughness_scheme 'licorne', magnetic_smearing 'step') of a
-    Licorne export: vacuum fronting, the layers, the substrate as backing.
+    """Stack (Licorne-exact, Stack.set_licorne_exact) of a Licorne export:
+    vacuum fronting, the layers, the substrate as backing.
     See FILES for which file each value comes from and ANGLES for the axes
     (licorne_axis_map unless axis_map is given).  What is not reproduced is
     appended to `notes` (a list) if given."""
@@ -308,7 +308,9 @@ def load_licorne_model(parameters_m_path, profile_dat_path=None,
             roughness_sigma=float(p.get('roughness', 0.0)),
             roughness_model=_function(funs[i], formalism),
             roughness_sublayer=int(p.get('roughness_nbound', 1))))
-    return Stack(layers, roughness_scheme='licorne')
+    st = Stack(layers, roughness_scheme='licorne')
+    st.set_licorne_exact()
+    return st
 
 
 def read_resolution(path):

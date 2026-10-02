@@ -30,7 +30,8 @@ python -m pytest tests         # the tests (pip install pytest first)
 | `model/stack.py` | `Layer`, `Stack`: roughness profile, slicing, transfer matrix, `Stack.reflectivities(Q, pairs)`; fittable `scale` and `background`. The module docstring explains the physics and its conventions. |
 | `model/roughness.py` | Licorne's interface kernel (manual App. 10.1): window, closed-form J, renormalisation, sigma conversions |
 | `model/polarisation.py` | Named channels (`++`, `+-`, `-+`, `--`, `+`, `-`) as (P0, P) pairs, and the Pi / Pa form the GUI uses |
-| `model/licorne_io.py` | `load_licorne_model`: a Licorne export (`parameters.m`, `profile.dat`) as a Stack with `roughness_scheme='licorne'`; `load_licorne_session`: a whole saved Licorne session folder (model, fit bounds, background, TOF resolution, `rexp*.dat` channels, `rtheory*.dat` curves) |
+| `model/licorne_io.py` | `load_licorne_model`: a Licorne export (`parameters.m`, `profile.dat`) as a Licorne-exact Stack (`Stack.set_licorne_exact`), its axes rotated so that M and P lie in the film plane (`licorne_axis_map`); `load_licorne_session`: a whole saved Licorne session folder (model, fit bounds, background, `Norm_factor`, TOF / MONO resolution, `rexp*.dat` channels, `rtheory*.dat` curves) and notes on what is not reproduced |
+| `model/licorne_resolution.py` | Licorne's resolution convolution on the data grid (`resolut`, modes 1–3) as a sparse weight matrix |
 | **`fit/`** | **Fitting** |
 | `fit/problem.py` | `FitProblem`: free parameters, data, model and cost, shared by both methods |
 | `fit/panel.py` | The Fit tool box of the Experimental tab (general / DE / DREAM pages and their actions) |
@@ -45,7 +46,7 @@ python -m pytest tests         # the tests (pip install pytest first)
 | `tabs/simulation.py` | Simulation tab: layer editor, general parameters, polarisation table, profile and reflectivity plots |
 | `tabs/experimental.py` | Experimental tab: data import, datasets, per-channel polarisation, plots; hosts the Fit tool box (`fit.panel`) |
 | `tabs/geometry.py` | Geometry tab: 3-D view (OpenGL) of the beam, Pi / Pa, the polarisation axis and a layer's M split into what the channels measure (in plane, ∥ P, ⊥ P) |
-| **`tests/`** | Physics and fit tests; `supermatrix.py` is an independent reference implementation (Ruehm, Toperverg & Dosch, PRB 60, 16073); `data/licorne/` holds the Licorne exports the Licorne-scheme tests compare against |
+| **`tests/`** | Physics and fit tests; `supermatrix.py` is an independent reference implementation (Ruehm, Toperverg & Dosch, PRB 60, 16073); `licorne_reference.py` ports Licorne 1.4.2's MATLAB engine (roughness slabs, supermatrix, spin average, resolution) as the oracle the Licorne tests compare against; `data/licorne/` holds the Licorne exports |
 | **`scripts/plot_stack.py`** | Stand-alone matplotlib plot of a stack's profile and reflectivity |
 | `make_app.py` | Builds `SANR.app` (macOS launcher with the app's name and icon; machine-specific, not in git) |
 | `session_Cr2Te3*.json` | Example sessions (File → Open session) |

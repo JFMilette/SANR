@@ -53,6 +53,10 @@ are used.  In this scheme a layer's roughness_sigma is Licorne's sigma_L,
 roughness_model its roughness_fun ('tanh', 'erf' or 'none') and
 roughness_sublayer its roughness_nbound, all for the interface at the TOP of
 the layer; Stack.tail is unused.  model.licorne_io reads a Licorne export.
+Stack.set_licorne_exact() makes every Licorne choice at once (the scheme,
+'step' without step_fallback, licorne_renorm and licorne_outer 'licorne',
+Licorne's resolution convolution: LICORNE_EXACT); the importer does so, and
+set_licorne_exact(False) restores the physical defaults.
 
 MAGNETISATION -- Stack.magnetic_smearing chooses how M crosses an interface
 (default 'vector' for the 'rms' scheme, 'step' for 'licorne'):
@@ -495,6 +499,40 @@ class Stack:
                                   else magnetic_smearing)
         self.step_fallback = True        # 'step': a rho = 0 layer has no angle
         self._licorne_W = {}             # cached Licorne resolution kernels
+
+    # -- Licorne-exact ----------------------------------------------------------
+    # settings with which the stack reproduces Licorne 1.4.2 (MATLAB path):
+    # attribute -> value; 'resolution.scheme' is resolution['scheme']
+    LICORNE_EXACT = {'roughness_scheme': 'licorne', 'magnetic_smearing': 'step',
+                     'step_fallback': False, 'licorne_renorm': 'licorne',
+                     'licorne_outer': 'licorne',
+                     'resolution.scheme': 'licorne'}
+    # what set_licorne_exact(False) restores (the roughness scheme and the
+    # smearing stay as they are)
+    PHYSICAL = {'step_fallback': True, 'licorne_renorm': 'manual',
+                'licorne_outer': 'infinite', 'resolution.scheme': 'quadrature'}
+
+    def _setting(self, key, value=None):
+        if key.startswith('resolution.'):
+            k = key.split('.', 1)[1]
+            if value is not None:
+                self.resolution[k] = value
+            return self.resolution.get(k)
+        if value is not None:
+            setattr(self, key, value)
+        return getattr(self, key)
+
+    def set_licorne_exact(self, on=True):
+        """on: every setting of LICORNE_EXACT (Licorne's roughness scheme,
+        'step' without fallback, its 50-point J, its 1.5 t outer
+        pseudo-layers, its convolution on the data grid).  off: the
+        physical defaults of PHYSICAL."""
+        for k, v in (self.LICORNE_EXACT if on else self.PHYSICAL).items():
+            self._setting(k, v)
+
+    def is_licorne_exact(self):
+        return all(self._setting(k) == v
+                   for k, v in self.LICORNE_EXACT.items())
 
     # -- serialisation ------------------------------------------------------
     def to_dict(self):
