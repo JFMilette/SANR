@@ -27,6 +27,7 @@ from model.licorne_io import load_licorne_session
 from model.polarisation import default_vectors
 from tabs import ExperimentalTab, SimulationTab
 from tabs.experimental import file_ref
+from tabs.geometry import GeometryTab
 
 APP_ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icons',
                         'app.png')
@@ -48,6 +49,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.simulation, 'Simulation')
         self.experimental = ExperimentalTab(simulation=self.simulation)
         self.tabs.addTab(self.experimental, 'Experimental data')
+        self.geometry = GeometryTab(self.simulation)
+        self.tabs.addTab(self.geometry, 'Geometry')
 
         menu = self.menuBar().addMenu('&File')
         menu.addAction('&Open session…', QtGui.QKeySequence.StandardKey.Open,

@@ -41,9 +41,10 @@ python -m pytest tests         # the tests (pip install pytest first)
 | `fit/dream/dream_plots.py` | Matplotlib figures of a DREAM run for scripts and reports (traces, corner, predictive and SLD-profile bands) |
 | `fit/dream/dream_window.py` | DREAM window (pyqtgraph): progress, time left, stop / continue, summary and warnings, live trace and corner, predictive and SLD-profile bands; save chains, load MAP into the model, posterior bounds |
 | `fit/dream/NOTES_dream.md` | Implementation notes and status of the DREAM plan |
-| **`tabs/`** | **The two tabs** |
+| **`tabs/`** | **The tabs** |
 | `tabs/simulation.py` | Simulation tab: layer editor, general parameters, polarisation table, profile and reflectivity plots |
 | `tabs/experimental.py` | Experimental tab: data import, datasets, per-channel polarisation, plots; hosts the Fit tool box (`fit.panel`) |
+| `tabs/geometry.py` | Geometry tab: 3-D view (OpenGL) of the beam, Pi / Pa, the polarisation axis and a layer's M split into what the channels measure (in plane, ∥ P, ⊥ P) |
 | **`tests/`** | Physics and fit tests; `supermatrix.py` is an independent reference implementation (Ruehm, Toperverg & Dosch, PRB 60, 16073); `data/licorne/` holds the Licorne exports the Licorne-scheme tests compare against |
 | **`scripts/plot_stack.py`** | Stand-alone matplotlib plot of a stack's profile and reflectivity |
 | `make_app.py` | Builds `SANR.app` (macOS launcher with the app's name and icon; machine-specific, not in git) |
