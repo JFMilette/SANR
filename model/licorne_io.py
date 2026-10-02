@@ -6,7 +6,9 @@ FILES -- a Licorne export directory holds
   parameters.m           lines  Layers(k).field=value;  Substrate.field=value;
                          (values: numbers, MATLAB complex literals such as
                          3.3529e-06-3e-08i, strings 'tanh', vectors [a,b,c])
-  profile.dat            one row per layer, then the substrate:
+  profile.dat            one row per layer, then the substrate (its angle
+                         columns are 0 or stale in exports before Licorne
+                         1.2.7, so the angles come from parameters.m):
                          Depth Thickness Re_NSLD Im_NSLD MSLD_rho MSLD_phi
                          MSLD_theta Roughness
   profile_sublayers.dat  Licorne's own slabs: Depth Thickness Re_NSLD Im_NSLD
@@ -178,17 +180,17 @@ def _channel_rows(top):
 
 
 def _msld(par, profile=None):
-    """(rho, phi_deg, theta_deg) arrays of the layers and the substrate,
-    from profile.dat's table if given (6 figures), else parameters.m; the
-    substrate has no magnetisation in Licorne."""
+    """(rho, phi_deg, theta_deg) arrays of the layers and the substrate:
+    rho from profile.dat's table if given (6 figures), else parameters.m;
+    the angles always from parameters.m (exports before Licorne 1.2.7 write
+    0 or stale angles to profile.dat).  The substrate has no magnetisation
+    in Licorne."""
     lay_p = par['layers'] + [par['substrate']]
+    msld = [p.get('msld', [0.0, 0.0, 0.0]) for p in lay_p]
+    rho, phi, theta = (np.array([float(m[i]) for m in msld])
+                       for i in range(3))
     if profile is not None:
-        rho, phi, theta = (np.array(profile[:, c], dtype=float)
-                           for c in (4, 5, 6))
-    else:
-        msld = [p.get('msld', [0.0, 0.0, 0.0]) for p in lay_p]
-        rho, phi, theta = (np.array([float(m[i]) for m in msld])
-                           for i in range(3))
+        rho = np.array(profile[:, 4], dtype=float)
     rho[-1] = 0.0
     return rho, phi, theta
 
@@ -318,6 +320,10 @@ def read_resolution(path):
     Licorne's templates, None for any other script:
       TOF   Theta<i>, DTheta<i> (rad) per angle, Q<i> the upper Q of angle i
             (the last one open-ended) and DLambda (A) -> mode 'tof'
+      TOF, one angle (older Licorne)  Theta, DTheta (rad), DLambda (A),
+            Lambda=4*pi*sin(Theta)./Q and
+            Sigma=Q.*sqrt((DTheta/Theta)^2+(DLambda./Lambda).^2)
+            -> mode 'tof' with that one angle
       MONO  Lambda, DLambda (A), DTheta (rad, as DTheta=... or
             DTheta(Q > 0)=...), Theta = asin(Q Lambda / 4 pi) and
             Sigma=Q.*sqrt((DTheta./Theta).^2+(DLambda/Lambda)^2)
@@ -325,7 +331,7 @@ def read_resolution(path):
     v = read_assignments(path)
     idx = sorted(int(k[5:]) for k in v if re.fullmatch(r'Theta\d+', k))
     if not idx:
-        return _read_mono(path, v)
+        return _read_tof1(path, v) or _read_mono(path, v)
     if idx != list(range(1, len(idx) + 1)) or \
             not isinstance(v.get('DLambda'), float):
         return None
@@ -346,6 +352,23 @@ _MONO_THETA = re.compile(r'theta=asin\((q\.?\*lambda|lambda\.?\*q)'
                          r'(/4/pi|/\(4\*pi\)|\./4\./pi)\);')
 _DTHETA = re.compile(r'(?:^|;)\s*DTheta\s*(?:\(\s*Q\s*>\s*0\s*\))?\s*=\s*'
                      r'([-+0-9.eE]+)\s*;', re.M)
+
+
+_TOF1_LAMBDA = 'lambda=4*pi*sin(theta)./q;'
+_TOF1_SIGMA = 'sigma=q.*sqrt((dtheta/theta)^2+(dlambda./lambda).^2);'
+
+
+def _read_tof1(path, v):
+    """One-angle TOF template of read_resolution, None if not it."""
+    with open(path) as fh:
+        flat = re.sub(r'\s+', '', re.sub(r'%.*', '', fh.read())).lower()
+    if _TOF1_LAMBDA not in flat or _TOF1_SIGMA not in flat or \
+            not all(isinstance(v.get(k), float)
+                    for k in ('Theta', 'DTheta', 'DLambda')):
+        return None
+    return {'enabled': True, 'mode': 'tof', 'tof_dlambda': v['DLambda'],
+            'tof_angles': [{'theta': v['Theta'], 'dtheta': v['DTheta'],
+                            'qmax': None}]}
 
 
 def _read_mono(path, v):
@@ -440,7 +463,7 @@ def load_licorne_session(folder, axis_map=None):
                 the background, the scale (a common Norm_factor, see
                 NORMALISATION) and, if resolution.m is one of Licorne's
                 templates, the resolution (Licorne's own convolution,
-                ResolutionFun)
+                mode ResolutionFun, 2 when the file has none)
       name      the folder's name
       q_path    q.dat
       channels  [{'channel', 'path' (rexp<k>.dat), 'pol' [Pi, Pa],
@@ -472,13 +495,15 @@ def load_licorne_session(folder, axis_map=None):
     res = read_resolution(res_path) if os.path.isfile(res_path) else None
     if res is not None:
         stack.resolution.update(res)
-        fun = top.get('ResolutionFun')
+        # no ResolutionFun (Licorne before 1.2.3): its convolution was mode
+        # 2, as rtheory*.dat of 1.0.0, 1.1.0 and 1.2.2 sessions show
+        fun = top.get('ResolutionFun', 2)
         if fun in (1, 2, 3):
             stack.resolution.update(scheme='licorne', licorne_fun=int(fun))
     else:
         stack.resolution['enabled'] = False
         notes.append('resolution.m is not one of Licorne\'s templates (TOF, '
-                     'MONO): the resolution is off.')
+                     'one-angle TOF, MONO): the resolution is off.')
 
     q_path = os.path.join(folder, 'q.dat')
     Q = _curve(q_path)[:, 0]

@@ -315,3 +315,44 @@ def test_mono_template(tmp_path):
     p.write_text(MONO_SCRIPT.replace('Theta=asin(Q*Lambda/4/pi);',
                                      'Theta=0.01;'))
     assert read_resolution(p) is None
+
+
+def test_angles_from_parameters(tmp_path):
+    """Exports before Licorne 1.2.7 write 0 for every angle in profile.dat;
+    the angles come from parameters.m (rho and the NSLD from profile.dat)."""
+    src = DATA / 'v127_chi3_137'
+    d = tmp_path / 'old'
+    d.mkdir()
+    (d / 'parameters.m').write_text((src / 'parameters.m').read_text())
+    rows = np.loadtxt(src / 'profile.dat', comments='#')
+    rows[:, 5:7] = 0.0
+    np.savetxt(d / 'profile.dat', rows, header='Depth Thickness Re_NSLD '
+               'Im_NSLD MSLD_rho MSLD_phi MSLD_theta Roughness')
+    a = load_licorne_model(src / 'parameters.m', src / 'profile.dat')
+    b = load_licorne_model(d / 'parameters.m', d / 'profile.dat')
+    assert a.to_dict() == b.to_dict()
+
+
+TOF1_SCRIPT = """\
+Theta=0.006;
+DTheta=0.0004;
+DLambda=0.01;
+Lambda=4*pi*sin(Theta)./Q;
+Sigma=Q.*sqrt((DTheta/Theta)^2+(DLambda./Lambda).^2);
+"""
+
+
+def test_one_angle_tof_and_default_fun(tmp_path):
+    """Older Licorne's one-angle TOF resolution.m; without ResolutionFun
+    (before 1.2.3) Licorne's convolution was mode 2."""
+    d = session_folder(tmp_path)
+    (d / 'resolution.m').write_text(TOF1_SCRIPT)
+    par = d / 'parameters.m'
+    par.write_text(par.read_text().replace('ResolutionFun=3;\n', ''))
+    st = load_licorne_session(d)['stack']
+    assert st.resolution['mode'] == 'tof' and st.resolution['enabled']
+    assert st.resolution['tof_angles'] == [{'theta': 0.006,
+                                            'dtheta': 0.0004, 'qmax': None}]
+    assert st.resolution['tof_dlambda'] == 0.01
+    assert st.resolution['scheme'] == 'licorne'
+    assert st.resolution['licorne_fun'] == 2

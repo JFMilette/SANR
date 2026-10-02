@@ -25,9 +25,12 @@ def oracle_inputs(folder):
     sub_p, lay_p = _fields(folder / 'parameters.m')
     tab = np.atleast_2d(np.loadtxt(folder / 'profile.dat', comments='#'))
     layers = []
+    # angles from parameters.m: exports before 1.2.7 write 0 or stale
+    # angles to profile.dat
     for row, p in zip(tab[:-1], lay_p):
+        ang = [float(a) for a in p['msld'].strip('[]').split(',')[1:]]
         layers.append({'thickness': row[1], 'nsld': complex(row[2], row[3]),
-                       'msld': [row[4], row[5], row[6]],
+                       'msld': [row[4]] + ang,
                        'roughness': float(p['roughness']),
                        'fun': p['roughness_fun'],
                        'nbound': int(p['roughness_nbound'])})
