@@ -152,7 +152,10 @@ def licorne_direction(phi_deg, theta_deg):
 
 def sample_angles(u):
     """(MSLD_theta, MSLD_phi) in turns of a unit vector in the sample frame
-    (model.stack ANGLES)."""
+    (model.stack ANGLES).  Round-off components (|u_i| < 1e-12, e.g.
+    cos 90 deg or the axis rotation) are taken as 0, so a vector in the film
+    plane has an elevation of exactly 0."""
+    u = np.where(np.abs(u) < 1e-12, 0.0, np.asarray(u, dtype=float))
     return (float(np.arctan2(u[1], u[0]) / (2*np.pi)),
             float(np.arctan2(u[2], np.hypot(u[0], u[1])) / (2*np.pi)))
 
@@ -184,14 +187,18 @@ def _msld(par, profile=None):
     rho from profile.dat's table if given (6 figures), else parameters.m;
     the angles always from parameters.m (exports before Licorne 1.2.7 write
     0 or stale angles to profile.dat).  The substrate has no magnetisation
-    in Licorne."""
+    in Licorne and takes the last layer's angles."""
     lay_p = par['layers'] + [par['substrate']]
     msld = [p.get('msld', [0.0, 0.0, 0.0]) for p in lay_p]
     rho, phi, theta = (np.array([float(m[i]) for m in msld])
                        for i in range(3))
     if profile is not None:
         rho = np.array(profile[:, 4], dtype=float)
+    # the substrate: no magnetisation, the last layer's angles
+    # (expandrough.m's substrate row)
     rho[-1] = 0.0
+    if len(lay_p) > 1:
+        phi[-1], theta[-1] = phi[-2], theta[-2]
     return rho, phi, theta
 
 

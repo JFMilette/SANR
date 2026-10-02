@@ -356,3 +356,15 @@ def test_one_angle_tof_and_default_fun(tmp_path):
     assert st.resolution['tof_dlambda'] == 0.01
     assert st.resolution['scheme'] == 'licorne'
     assert st.resolution['licorne_fun'] == 2
+
+
+def test_in_plane_angles_exact():
+    """Licorne's theta = 90 (in plane) imports as an elevation of exactly 0,
+    not cos(90 deg) ~ 6e-17 (it showed as ~1e-15 deg in the profile)."""
+    for name in ('v127_chi3_137', 'v127_r2_6_508'):
+        d = DATA / name
+        st = load_licorne_model(d / 'parameters.m', d / 'profile.dat')
+        assert all(l.MSLD_phi == 0.0 for l in st.layers)
+    st = load_licorne_model(FIX1 / 'parameters.m', FIX1 / 'profile.dat')
+    assert all(l.MSLD_phi == 0.0 for l in st.layers)
+    assert {l.MSLD_theta for l in st.layers[1:-1]} == {-0.25}
