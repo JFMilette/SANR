@@ -466,9 +466,9 @@ OUT_OF_BOUNDS = 'QDoubleSpinBox { background: #4a1f22; border: 1px solid #f87171
 RES_MODES = ('mono', 'tof')     # res_mode combo order
 # res_conv combo: label, resolution['scheme'], resolution['licorne_fun']
 RES_CONVOLUTIONS = [('quadrature', 'quadrature', None),
-                    ('Licorne 1 (data grid)', 'licorne', 1),
-                    ('Licorne 2 (data grid)', 'licorne', 2),
-                    ('Licorne 3 (data grid)', 'licorne', 3)]
+                    ('Licorne 1: simple mean', 'licorne', 1),
+                    ('Licorne 2: rectangle rule', 'licorne', 2),
+                    ('Licorne 3: midpoint rule', 'licorne', 3)]
 
 
 def res_convolution(res):
@@ -974,12 +974,17 @@ class SimulationTab(QtWidgets.QWidget):
             'How the reflectivity is averaged over σ_Q.\n'
             'quadrature: a Gaussian average, independent of the Q points '
             'computed.\n'
-            'Licorne (data grid): Licorne\'s own sum over the computed Q '
-            'points themselves\n  (resolut, mode 1 mean within ±σ/2, 2 '
-            'rectangle rule, 3 midpoint rule), unnormalised,\n  constant '
-            'tails past the ends: the result depends on the Q grid.  The fit '
-            'uses the data Q;\n  the curve here uses this tab\'s Q grid, so '
-            'it can differ from Licorne\'s.')
+            'Licorne: Licorne\'s own sum over the computed Q points '
+            'themselves (its ResolutionFun),\n  unnormalised, constant tails '
+            'past the ends, so the result depends on the Q grid:\n'
+            '  1 simple mean: plain average of the points within ±σ/2;\n'
+            '  2 rectangle rule: Gaussian-weighted sum within ±3σ, each point '
+            'weighted by its spacing\n    towards the centre point (Licorne '
+            'before 1.2.3);\n'
+            '  3 midpoint rule: the same, each point weighted by half the '
+            'distance between its neighbours.\n'
+            'The fit uses the data Q; the curve here uses this tab\'s Q grid, '
+            'so it can differ from Licorne\'s.')
         self.res_lambda = dspin(0.1, 50, 3, 0.1, ' Å')
         self.res_lambda.setValue(res['wavelength'])
         self.res_lambda.setToolTip('Neutron wavelength λ')
