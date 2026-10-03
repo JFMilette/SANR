@@ -10,7 +10,8 @@ q.dat next to rexp1.dat / rtheory1.dat), as columns
 with one row per Q value.  Missing dR / dQz are taken as zero.
 Importing opens the file text in a dialog with line numbers; the user picks
 the line where the data start, where Q comes from and which channel the file
-is.
+is, and optionally a Q shift added to every Q of the channel (e.g. a sample
+misalignment; kept in the session and applied again when it is reopened).
 
 POLARISATION -- every channel is a pair of an incident polarisation Pi and
 an analysed polarisation Pa (3-vectors in the sample frame, length =
@@ -54,7 +55,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from fit.panel import FitPanel
 from model.polarisation import CHANNEL_NAMES, default_vectors, vectors_pair
 from .simulation import (CH_COLOURS, HP_COLOURS, REFL_QUANTITIES, Crosshair,
-                         PairTable, fmt, plot_widget)
+                         PairTable, dspin, fmt, plot_widget)
 
 
 DATA_FILTER = 'Data files (*.dat *.txt *.csv *.refl);;All files (*)'
@@ -131,11 +132,12 @@ def find_q_file(path):
     return None
 
 
-def parse_data(lines, start, Q=None):
+def parse_data(lines, start, Q=None, q_shift=0.0):
     """Parse lines[start:] into a dict of Q, R, dR, dQ, theta arrays, sorted
     by Q.  With Q=None the columns are Q R [dR dQ theta]; otherwise they are
-    R [dR dQ theta] and row i belongs to Q[i].  Missing dR / dQ are zero.
-    Blank / comment lines are skipped; returns (data, n_skipped)."""
+    R [dR dQ theta] and row i belongs to Q[i].  q_shift is added to every Q.
+    Missing dR / dQ are zero.  Blank / comment lines are skipped; returns
+    (data, n_skipped)."""
     keys = ['Q', 'R', 'dR', 'dQ', 'theta']
     if Q is not None:
         keys = keys[1:]
@@ -163,6 +165,7 @@ def parse_data(lines, start, Q=None):
     # absent errors / resolution count as zero, absent theta stays NaN
     for j in (2, 3):
         a[:, j] = np.where(np.isnan(a[:, j]), 0.0, a[:, j])
+    a[:, 0] += q_shift
     a = a[np.argsort(a[:, 0])]
     return {k: a[:, i] for i, k in enumerate(['Q', 'R', 'dR', 'dQ',
                                               'theta'])}, skipped
@@ -293,7 +296,7 @@ class ImportDialog(QtWidgets.QDialog):
     from and the channel; `data` / `q_path` hold the result after accept()."""
 
     def __init__(self, path, parent=None, sets=(), current=None, taken=None,
-                 q_path=None, sim_vectors=None):
+                 q_path=None, sim_vectors=None, q_shift=0.0):
         super().__init__(parent)
         self.setWindowTitle('Import — %s' % os.path.basename(path))
         with open(path, errors='replace') as f:
@@ -337,10 +340,17 @@ class ImportDialog(QtWidgets.QDialog):
         q_row.addWidget(self.q_edit, 1)
         q_row.addWidget(self.q_browse)
         self.columns = QtWidgets.QLabel()
+        self.q_shift = dspin(-1.0, 1.0, 6, 1e-4, ' Å⁻¹')
+        self.q_shift.setValue(q_shift)
+        self.q_shift.setToolTip(
+            'Added to every Q of this channel, e.g. to correct a sample '
+            'misalignment\n(the critical edge at the wrong Q).  Kept in the '
+            'session; starts at the last import\'s value.')
 
         form = QtWidgets.QFormLayout()
         form.addRow('Data start at line', self.start)
         form.addRow('Q values', q_row)
+        form.addRow('Q shift', self.q_shift)
         form.addRow('Dataset', self.dataset)
         form.addRow('Channel', self.channel)
         form.addRow('Polarisation', self.pair_box)
@@ -372,6 +382,7 @@ class ImportDialog(QtWidgets.QDialog):
         self.view.lineClicked.connect(lambda n: self.start.setValue(n + 1))
         self.q_mode.currentIndexChanged.connect(self._on_start)
         self.q_edit.editingFinished.connect(self._on_start)
+        self.q_shift.valueChanged.connect(self._on_start)
         self.q_browse.clicked.connect(self._browse_q)
         self.start.setValue(start + 1)
         self._on_start()
@@ -415,7 +426,8 @@ class ImportDialog(QtWidgets.QDialog):
                 Q = self._load_q()
                 if isinstance(Q, str):
                     raise ValueError(Q)
-            self.data, skipped = parse_data(self.lines, line, Q)
+            self.data, skipped = parse_data(self.lines, line, Q,
+                                            self.q_shift.value())
         except ValueError as exc:
             self.data = None
             self.preview.setText('<span style="color:#f87171">%s</span>' % exc)
@@ -426,6 +438,8 @@ class ImportDialog(QtWidgets.QDialog):
         d = self.data
         msg = '%d points, Q = %.4g … %.4g Å⁻¹' % (len(d['Q']), d['Q'][0],
                                                    d['Q'][-1])
+        if self.q_shift.value():
+            msg += ' (shifted by %+.6g)' % self.q_shift.value()
         if not np.any(d['dR']):
             msg += ', no dR column (errors = 0)'
         if skipped:
@@ -657,15 +671,15 @@ def find_file(ref, base):
     raise OSError('not found: %s' % ref['path'])
 
 
-def read_channel(ref, q_ref, start, base):
+def read_channel(ref, q_ref, start, base, q_shift=0.0):
     """An imported channel read again, as the import dialog read it."""
     path = find_file(ref, base)
     q_path = find_file(q_ref, base) if q_ref else None
     with open(path, errors='replace') as f:
         lines = f.read().splitlines()
     Q = read_q_file(q_path) if q_path else None
-    data, _ = parse_data(lines, start, Q)
-    return dict(data, path=path, q_path=q_path, start=start)
+    data, _ = parse_data(lines, start, Q, q_shift)
+    return dict(data, path=path, q_path=q_path, start=start, q_shift=q_shift)
 
 
 # ------------------------------------------------- experimental tab ----
@@ -679,6 +693,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self.sets = []
         self.simulation = simulation
         self.last_q_path = None       # separate Q file of the last import
+        self.last_q_shift = 0.0       # Q shift of the last import
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_controls())
@@ -829,6 +844,8 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                 it.setForeground(0, QtGui.QColor(CHANNEL_COLOURS[ch]))
                 tip = d['path'] if not d.get('q_path') else \
                     '%s\nQ: %s' % (d['path'], d['q_path'])
+                if d.get('q_shift'):
+                    tip += '\nQ shifted by %+.6g Å⁻¹' % d['q_shift']
                 own = self._own_vectors(s, ch)
                 tip += '\n%s%s' % (vec_text(self.channel_vectors(s, ch)),
                                    '' if own is not None else
@@ -1029,7 +1046,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
             dlg = ImportDialog(
                 path, self, [s['name'] for s in static], dataset,
                 {s['name']: set(s['channels']) for s in static},
-                self.last_q_path, self.sim_vectors())
+                self.last_q_path, self.sim_vectors(), self.last_q_shift)
         except OSError as exc:
             QtWidgets.QMessageBox.critical(
                 self, 'Import', 'Could not read %s:\n%s' % (path, exc))
@@ -1046,7 +1063,9 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self.sets[i]['channels'][ch] = dict(dlg.data, path=path,
                                             q_path=dlg.q_path,
                                             start=dlg.start.value() - 1,
+                                            q_shift=dlg.q_shift.value(),
                                             pol=dlg.selected_vectors())
+        self.last_q_shift = dlg.q_shift.value()
         if dlg.q_path:
             self.last_q_path = dlg.q_path
         self.refresh_tree((i, ch))
@@ -1115,6 +1134,8 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                                  q_file=file_ref(d['q_path'], base)
                                  if d.get('q_path') else None,
                                  start=d['start'])
+                        if d.get('q_shift'):
+                            c['q_shift'] = d['q_shift']
                     else:                       # computed, no file to re-read
                         c = dict(values={k: d[k] for k in ('Q', 'R', 'dR',
                                                            'dQ')},
@@ -1161,7 +1182,8 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                 else:
                     try:
                         d = read_channel(c['file'], c.get('q_file'),
-                                         c['start'], base)
+                                         c['start'], base,
+                                         float(c.get('q_shift', 0.0)))
                     except (OSError, ValueError) as exc:
                         missing.append('%s — R%s: %s' % (e['name'], ch, exc))
                         continue
