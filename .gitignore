@@ -18,3 +18,9 @@ bizar*.json
 
 # macOS launcher, machine-specific (python make_app.py)
 SANR.app/
+
+# Licorne sessions that stay out of the repo (tests/data/licorne/README.md)
+tests/data/private/
+
+# benchmark output (benchmarks/bench_fit.py)
+benchmarks/results.jsonl

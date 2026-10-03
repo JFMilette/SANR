@@ -1,0 +1,98 @@
+--- a/fit/dream/dream.py
++++ b/fit/dream/dream.py
+@@ -212,6 +212,10 @@
+     seed=None,
+     callback: Optional[Callable] = None,
+     resume: Optional[dict] = None,
++    p_snooker: float = 0.0,
++    temper_until: int = 0,
++    beta_start: float = 1.0,
++    loglike_prior: Optional[Callable] = None,
+ ) -> DreamResult:
+     """Run DREAM.
+ 
+@@ -315,6 +319,7 @@
+         acc[:t0] = st['acc']
+         rhat_hist = [(int(g), np.array(r)) for g, r in st['rhat_hist']]
+     others = [np.delete(np.arange(N), i) for i in range(N)]
++    lp_X = ll_X = None
+ 
+     for t in range(t0 + 1, n_gen + 1):
+         # ---------- proposals (Eq. 23, 24) ------------------------------------
+@@ -325,7 +330,22 @@
+         D = rng.integers(1, delta + 1, size=N)
+         lam = rng.uniform(-c, c, size=(N, d))
+         zeta = rng.normal(0.0, c_star, size=(N, d))
++        snk = np.zeros(N, bool)
++        log_jac = np.zeros(N)
+         for i in range(N):
++            if archive and p_snooker > 0 and rng.random() < p_snooker:
++                # snooker update (ter Braak & Vrugt 2008): jump along x - z
++                zi = rng.choice(m, size=3, replace=False)
++                z, z1, z2 = Z[zi[0]], Z[zi[1]], Z[zi[2]]
++                e = X[i] - z
++                ee = e @ e
++                if ee > 0:
++                    g_s = rng.uniform(1.2, 2.2)
++                    dX[i] = g_s * e * (e @ (z1 - z2)) / ee
++                    snk[i] = True
++                    log_jac[i] = (d - 1) * (np.log(np.linalg.norm(X[i] + dX[i] - z) + 1e-300)
++                                            - 0.5 * np.log(ee))
++                continue
+             if archive:
+                 r = rng.choice(m, size=2 * D[i], replace=False)
+                 P = Z
+@@ -343,24 +363,48 @@
+             dX[i, A] = (zeta[i, A] + (1.0 + lam[i, A]) * gamma
+                         * (P[a][:, A] - P[b][:, A]).sum(axis=0))
+         Xp = handle_bounds(X + dX, X, lo, hi, boundary, rng)
++        # a snooker proposal is never folded: outside the box it is rejected
++        Xp[snk] = (X + dX)[snk]
++        out = snk & np.any((Xp < lo) | (Xp > hi), axis=1)
+ 
+         # ---------- evaluate & Metropolis (Eq. 19) ----------------------------
+-        logp_p = evaluate(Xp)
+-        n_evals += N
++        ok = ~out
++        beta = 1.0
++        if t <= temper_until:
++            beta = beta_start ** (1.0 - t / temper_until)     # geometric ramp to 1
++        if loglike_prior is not None:
++            if t == 1 or ll_X is None:
++                lp_X, ll_X = loglike_prior(X)
++            lpp, llp = np.full(N, -np.inf), np.full(N, -np.inf)
++            if ok.any():
++                a, b = loglike_prior(Xp[ok]); lpp[ok], llp[ok] = a, b
++            logp_p = lpp + llp
++        else:
++            logp_p = np.full(N, -np.inf)
++            if ok.any():
++                logp_p[ok] = evaluate(Xp[ok])
++        n_evals += int(ok.sum())
+         with np.errstate(invalid="ignore"):
+-            log_ratio = logp_p - logp_X
++            if beta < 1.0:
++                log_ratio = (lpp + beta * llp) - (lp_X + beta * ll_X)
++            else:
++                log_ratio = logp_p - logp_X
++            log_ratio = log_ratio + np.where(snk, log_jac, 0.0)
+         log_ratio = np.where(np.isnan(log_ratio), -np.inf, log_ratio)
+         accept = np.log(rng.random(N)) < log_ratio
+         X_old = X
+         X = np.where(accept[:, None], Xp, X)
+         logp_X = np.where(accept, logp_p, logp_X)
++        if loglike_prior is not None:
++            lp_X = np.where(accept, lpp, lp_X); ll_X = np.where(accept, llp, ll_X)
+         acc[t - 1] = accept.mean()
+ 
+         # ---------- adaptation phase -----------------------------------------
+         if t <= adapt_until:
+             move = X - X_old                     # zero for rejected proposals
+-            np.add.at(J, id_cr, ((move / std_X) ** 2).sum(axis=1))
+-            np.add.at(n_id, id_cr, 1)
++            pm = ~snk
++            np.add.at(J, id_cr[pm], ((move[pm] / std_X) ** 2).sum(axis=1))
++            np.add.at(n_id, id_cr[pm], 1)
+             if np.all(n_id > 0) and J.sum() > 0:
+                 pCR = J / n_id
+                 pCR = pCR / pCR.sum()

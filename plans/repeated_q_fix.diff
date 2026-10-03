@@ -1,0 +1,96 @@
+diff --git a/fit/problem.py b/fit/problem.py
+index e5d2716..67955d5 100644
+--- a/fit/problem.py
++++ b/fit/problem.py
+@@ -136,12 +136,11 @@ class FitProblem:
+                               in enumerate(self.channels)])]
+         grids = {}
+         for k, (q, ch) in enumerate(zip(Qs, self.channels)):
+-            g = np.unique(q)
+-            if len(g) != len(q):
+-                raise ValueError('%s has repeated Q points: the Licorne '
+-                                 'resolution scheme needs distinct Q' % ch[0])
+-            grids.setdefault(g.tobytes(), (g, []))[1].append(
+-                (k, np.searchsorted(g, q)))
++            order = np.argsort(q, kind='stable')     # repeated Q kept
++            g = q[order]
++            idx = np.empty(len(q), dtype=int)
++            idx[order] = np.arange(len(q))
++            grids.setdefault(g.tobytes(), (g, []))[1].append((k, idx))
+         if len(grids) > 1:
+             warnings.warn('Licorne resolution scheme: the channels are on '
+                           'different Q grids; each grid is convolved on its '
+diff --git a/model/licorne_resolution.py b/model/licorne_resolution.py
+index 84a1bb6..b29d1a9 100644
+--- a/model/licorne_resolution.py
++++ b/model/licorne_resolution.py
+@@ -45,9 +45,14 @@ def kernel(q, sigma, mode=3):
+         raise ValueError('Licorne resolution mode must be 1, 2 or 3')
+     if q.ndim != 1 or dq.shape != q.shape:
+         raise ValueError('q and sigma must be 1-D arrays of the same length')
+-    if N > 1 and not np.all(np.diff(q) > 0):
+-        raise ValueError('Licorne resolution needs strictly increasing Q '
+-                         '(it divides by the spacings)')
++    if N > 1 and not np.all(np.diff(q) >= 0):
++        raise ValueError('Licorne resolution needs non-decreasing Q')
++    # repeated Q is valid inside the grid (stitched TOF angles), but not at
++    # either end: the constant tails past an end step by the end spacing,
++    # so Licorne's loop would never end (it hangs there too)
++    if N > 1 and (q[1] == q[0] or q[-1] == q[-2]):
++        raise ValueError('Licorne resolution: the first or last Q is '
++                         'repeated (zero end spacing)')
+     if not np.all(np.isfinite(dq) & (dq >= 0)):
+         raise ValueError('resolution sigma must be finite and >= 0')
+     if N < (4 if mode == 3 else 2):
+diff --git a/model/stack.py b/model/stack.py
+index a4afa77..8180164 100644
+--- a/model/stack.py
++++ b/model/stack.py
+@@ -1130,9 +1130,6 @@ class Stack:
+                              "magnetic fronting (Licorne has none)")
+         order = np.argsort(Q, kind='stable')
+         Qs, ss = Q[order], sigma[order]
+-        if np.any(np.diff(Qs) == 0):
+-            raise ValueError("the 'licorne' resolution scheme needs distinct "
+-                             "Q points")
+         mode = int(self.resolution.get('licorne_fun', 3))
+         key = (Qs.tobytes(), ss.tobytes(), mode)
+         cache = self._licorne_W
+diff --git a/tests/test_licorne_resolution.py b/tests/test_licorne_resolution.py
+index c13f73d..05ecc08 100644
+--- a/tests/test_licorne_resolution.py
++++ b/tests/test_licorne_resolution.py
+@@ -81,8 +81,10 @@ def test_kernel_row_sums(mode):
+             resolved = sigma >= 1.5 * dqc
+             assert np.all((rows[resolved] > 0.98) & (rows[resolved] < 1.01))
+     assert 0.1 < worst['jittered'] < 0.2
+-    with pytest.raises(ValueError):
++    with pytest.raises(ValueError, match='first or last Q'):
+         kernel([0.1, 0.1, 0.2, 0.3], [0.01] * 4, mode)
++    with pytest.raises(ValueError, match='non-decreasing'):
++        kernel([0.2, 0.1, 0.3, 0.4], [0.01] * 4, mode)
+     with pytest.raises(ValueError):
+         kernel([0.1, 0.2, 0.3, 0.4], [0.01, np.inf, 0.01, 0.01], mode)
+     with pytest.raises(ValueError):
+@@ -157,9 +159,19 @@ def test_licorne_scheme_unsorted_Q():
+     R = st.reflectivities(Q1, pairs)
+     perm = np.random.default_rng(1).permutation(len(Q1))
+     assert np.array_equal(st.reflectivities(Q1[perm], pairs), R[perm])
+-    with pytest.raises(ValueError, match='distinct'):
+-        st.reflectivities(np.r_[Q1, Q1[5]], pairs)
++    # a repeated Q inside the grid (stitched TOF angles) is valid: the
++    # convolution of the sorted grid, as Licorne's resolut computes it
++    Qr = np.sort(np.r_[Q1, Q1[5]], kind='stable')
++    Rr = st.reflectivities(Qr, pairs)
++    assert np.array_equal(Rr[5], Rr[6])
++    Qp = np.r_[Q1, Q1[5]]                          # any order
++    assert np.allclose(st.reflectivities(Qp, pairs)[-1], Rr[6], rtol=1e-14)
++    # repeated at an end: Licorne's tail loop never ends there
++    with pytest.raises(ValueError, match='first or last Q'):
++        st.reflectivities(np.r_[Q1[0], Q1], pairs)
+     # the kernel is cached per grid; a new grid gives a new kernel
++    st._licorne_W.clear()
++    st.reflectivities(Q1, pairs)
+     assert len(st._licorne_W) == 1
+     st.reflectivities(Q1[:100], pairs)
+     assert len(st._licorne_W) == 2
