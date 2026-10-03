@@ -576,7 +576,8 @@ class PredictivePanel(QtWidgets.QWidget):
     """Data with, for posterior draws, the 95 % band of replicated data
     (model + measurement noise, light, edged), the 68 / 95 % bands of the
     model alone (darker) and its median.  Each kind of band can be hidden
-    with its check box."""
+    with its check box; hiding a channel in the legend hides its bands,
+    error bars and median with its points."""
 
     KEY = ('Light band with edges: 95 % of replicated data (model + noise '
            'dR).   Darker bands: model 95 % / 68 % (parameter uncertainty).  '
@@ -585,7 +586,11 @@ class PredictivePanel(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
         self.view = pg.GraphicsLayoutWidget()
-        self.items = {'predictive': [], 'model': []}   # band items per kind
+        # (kind, channel, item): kind 'predictive' / 'model' (a band, shown
+        # with its check box) or 'data' (error bars, median); channel None
+        # for the spin asymmetry, which has no legend entry
+        self.items = []
+        self.points = {}            # channel -> its points (in the legend)
         self.boxes = {}
         row = QtWidgets.QHBoxLayout()
         for kind, text, tip in (
@@ -596,7 +601,7 @@ class PredictivePanel(QtWidgets.QWidget):
                  'Darker bands: 68 / 95 % of the model alone (parameter '
                  'uncertainty)')):
             cb = QtWidgets.QCheckBox(text, checked=True, toolTip=tip)
-            cb.toggled.connect(lambda on, k=kind: self._show(k, on))
+            cb.toggled.connect(self._refresh)
             self.boxes[kind] = cb
             row.addWidget(cb)
         row.addStretch(1)
@@ -605,17 +610,25 @@ class PredictivePanel(QtWidgets.QWidget):
         v.addLayout(row)
         v.addWidget(self.view, 1)
 
-    def _show(self, kind, on):
-        for it in self.items[kind]:
-            it.setVisible(on)
+    def _refresh(self, *_):
+        """Each item shown when its channel's points are (the legend
+        toggles them) and, for a band, its check box is ticked."""
+        for kind, ch, it in self.items:
+            pts = self.points.get(ch)
+            it.setVisible((pts is None or pts.isVisible()) and
+                          (kind == 'data' or self.boxes[kind].isChecked()))
 
-    def _band(self, kind, *args, **kw):
-        self.items[kind] += band(*args, **kw)
+    def _band(self, kind, ch, *args, **kw):
+        self.items += [(kind, ch, it) for it in band(*args, **kw)]
+
+    def _add(self, plot, ch, item):
+        plot.addItem(item)
+        self.items.append(('data', ch, item))
 
     def show_bands(self, b):
         view = self.view
         view.clear()
-        self.items = {'predictive': [], 'model': []}
+        self.items, self.points = [], {}
         view.addLabel(self.KEY, row=0, col=0, color='#9aa0a6', size='9pt')
         p = plot_item('', 'R')
         p.setLogMode(y=True)
@@ -629,27 +642,32 @@ class PredictivePanel(QtWidgets.QWidget):
             # band 3 decades under the median, like the error bars
             plo, phi = c['predictive'][0], c['predictive'][4]
             plo = np.maximum(plo, 1e-3 * med)
-            self._band('predictive', p, Q, plo, np.maximum(phi, plo), col,
-                       A_PRED, log=True, edges=True)
-            self._band('model', p, Q, lo95, hi95, col, A_95, log=True)
-            self._band('model', p, Q, lo68, hi68, col, A_68, log=True)
+            name = c['name']
+            self._band('predictive', name, p, Q, plo, np.maximum(phi, plo),
+                       col, A_PRED, log=True, edges=True)
+            self._band('model', name, p, Q, lo95, hi95, col, A_95, log=True)
+            self._band('model', name, p, Q, lo68, hi68, col, A_68, log=True)
             ok = R > 0
             yl = np.log10(R[ok])
             # ErrorBarItem has no log mode: log10 coordinates, as in the
             # Experimental tab
-            p.addItem(pg.ErrorBarItem(
+            self._add(p, name, pg.ErrorBarItem(
                 x=Q[ok], y=yl, top=np.log10(R[ok] + dR[ok]) - yl,
                 bottom=yl - np.log10(np.maximum(R[ok] - dR[ok],
                                                 1e-3 * R[ok])),
                 beam=0, pen=pg.mkPen(col, width=0.8)))
-            p.addItem(pg.PlotDataItem(Q[ok], R[ok], pen=None, symbol='o',
-                                      symbolSize=4, symbolPen=None,
-                                      symbolBrush=col, name=c['name']))
-            p.addItem(pg.PlotDataItem(Q, med, pen=pg.mkPen(col, width=1.5)))
+            pts = pg.PlotDataItem(Q[ok], R[ok], pen=None, symbol='o',
+                                  symbolSize=4, symbolPen=None,
+                                  symbolBrush=col, name=name)
+            p.addItem(pts)
+            pts.visibleChanged.connect(self._refresh)
+            self.points[name] = pts
+            self._add(p, name, pg.PlotDataItem(Q, med,
+                                               pen=pg.mkPen(col, width=1.5)))
         a = b['asymmetry']
         if a is None:
             p.setLabel('bottom', 'Q (Å⁻¹)')
-            self._apply_boxes()
+            self._refresh()
             return
         s = plot_item('Q (Å⁻¹)', 'spin asymmetry')
         s.setXLink(p)
@@ -658,11 +676,11 @@ class PredictivePanel(QtWidgets.QWidget):
         view.ci.layout.setRowStretchFactor(2, 2)
         lo95, lo68, med, hi68, hi95 = a['bands']
         plo, phi = a['predictive'][0], a['predictive'][4]
-        self._band('predictive', s, a['Q'], plo, phi, '#4c8dff', A_PRED,
+        self._band('predictive', None, s, a['Q'], plo, phi, '#4c8dff', A_PRED,
                    edges=True)
-        self._band('model', s, a['Q'], lo95, hi95, '#4c8dff', A_95)
-        self._band('model', s, a['Q'], lo68, hi68, '#4c8dff', A_68)
-        self._apply_boxes()
+        self._band('model', None, s, a['Q'], lo95, hi95, '#4c8dff', A_95)
+        self._band('model', None, s, a['Q'], lo68, hi68, '#4c8dff', A_68)
+        self._refresh()
         ok = np.isfinite(a['A'])
         s.addItem(pg.ErrorBarItem(x=a['Q'][ok], y=a['A'][ok],
                                   height=2 * a['dA'][ok], beam=0,
@@ -681,10 +699,6 @@ class PredictivePanel(QtWidgets.QWidget):
             pad = 0.08 * max(hi - lo, 0.1)
             s.setYRange(lo - pad, hi + pad, padding=0)
 
-
-    def _apply_boxes(self):
-        for kind, cb in self.boxes.items():
-            self._show(kind, cb.isChecked())
 
 
 class ProfilePanel(pg.GraphicsLayoutWidget):
