@@ -34,6 +34,7 @@ from model.polarisation import (CHANNEL_NAMES, default_vectors, in_plane,
 from model.stack import (DEFAULT_SMEARING, ROUGHNESS_SCHEMES,
                          SMEARING_MODES, Layer, Stack, cos_turns, wrap_turns)
 import style
+from fit.priors import complete as complete_prior
 
 
 SLD_SCALE = 1e-6                      # SLDs are edited / plotted in 1e-6 A^-2
@@ -640,6 +641,115 @@ class PairTable(QtWidgets.QTableWidget):
         return out
 
 
+def prior_text(spec, scale=1.0, unit=''):
+    """Short description of a fit.priors spec in display units."""
+    if spec is None:
+        return 'no prior'
+    u = (' ' + unit) if unit else ''
+    if spec['kind'] == 'gauss':
+        return 'prior %.6g ± %.3g%s' % (spec['mu'] * scale,
+                                        spec['tau'] * abs(scale), u)
+    return 'prior %.6g – %.6g%s (softness %.3g)' % (
+        spec['a'] * scale, spec['b'] * scale, u, spec['s'] * abs(scale))
+
+
+class PriorDialog(QtWidgets.QDialog):
+    """Edit the prior of one fit parameter (fit.priors) in display units:
+    none, Gaussian (expected ± tolerance, default 10 % of it) or soft box
+    (lower, upper, softness, default 10 % of the width)."""
+
+    KINDS = [('none', None), ('Gaussian: expected ± tolerance', 'gauss'),
+             ('soft box: between lower and upper', 'soft_box')]
+
+    def __init__(self, label, spec, scale=1.0, unit='', parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Prior — %s' % label)
+        self.scale, self.spec = scale, spec
+        self.kind = QtWidgets.QComboBox()
+        for text, _ in self.KINDS:
+            self.kind.addItem(text)
+        self.edits = {}
+        for key, tip in (('mu', 'expected value'),
+                         ('tau', 'default 10 % of the expected value'),
+                         ('a', 'lower'), ('b', 'upper'),
+                         ('s', 'default 10 % of the width')):
+            e = QtWidgets.QLineEdit()
+            e.setValidator(QtGui.QDoubleValidator())
+            e.setPlaceholderText(tip if key in ('tau', 's') else '')
+            self.edits[key] = e
+        f = QtWidgets.QFormLayout(self)
+        f.addRow(QtWidgets.QLabel(
+            '<i>What another measurement says %s should be%s; the fit '
+            'bounds stay the physical limits.</i>'
+            % (label, ' (in %s)' % unit if unit else ''), wordWrap=True))
+        f.addRow('Kind', self.kind)
+        for key, lab in (('mu', 'Expected'), ('tau', '±'), ('a', 'Lower'),
+                         ('b', 'Upper'), ('s', 'Softness')):
+            f.addRow(lab, self.edits[key])
+        self.error = QtWidgets.QLabel()
+        self.error.setStyleSheet('color: %s' % style.ERROR)
+        f.addRow(self.error)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok |
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        f.addRow(buttons)
+        self._form = f
+        if spec is not None:
+            self.kind.setCurrentIndex([k for _, k in self.KINDS]
+                                      .index(spec['kind']))
+            for key, v in spec.items():
+                if key in self.edits:
+                    self.edits[key].setText('%.8g' % (v * scale))
+        self.kind.currentIndexChanged.connect(self._show)
+        self._show()
+
+    def _show(self, *_):
+        kind = self.KINDS[self.kind.currentIndex()][1]
+        for key, e in self.edits.items():
+            on = (kind == 'gauss' and key in ('mu', 'tau')) or \
+                (kind == 'soft_box' and key in ('a', 'b', 's'))
+            self._form.setRowVisible(e, on)
+
+    def _accept(self):
+        kind = self.KINDS[self.kind.currentIndex()][1]
+        if kind is None:
+            self.spec = None
+            self.accept()
+            return
+        keys = ('mu', 'tau') if kind == 'gauss' else ('a', 'b', 's')
+        spec = {'kind': kind}
+        try:
+            for key in keys:
+                t = self.edits[key].text().strip()
+                spec[key] = None if not t else float(t) / self.scale
+            if kind == 'gauss' and spec['tau'] is not None:
+                spec['tau'] = abs(spec['tau'])
+            if kind == 'soft_box' and None in (spec['a'], spec['b']):
+                raise ValueError('give lower and upper')
+            if kind == 'gauss' and spec['mu'] is None:
+                raise ValueError('give the expected value')
+            self.spec = complete_prior(spec)
+        except (ValueError, TypeError) as exc:
+            self.error.setText(str(exc))
+            return
+        self.accept()
+
+
+def prior_button():
+    b = QtWidgets.QToolButton()
+    b.setText('prior…')
+    b.setAutoRaise(True)
+    return b
+
+
+def show_prior(button, spec, scale=1.0, unit=''):
+    """The button of a parameter's prior: marked (●) when it has one."""
+    button.setText('prior ●' if spec is not None else 'prior…')
+    button.setToolTip(prior_text(spec, scale, unit) + ' — click to edit')
+
+
 class LayerEditor(QtWidgets.QGroupBox):
     """Form bound to one Layer; emits `changed` after writing into it.
 
@@ -687,6 +797,10 @@ class LayerEditor(QtWidgets.QGroupBox):
             cb = QtWidgets.QCheckBox()
             cb.setToolTip('Vary %s in the fit, between Min and Max' % label)
             self.rows[attr] = (val, bmin, bmax, cb, QtWidgets.QLabel(label))
+        # attr -> button of its prior from other measurements (fit.priors)
+        self.priors = {attr: prior_button() for attr, *_ in EDITOR_PARAMS}
+        for attr, b in self.priors.items():
+            b.clicked.connect(lambda _, a=attr: self._edit_prior(a))
         self.sliders = {}
         for attr, *_ in EDITOR_PARAMS:
             sl = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
@@ -725,6 +839,7 @@ class LayerEditor(QtWidgets.QGroupBox):
                 g.addWidget(w, r, c)
             g.addWidget(cb, r, 4, alignment=QtCore.Qt.AlignmentFlag.AlignCenter)
             g.addWidget(self.sliders[attr], r + 1, 1, 1, 3)
+            g.addWidget(self.priors[attr], r + 1, 4)
             r += 2
         g.addWidget(QtWidgets.QLabel('Roughness model'), r, 0)
         g.addWidget(self.model, r, 1)
@@ -760,6 +875,8 @@ class LayerEditor(QtWidgets.QGroupBox):
             bmin.setValue(e['min'] * scale)
             bmax.setValue(e['max'] * scale)
             cb.setChecked(e['vary'])
+            show_prior(self.priors[attr], e.get('prior'), scale,
+                       PARAM_DISPLAY[attr][2])
         self.model.setCurrentText(layer.roughness_model)
         n = int(layer.roughness_sublayer)
         e = layer.fit.get('roughness_sublayer') or \
@@ -780,8 +897,20 @@ class LayerEditor(QtWidgets.QGroupBox):
         self._check_bounds()
 
     def _set_row_enabled(self, attr, on):
-        for w in self.rows[attr]:
+        for w in self.rows[attr] + (self.priors[attr],):
             w.setEnabled(on)
+
+    def _edit_prior(self, attr):
+        if self.layer is None:
+            return
+        label, scale, unit = PARAM_DISPLAY[attr]
+        e = self.layer.fit_entry(attr)
+        dlg = PriorDialog('%s of %s' % (label, self.layer.name),
+                          e.get('prior'), scale, unit, self)
+        if dlg.exec():
+            e['prior'] = dlg.spec
+            show_prior(self.priors[attr], dlg.spec, scale, unit)
+            self.changed.emit()
 
     def _sync_nsub_slider(self, *_):
         """Span the sublayer slider over [Min, Max] and place it at the
@@ -837,9 +966,10 @@ class LayerEditor(QtWidgets.QGroupBox):
         for attr, *_, scale in EDITOR_PARAMS:
             val, bmin, bmax, cb, _ = self.rows[attr]
             setattr(L, attr, val.value() / scale)
-            L.fit[attr] = {'vary': cb.isChecked(),
-                           'min': bmin.value() / scale,
-                           'max': bmax.value() / scale}
+            # the prior (set in its own dialog) is kept
+            L.fit[attr] = dict(L.fit.get(attr, {}), vary=cb.isChecked(),
+                               min=bmin.value() / scale,
+                               max=bmax.value() / scale)
         L.roughness_model = self.model.currentText()
         L.roughness_sublayer = self.nsub.value()
         L.fit['roughness_sublayer'] = {'vary': False,
@@ -927,6 +1057,9 @@ class SimulationTab(QtWidgets.QWidget):
             cb = QtWidgets.QCheckBox('Fit')
             cb.setToolTip('Vary %s in the fit, between the two bounds' % attr)
             self.stack_rows[attr] = (val, bmin, bmax, cb)
+        self.stack_priors = {attr: prior_button() for attr in self.stack_rows}
+        for attr, b in self.stack_priors.items():
+            b.clicked.connect(lambda _, a=attr: self._edit_stack_prior(a))
         self._load_stack_fit()
 
         self.q_fronting = QtWidgets.QCheckBox('Q in fronting')
@@ -1075,6 +1208,7 @@ class SimulationTab(QtWidgets.QWidget):
             row.addWidget(QtWidgets.QLabel('–'))
             row.addWidget(bmax, 2)
             row.addWidget(cb)
+            row.addWidget(self.stack_priors[attr])
             f.addRow(label, row)
         f.addRow('Q reference', self.q_fronting)
         f.addRow('Licorne', self.lic_exact)
@@ -1484,6 +1618,15 @@ class SimulationTab(QtWidgets.QWidget):
             cb.setChecked(e['vary'])
             for w in (val, bmin, bmax, cb):
                 w.blockSignals(False)
+            show_prior(self.stack_priors[attr], e.get('prior'))
+
+    def _edit_stack_prior(self, attr):
+        e = self.stack.fit_entry(attr)
+        dlg = PriorDialog(PARAM_DISPLAY[attr][0], e.get('prior'), parent=self)
+        if dlg.exec():
+            e['prior'] = dlg.spec
+            show_prior(self.stack_priors[attr], dlg.spec)
+            self.schedule()
 
     def _on_layer_edit(self):
         row = self.list.currentRow()
@@ -1543,9 +1686,9 @@ class SimulationTab(QtWidgets.QWidget):
             self.stack.background = self.background.value()
             self.stack.scale = self.scale.value()
             for attr, (_, bmin, bmax, cb) in self.stack_rows.items():
-                self.stack.fit[attr] = {'vary': cb.isChecked(),
-                                        'min': bmin.value(),
-                                        'max': bmax.value()}
+                self.stack.fit[attr] = dict(
+                    self.stack.fit.get(attr, {}), vary=cb.isChecked(),
+                    min=bmin.value(), max=bmax.value())
             self.stack.q_in_fronting = self.q_fronting.isChecked()
             self.stack.magnetic_smearing = SMEARING_MODES[
                 self.msmear.currentIndex()]

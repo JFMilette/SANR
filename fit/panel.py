@@ -30,7 +30,7 @@ from tabs.simulation import SciSpinBox, dspin
 from fit.problem import FitProblem
 from fit.de.de_window import DEThread, DEWindow
 from fit.dream.dream_fit import (PosteriorProblem, jittered_start, load_run,
-                                 parameter_names)
+                                 parameter_names, prior_tension)
 from fit.dream.dream_window import DreamThread, DreamWindow
 from fit.multistart import run_multistart
 
@@ -700,7 +700,8 @@ class FitPanel:
             problem, shown, dict(self.sim_vectors(), **vec),
             model_grid(sim.stack, np.linspace(qmin, qmax, sim.nq.value()),
                        s['channels'], grid), s['name'],
-            'χ²' if problem.cost == 'chi2' else 'cost (log R)',
+            ('χ²' if problem.cost == 'chi2' else 'cost (log R)')
+            + (' + prior' if any(problem.priors) else ''),
             polish=self.fit_polish.isChecked())
         self.btn_window.setEnabled(True)
         # a live simulation dataset, computed from the same pairs as the
@@ -1008,11 +1009,14 @@ class FitPanel:
 
     def _fit_done(self, x, cost, gen, msg):
         self.fit_window.finish(x, cost, gen, msg)
+        tension = ''.join(self._error(t) + '<br>' for t in prior_tension(
+            self._fit_problem, x, parameter_names(
+                self._fit_problem.stack, self._fit_problem.params)))
         self.fit_report.setText(self._fit_header(
-            '<b>%s</b> after %d generation(s) — cost %.5g<br><i>%s</i><br>'
+            '<b>%s</b> after %d generation(s) — cost %.5g<br><i>%s</i><br>%s'
             'Send an entry from the fit window to use it.'
             % ('Stopped' if msg == 'stopped' else 'Done', gen, cost,
-               html_escape(msg))))
+               html_escape(msg), tension)))
 
     def _fit_failed(self, msg):
         self.fit_window.fail(msg)

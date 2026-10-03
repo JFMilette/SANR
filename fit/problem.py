@@ -30,7 +30,10 @@ range and unusable R or dR only choosing the fitted ones among them
 (Licorne's QPOINTS), and each distinct grid is evaluated on its own (one
 call per grid; a warning says so when the channels' grids differ).
 
-COST -- mean over all points of the squared residual:
+COST -- mean over all points of the squared residual, plus, for parameters
+with a prior from other measurements (fit.priors), -2 (log p - its maximum)
+/ N of each: the DE optimum is then DREAM's MAP (zero when every such
+value sits at its expected one); residuals() never includes it:
   'chi2' : (R_model - R) / dR, i.e. the reduced chi^2 up to the number of
            free parameters.  Points with dR <= 0 use dR = R (relative
            residual) so data without errors can still be fitted.
@@ -47,6 +50,8 @@ import copy
 import warnings
 
 import numpy as np
+
+from fit.priors import prior_terms
 
 
 COSTS = ('chi2', 'log')
@@ -94,6 +99,8 @@ class FitProblem:
                     stacklevel=2)
         self.lo = np.array([p[3] for p in self.params], dtype=float)
         self.hi = np.array([p[4] for p in self.params], dtype=float)
+        # Prior or None per parameter (fit.priors)
+        self.priors = prior_terms(self.stack, self.params)
 
         self.channels = []                 # [(name, idx, R, sigma)]
         self.pairs = []                    # (P0, P) of each channel
@@ -237,5 +244,14 @@ class FitProblem:
         # penalised rather than aborting the fit
         return np.where(np.isfinite(r), r, 1e3)
 
+    def prior_penalty(self, x):
+        """sum of -2 (log p - its maximum) over the parameters' priors."""
+        return float(sum(p.penalty(v) for p, v in zip(self.priors, x)
+                         if p is not None))
+
     def __call__(self, u):
-        return float(np.mean(self.residuals(self.to_x(u))**2))
+        x = self.to_x(u)
+        cost = float(np.mean(self.residuals(x)**2))
+        if any(self.priors):
+            cost += self.prior_penalty(x) / self.npoints
+        return cost

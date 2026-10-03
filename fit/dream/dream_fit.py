@@ -8,8 +8,9 @@ model (Stack.reflectivities with the stack's resolution, scale and
 background, ONE call for every channel).  The likelihood is Gaussian in
 linear R with the measured dR, normalisation constant included
 (dream.make_gaussian_loglike); points with dR <= 0 use dR = |R|, as in the
-DE fit.  The prior is uniform inside the bounds, times any `priors`
-{name: log density} given.  sigma_free appends 'log10_sigma_scale' in
+DE fit.  The prior is uniform inside the bounds, times the priors of the
+stack's fit entries (fit.priors) and any `priors` {name: log density}
+given (these win on a clash).  sigma_free appends 'log10_sigma_scale' in
 (-1, 1): a common factor 10^s on every dR.  A model that cannot be
 evaluated (exception, non-finite R) has log-likelihood -inf.  The
 polarisation of each channel is fixed (the Simulation tab's pairs, or the
@@ -46,6 +47,7 @@ import subprocess
 import numpy as np
 
 from fit.de.de_fit import run_de
+from fit.priors import tension
 from fit.dream.dream import DreamResult, dream, ess, make_gaussian_loglike
 from fit.problem import FitProblem
 from model.stack import Stack
@@ -86,7 +88,10 @@ class PosteriorProblem:
         if self.sigma_free:
             self.names.append(SIGMA_NAME)
             self.bounds.append(SIGMA_BOUNDS)
-        self.priors = dict(priors or {})
+        # the stack's priors (fit.priors), then the API's
+        self.priors = {n: p for n, p in zip(self.names, fit_problem.priors)
+                       if p is not None}
+        self.priors.update(priors or {})
         unknown = set(self.priors) - set(self.names)
         if unknown:
             raise ValueError('priors on unknown parameters: %s'
@@ -148,9 +153,11 @@ class PosteriorProblem:
         return lp + ll if np.isfinite(ll) else -np.inf
 
     def chi2_per_point(self, x):
-        """chi^2 / N of x (the DE 'chi2' cost), with the measured dR."""
+        """chi^2 / N of x (the DE 'chi2' cost without its priors), with the
+        measured dR."""
         x = np.asarray(x, dtype=float)[:len(self.fit.params)]
-        return self.fit(self.fit.to_u(x))
+        return float(np.mean(self.fit.residuals(
+            self.fit.to_x(self.fit.to_u(x)))**2))
 
     def chi2_from_logp(self, x, logp):
         """chi^2 / N of states x (n, d) from their log posterior logp (n,),
@@ -508,7 +515,8 @@ def posterior_warnings(result, bounds=None, discard=0.5, rhat_max=1.1,
     minima (chains_split; chi^2/N of each with `problem`), acceptance below
     acc_min after adaptation, a parameter with more than edge_frac of its
     samples within `edge` x its bound width of a bound (the bound cuts into
-    the posterior; only with `bounds`, e.g. PosteriorProblem.bounds)."""
+    the posterior; only with `bounds`, e.g. PosteriorProblem.bounds), and
+    with `problem` a MAP value in tension with its prior (fit.priors)."""
     out = []
     names = result.names or []
     if result.rhat_history:
@@ -527,6 +535,8 @@ def posterior_warnings(result, bounds=None, discard=0.5, rhat_max=1.1,
     acc = result.acceptance[result.adapt_until:]
     if acc.size and acc.mean() < acc_min:
         out.append('Low acceptance after adaptation: %.3f' % acc.mean())
+    if problem is not None:
+        out += prior_tension(problem.fit, result.best()[0], problem.names)
     if bounds is not None and result.generations[-1] > result.adapt_until:
         s = result.samples(discard)
         for j, (lo, hi) in enumerate(bounds):
@@ -536,6 +546,20 @@ def posterior_warnings(result, bounds=None, discard=0.5, rhat_max=1.1,
                 if near.mean() > edge_frac:
                     out.append('%s hugs its %s bound: widen it?'
                                % (names[j], side))
+    return out
+
+
+def prior_tension(fit_problem, x, names=None):
+    """'Prior–data tension' texts of the values x (physical) of
+    fit_problem's parameters that pull against their priors."""
+    names = names or ['%s.%s' % ('stack' if i is None else
+                                 fit_problem.stack.layers[i].name, a)
+                      for i, a, *_ in fit_problem.params]
+    out = []
+    for n, p, v in zip(names, fit_problem.priors, x):
+        t = None if p is None else tension(p.spec, v)
+        if t:
+            out.append('Prior–data tension: %s = %.6g is %s' % (n, v, t))
     return out
 
 

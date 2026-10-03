@@ -187,7 +187,8 @@ from model.licorne_resolution import kernel as licorne_kernel
 
 
 # Layer attributes a fit may vary.  Layer.fit[attr] = {'vary', 'min', 'max'},
-# bounds in the same units as the attribute (Angstrom, A^-2, turns).
+# bounds in the same units as the attribute (Angstrom, A^-2, turns), and
+# optionally 'prior' (fit.priors SPEC, None for none).
 FIT_PARAMS = ('thickness', 'NSLD_real', 'NSLD_img', 'MSLD_rho', 'MSLD_theta',
               'MSLD_phi', 'roughness_sigma')
 # Stack attributes a fit may vary, in Stack.fit the same way; their
@@ -427,7 +428,7 @@ class Layer:
         self.roughness_sigma = roughness_sigma  # Angstrom, Gaussian sigma
         self.roughness_model = roughness_model  # 'erf', 'tanh' or 'none'
         self.roughness_sublayer = roughness_sublayer
-        self.fit = {k: dict(v) for k, v in (fit or {}).items()}
+        self.fit = copy.deepcopy(fit or {})
 
     def fit_entry(self, attr):
         """{'vary', 'min', 'max'} of `attr`, created from default_fit if unset."""
@@ -556,7 +557,7 @@ class Stack:
         return {'tail': self.tail,
                 'scale': self.scale,
                 'background': self.background,
-                'fit': {k: dict(v) for k, v in self.fit.items()},
+                'fit': copy.deepcopy(self.fit),
                 'q_in_fronting': self.q_in_fronting,
                 'resolution': copy.deepcopy(self.resolution),
                 'magnetic_smearing': self.magnetic_smearing,
@@ -564,8 +565,7 @@ class Stack:
                 'licorne_renorm': self.licorne_renorm,
                 'licorne_outer': self.licorne_outer,
                 'step_fallback': self.step_fallback,
-                'layers': [dict(vars(l), fit={k: dict(v)
-                                              for k, v in l.fit.items()})
+                'layers': [dict(vars(l), fit=copy.deepcopy(l.fit))
                            for l in self.layers]}
 
     @classmethod
@@ -577,7 +577,7 @@ class Stack:
                 magnetic_smearing=d.get('magnetic_smearing'))
         s.background = d['background']
         s.scale = float(d.get('scale', 1.0))
-        s.fit = {k: dict(v) for k, v in d.get('fit', {}).items()}
+        s.fit = copy.deepcopy(d.get('fit', {}))
         s.q_in_fronting = bool(d['q_in_fronting'])
         s.resolution.update(copy.deepcopy(d['resolution']))
         s.licorne_renorm = d.get('licorne_renorm', 'manual')
