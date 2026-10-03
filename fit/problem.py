@@ -25,9 +25,10 @@ computes every channel on one q.dat.  So either `grid` (e.g. the Q points of
 one chosen channel) is that one grid: the model is computed on it and each
 channel takes it at its own points (exactly on the grid's points, by
 interpolation of log R between them, the end value outside it, with a
-warning); or, without `grid`, each distinct grid of fitted points is
-evaluated on its own (one call per grid; a warning says so when the
-channels' grids differ).
+warning); or, without `grid`, each channel's grid is all its finite Q points, the Q
+range and unusable R or dR only choosing the fitted ones among them
+(Licorne's QPOINTS), and each distinct grid is evaluated on its own (one
+call per grid; a warning says so when the channels' grids differ).
 
 COST -- mean over all points of the squared residual:
   'chi2' : (R_model - R) / dR, i.e. the reduced chi^2 up to the number of
@@ -98,6 +99,7 @@ class FitProblem:
         self.pairs = []                    # (P0, P) of each channel
         self.norms = []                    # fixed factor of each channel
         Qs = []
+        full = []                          # (finite Q, fitted ones among them)
         for k, e in enumerate(data):
             Q, R, dR = (np.asarray(e[c], dtype=float) for c in ('Q', 'R', 'dR'))
             ok = np.isfinite(Q) & np.isfinite(R) & (Q >= qmin) & (Q <= qmax)
@@ -117,6 +119,8 @@ class FitProblem:
                 self.channels.append((e.get('name', 'channel %d' % k),
                                       R[ok], sigma))
                 Qs.append(Q[ok])
+                fin = np.isfinite(Q)
+                full.append((Q[fin], np.flatnonzero(ok[fin])))
         if not self.channels:
             raise ValueError('no data points to fit in the chosen Q range')
         self.Q, inv = np.unique(np.concatenate(Qs), return_inverse=True)
@@ -126,7 +130,7 @@ class FitProblem:
                          in zip(self.channels, np.split(inv, splits))]
         self.npoints = sum(len(ch[2]) for ch in self.channels)
         self.grid = None if grid is None else np.asarray(grid, dtype=float)
-        self.groups = self._groups(Qs)
+        self.groups = self._groups(Qs, full)
 
         # said once here; the cost function itself never warns
         m = self.stack.fronting_direction()
@@ -142,12 +146,16 @@ class FitProblem:
                     'and is averaged out, only the projection on M_f is '
                     'fitted' % ', '.join(lost), stacklevel=2)
 
-    def _groups(self, Qs):
+    def _groups(self, Qs, full):
         """[(Q grid, [(channel k, indices of its points in the grid or None,
         its points)])]: the union of every channel's Q, or with the
         'licorne' resolution scheme the one `grid`, else one grid per
         distinct channel grid (see DATA).  Indices None: the channel's
-        points are interpolated on the grid."""
+        points are interpolated on the grid.  Qs: each channel's fitted Q;
+        full: each channel's (finite Q, indices of the fitted ones), the
+        Licorne grid even outside the Q range or where R, dR are unusable,
+        as Licorne computes the model on every point of q.dat before it
+        selects QPOINTS (fit_reflection.m)."""
         res = self.stack.resolution
         if not (res.get('enabled') and res.get('scheme') == 'licorne'):
             return [(self.Q, [(k, ch[1], q) for k, (ch, q)
@@ -170,12 +178,12 @@ class FitProblem:
                               stacklevel=3)
             return [(g, members)]
         grids = {}
-        for k, q in enumerate(Qs):
-            order = np.argsort(q, kind='stable')
-            g = q[order]
-            idx = np.empty(len(q), dtype=int)
-            idx[order] = np.arange(len(q))
-            grids.setdefault(g.tobytes(), (g, []))[1].append((k, idx, q))
+        for k, ((qf, sel), q) in enumerate(zip(full, Qs)):
+            order = np.argsort(qf, kind='stable')
+            g = qf[order]
+            pos = np.empty(len(qf), dtype=int)
+            pos[order] = np.arange(len(qf))
+            grids.setdefault(g.tobytes(), (g, []))[1].append((k, pos[sel], q))
         if len(grids) > 1:
             warnings.warn('Licorne resolution scheme: the channels are on '
                           'different Q grids; each grid is convolved on its '

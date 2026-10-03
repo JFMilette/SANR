@@ -221,3 +221,23 @@ def test_fit_problem_grids():
     with warnings.catch_warnings():
         warnings.simplefilter('error')
         assert len(FitProblem(st, data).groups) == 1
+
+
+def test_fit_window_keeps_full_grid():
+    """Licorne computes the model on every point of q.dat and only then
+    takes the fitted ones (fit_reflection.m): the Q range and the points
+    the cost drops do not change the convolution grid."""
+    from fit.problem import FitProblem
+    st = fixture1_stack()
+    st.layers[2].fit_entry('thickness')['vary'] = True
+    ref = st.reflectivities(Q1, [(X, None)])[:, 0]
+    R = ref.copy()
+    data = [dict(Q=Q1, R=R, dR=0.1 * R, P0=X, P=None)]
+    fp = FitProblem(st, data, qmax=0.22)
+    x = [p[2] for p in fp.params]
+    assert np.max(np.abs(fp.model(x)[0] / ref[Q1 <= 0.22] - 1)) <= 1e-12
+    # the log cost drops R <= 0: every third point above Q = 0.2
+    drop = (Q1 > 0.2) & (np.arange(len(Q1)) % 3 == 0)
+    R[drop] = -1.0
+    fp = FitProblem(st, data, cost='log')
+    assert np.max(np.abs(fp.model(x)[0] / ref[~drop] - 1)) <= 1e-12
