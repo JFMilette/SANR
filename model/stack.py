@@ -1144,9 +1144,6 @@ class Stack:
                              "magnetic fronting (Licorne has none)")
         order = np.argsort(Q, kind='stable')
         Qs, ss = Q[order], sigma[order]
-        if np.any(np.diff(Qs) == 0):
-            raise ValueError("the 'licorne' resolution scheme needs distinct "
-                             "Q points")
         mode = int(self.resolution.get('licorne_fun', 3))
         key = (Qs.tobytes(), ss.tobytes(), mode)
         cache = self._licorne_W

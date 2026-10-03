@@ -152,14 +152,9 @@ class FitProblem:
         if not (res.get('enabled') and res.get('scheme') == 'licorne'):
             return [(self.Q, [(k, ch[1], q) for k, (ch, q)
                               in enumerate(zip(self.channels, Qs))])]
-        for q, ch in zip(Qs, self.channels):
-            if len(np.unique(q)) != len(q):
-                raise ValueError('%s has repeated Q points: the Licorne '
-                                 'resolution scheme needs distinct Q' % ch[0])
+        # a repeated Q (stitched TOF angles) is kept, as in Licorne's resolut
         if self.grid is not None:
-            g = np.unique(self.grid[np.isfinite(self.grid)])
-            if len(g) != np.isfinite(self.grid).sum():
-                raise ValueError('the Q grid has repeated points')
+            g = np.sort(self.grid[np.isfinite(self.grid)])
             members, out = [], []
             for k, (q, ch) in enumerate(zip(Qs, self.channels)):
                 i = np.clip(np.searchsorted(g, q), 0, len(g) - 1)
@@ -176,9 +171,11 @@ class FitProblem:
             return [(g, members)]
         grids = {}
         for k, q in enumerate(Qs):
-            g = np.unique(q)
-            grids.setdefault(g.tobytes(), (g, []))[1].append(
-                (k, np.searchsorted(g, q), q))
+            order = np.argsort(q, kind='stable')
+            g = q[order]
+            idx = np.empty(len(q), dtype=int)
+            idx[order] = np.arange(len(q))
+            grids.setdefault(g.tobytes(), (g, []))[1].append((k, idx, q))
         if len(grids) > 1:
             warnings.warn('Licorne resolution scheme: the channels are on '
                           'different Q grids; each grid is convolved on its '

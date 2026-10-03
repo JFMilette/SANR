@@ -81,8 +81,10 @@ def test_kernel_row_sums(mode):
             resolved = sigma >= 1.5 * dqc
             assert np.all((rows[resolved] > 0.98) & (rows[resolved] < 1.01))
     assert 0.1 < worst['jittered'] < 0.2
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match='first or last Q'):
         kernel([0.1, 0.1, 0.2, 0.3], [0.01] * 4, mode)
+    with pytest.raises(ValueError, match='non-decreasing'):
+        kernel([0.2, 0.1, 0.3, 0.4], [0.01] * 4, mode)
     with pytest.raises(ValueError):
         kernel([0.1, 0.2, 0.3, 0.4], [0.01, np.inf, 0.01, 0.01], mode)
     with pytest.raises(ValueError):
@@ -157,9 +159,19 @@ def test_licorne_scheme_unsorted_Q():
     R = st.reflectivities(Q1, pairs)
     perm = np.random.default_rng(1).permutation(len(Q1))
     assert np.array_equal(st.reflectivities(Q1[perm], pairs), R[perm])
-    with pytest.raises(ValueError, match='distinct'):
-        st.reflectivities(np.r_[Q1, Q1[5]], pairs)
+    # a repeated Q inside the grid (stitched TOF angles) is valid: the
+    # convolution of the sorted grid, as Licorne's resolut computes it
+    Qr = np.sort(np.r_[Q1, Q1[5]], kind='stable')
+    Rr = st.reflectivities(Qr, pairs)
+    assert np.array_equal(Rr[5], Rr[6])
+    Qp = np.r_[Q1, Q1[5]]                          # any order
+    assert np.allclose(st.reflectivities(Qp, pairs)[-1], Rr[6], rtol=1e-14)
+    # repeated at an end: Licorne's tail loop never ends there
+    with pytest.raises(ValueError, match='first or last Q'):
+        st.reflectivities(np.r_[Q1[0], Q1], pairs)
     # the kernel is cached per grid; a new grid gives a new kernel
+    st._licorne_W.clear()
+    st.reflectivities(Q1, pairs)
     assert len(st._licorne_W) == 1
     st.reflectivities(Q1[:100], pairs)
     assert len(st._licorne_W) == 2

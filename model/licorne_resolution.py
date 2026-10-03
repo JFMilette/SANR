@@ -45,9 +45,14 @@ def kernel(q, sigma, mode=3):
         raise ValueError('Licorne resolution mode must be 1, 2 or 3')
     if q.ndim != 1 or dq.shape != q.shape:
         raise ValueError('q and sigma must be 1-D arrays of the same length')
-    if N > 1 and not np.all(np.diff(q) > 0):
-        raise ValueError('Licorne resolution needs strictly increasing Q '
-                         '(it divides by the spacings)')
+    if N > 1 and not np.all(np.diff(q) >= 0):
+        raise ValueError('Licorne resolution needs non-decreasing Q')
+    # repeated Q is valid inside the grid (stitched TOF angles), but not at
+    # either end: the constant tails past an end step by the end spacing,
+    # so Licorne's loop would never end (it hangs there too)
+    if N > 1 and (q[1] == q[0] or q[-1] == q[-2]):
+        raise ValueError('Licorne resolution: the first or last Q is '
+                         'repeated (zero end spacing)')
     if not np.all(np.isfinite(dq) & (dq >= 0)):
         raise ValueError('resolution sigma must be finite and >= 0')
     if N < (4 if mode == 3 else 2):
