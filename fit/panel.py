@@ -554,15 +554,14 @@ class FitPanel:
             'likelihood^β, β rising from β start to 1,\nso they can cross '
             'between minima before settling; those generations are '
             'discarded anyway.')
-        self.dream_beta = QtWidgets.QDoubleSpinBox()
-        self.dream_beta.setRange(-6.0, 0.0)
-        self.dream_beta.setSingleStep(0.5)
-        self.dream_beta.setDecimals(1)
-        self.dream_beta.setValue(-3.0)
-        self.dream_beta.setPrefix('10^')
+        # %g notation, like the background (1e-06 .. 1)
+        self.dream_beta = SciSpinBox(1.0)
+        self.dream_beta.setMinimum(1e-6)
+        self.dream_beta.setValue(1e-3)
         self.dream_beta.setToolTip(
-            'β at the first generation (log10): 10^-3 flattens the '
-            'likelihood a thousandfold in log')
+            'β at the first generation, between 1e-6 and 1: 1e-3 flattens '
+            'the log-likelihood a thousandfold.\nThe arrows step 10 times per '
+            'decade.')
         self.dream_temper.toggled.connect(self.dream_beta.setEnabled)
         self.dream_start = QtWidgets.QComboBox()
         for label, key in DREAM_STARTS:
@@ -849,7 +848,7 @@ class FitPanel:
             rhat_target=self.dream_rhat.value(),
             min_gen_after_converged=min(5000, n_gen // 5),
             p_snooker=self.dream_snooker.value(),
-            beta_start=10 ** self.dream_beta.value()
+            beta_start=self.dream_beta.value()
             if self.dream_temper.isChecked() else 1.0,
             x0=self.dream_start.currentData())
         if options['x0'] == 'de':
