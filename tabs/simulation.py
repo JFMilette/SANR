@@ -665,6 +665,7 @@ class PriorDialog(QtWidgets.QDialog):
     def __init__(self, label, spec, scale=1.0, unit='', parent=None):
         super().__init__(parent)
         self.setWindowTitle('Prior — %s' % label)
+        self.setMinimumWidth(380)
         self.scale, self.spec = scale, spec
         self.kind = QtWidgets.QComboBox()
         for text, _ in self.KINDS:
@@ -712,6 +713,9 @@ class PriorDialog(QtWidgets.QDialog):
             on = (kind == 'gauss' and key in ('mu', 'tau')) or \
                 (kind == 'soft_box' and key in ('a', 'b', 's'))
             self._form.setRowVisible(e, on)
+        # fit the rows now shown (grow for a kind's fields, shrink for none)
+        self.layout().activate()
+        self.resize(self.width(), self.sizeHint().height())
 
     def _accept(self):
         kind = self.KINDS[self.kind.currentIndex()][1]
