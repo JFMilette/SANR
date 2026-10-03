@@ -7,13 +7,19 @@ Fitting benchmark on a saved Licorne session (not part of pytest).
   dream      DREAM runs (fit.dream.dream_fit.sample) with the given settings
              and seeds: MAP chi^2/N, each chain's chi^2/N at the end, R-hat,
              acceptance, parameters with > 5 % of their samples at a bound.
+  multistart fit.multistart.run_multistart (the GUI's multistart page): the
+             distinct minima, their hits and the parameters on a bound.
 
 The free parameters are the session's own fit flags (default), or --vary
 "i:attr,i:attr,..." with i the layer index in the SANR stack (0 = fronting).
 Results are appended as JSON lines to --out and printed as a table.
 
+Session A's own fit couples its layer 2 / 3 NSLD (a tie since the import
+reads Licorne's fit numbers); --untie fits them apart, as the reference
+numbers of benchmarks/README.md were measured.
+
 Examples (run from the repo root):
-  python benchmarks/bench_fit.py landscape tests/data/private/session_A --starts 24
+  python benchmarks/bench_fit.py landscape tests/data/private/session_A --starts 24 --untie
   python benchmarks/bench_fit.py landscape tests/data/private/session_B \
       --vary 1:thickness,2:thickness,3:thickness,1:roughness_sigma,2:roughness_sigma,3:roughness_sigma,4:roughness_sigma
   python benchmarks/bench_fit.py dream tests/data/private/session_A --seeds 1 2 3 \
@@ -131,10 +137,28 @@ def dream_runs(p, names, seeds, n_gen, chains, archive, sigma_free, extra):
     return out
 
 
+def multistart(p, names, starts, seed, method, workers):
+    from fit.multistart import run_multistart
+    m = run_multistart(p, n_starts=starts, method=method, seed=seed,
+                       workers=workers)
+    print('%d starts, %d distinct minima' % (starts + 1, len(m)))
+    print('%10s %5s %8s  %s' % ('chi2/N', 'hits', 'current', 'on a bound'))
+    for r in m:
+        print('%10.4f %5d %8s  %s' % (r['chi2'], r['hits'],
+                                      'yes' if r['from_current'] else '',
+                                      [n for n, b in zip(names, r['at_bound'])
+                                       if b]))
+    return dict(kind='multistart', names=names, method=method,
+                minima=[dict(chi2=r['chi2'], hits=r['hits'],
+                             from_current=bool(r['from_current']),
+                             x=list(map(float, r['x'])),
+                             at_bound=r['at_bound'].tolist()) for r in m])
+
+
 def main():
     a = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    a.add_argument('mode', choices=['landscape', 'dream'])
+    a.add_argument('mode', choices=['landscape', 'dream', 'multistart'])
     a.add_argument('session')
     a.add_argument('--vary', default=None)
     a.add_argument('--untie', action='store_true',
@@ -150,6 +174,9 @@ def main():
     a.add_argument('--p-snooker', type=float, default=None)
     a.add_argument('--temper', action='store_true',
                    help='tempered burn-in (beta_start 1e-3)')
+    a.add_argument('--method', default='lbfgs', choices=['lbfgs', 'de'],
+                   help='multistart local fit')
+    a.add_argument('--workers', type=int, default=1)
     a.add_argument('--out', default='benchmarks/results.jsonl')
     o = a.parse_args()
     p, names = load(o.session, o.vary, o.untie)
@@ -157,12 +184,13 @@ def main():
           % (o.session, len(names), p.npoints, p(p.x0())))
     if o.mode == 'landscape':
         recs = [landscape(p, names, o.starts, o.seed)]
+    elif o.mode == 'multistart':
+        recs = [multistart(p, names, o.starts, o.seed, o.method, o.workers)]
     else:
-        extra = {}
-        if o.p_snooker is not None:
-            extra['p_snooker'] = o.p_snooker
-        if o.temper:
-            extra['beta_start'] = 1e-3
+        # sample()'s defaults are the snooker 0.1 and the tempered burn-in:
+        # without --p-snooker / --temper, the plain sampler of before
+        extra = dict(p_snooker=0.0 if o.p_snooker is None else o.p_snooker,
+                     beta_start=1e-3 if o.temper else 1.0)
         recs = dream_runs(p, names, o.seeds, o.n_gen, o.chains, not o.classic,
                           o.sigma_free, extra)
     os.makedirs(os.path.dirname(os.path.abspath(o.out)), exist_ok=True)
