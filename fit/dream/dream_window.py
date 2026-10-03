@@ -38,7 +38,8 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from fit.dream.dream_fit import (SIGMA_NAME, chains_split, format_summary,
+from fit.dream.dream_fit import (FLOOR_NAME, SIGMA_NAME, chains_split,
+                         format_summary,
                          posterior_warnings, predictive_bands, profile_bands,
                          sample, save_result, summary_table)
 import style
@@ -92,6 +93,8 @@ def display_info(problem):
         out.append((shown_names(name), scale, unit))
     if problem.sigma_free:
         out.append((SIGMA_NAME, 1.0, ''))
+    if getattr(problem, 'floor_free', False):
+        out.append((FLOOR_NAME, 1.0, ''))
     return out
 
 

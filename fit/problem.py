@@ -36,7 +36,10 @@ with a prior from other measurements (fit.priors), -2 (log p - its maximum)
 value sits at its expected one); residuals() never includes it:
   'chi2' : (R_model - R) / dR, i.e. the reduced chi^2 up to the number of
            free parameters.  Points with dR <= 0 use dR = R (relative
-           residual) so data without errors can still be fitted.
+           residual) so data without errors can still be fitted.  An
+           error_floor f > 0 uses sqrt(dR^2 + (f R)^2) instead: a relative
+           error (e.g. of the normalisation between angles) that counting
+           errors leave out.
   'log'  : log10(R_model) - log10(R), equal weight per decade; points with
            R <= 0 are ignored.
 DREAM (fit.dream.dream_fit) uses the 'chi2' residuals as a Gaussian
@@ -71,7 +74,7 @@ class FitProblem:
     normalised free parameters."""
 
     def __init__(self, stack, data, cost='chi2', qmin=-np.inf, qmax=np.inf,
-                 grid=None):
+                 grid=None, error_floor=0.0):
         if cost not in COSTS:
             raise ValueError('unknown cost %r' % cost)
         # the caller's stack may be edited while the fit runs
@@ -105,6 +108,8 @@ class FitProblem:
         self.channels = []                 # [(name, idx, R, sigma)]
         self.pairs = []                    # (P0, P) of each channel
         self.norms = []                    # fixed factor of each channel
+        self.error_floor = float(error_floor)
+        self.raw_sigma = []                # each channel's dR, no floor
         Qs = []
         full = []                          # (finite Q, fitted ones among them)
         for k, e in enumerate(data):
@@ -117,6 +122,9 @@ class FitProblem:
                 dR = np.where(np.isfinite(dR) & (dR > 0), dR, np.abs(R))
                 ok &= dR > 0
                 sigma = dR[ok]
+                self.raw_sigma.append(sigma)
+                if self.error_floor > 0:
+                    sigma = np.hypot(sigma, self.error_floor * R[ok])
             if ok.any():
                 P = e.get('P')
                 self.pairs.append((np.asarray(e['P0'], dtype=float),

@@ -42,6 +42,8 @@ DREAM_STARTS = [('Latin hypercube', None), ('DE population', 'de'),
                 ('current values', 'current'),
                 ('multistart minimum', 'multistart')]
 MS_METHODS = [('L-BFGS-B', 'lbfgs'), ('short DE', 'de')]
+# chi^2/N of an optimum above which DREAM's error scale is ticked
+SIGMA_SUGGEST = 2.0
 
 
 class MultistartThread(QtCore.QThread):
@@ -153,6 +155,12 @@ class FitPanel:
             'Processes evaluating each generation in parallel (1 = in this '
             'process).\nStarting them takes about a second; beyond the '
             'number of performance cores it no longer helps.')
+        self.fit_floor = dspin(0.0, 50.0, 2, 0.5, ' %')
+        self.fit_floor.setToolTip(
+            'Relative error floor f: every point\'s error becomes '
+            'sqrt(dR² + (f R)²),\nfor errors the counting statistics leave '
+            'out (e.g. the normalisation between angles).  0 = off.\n'
+            'DREAM can fit it instead ("fit error floor").')
         self.fit_polish = QtWidgets.QCheckBox('polish (L-BFGS-B)')
         self.fit_polish.setChecked(True)
         self.fit_polish.setToolTip('Refine the best member with a local '
@@ -169,6 +177,7 @@ class FitPanel:
         page, f = self._page()
         f.addRow('Dataset', self.fit_set)
         f.addRow('Workers', self.fit_workers)
+        f.addRow('Error floor', self.fit_floor)
         f.addRow(QtWidgets.QLabel(
             '<i>Every channel of the dataset is fitted between Q min and '
             'Q max of the Simulation tab, varying the parameters ticked Fit '
@@ -318,7 +327,7 @@ class FitPanel:
                 problem = FitProblem(
                     sim.stack, data,
                     FIT_COSTS[self.fit_cost.currentIndex()][0], qmin, qmax,
-                    grid)
+                    grid, error_floor=self.fit_floor.value() / 100)
         except ValueError as exc:
             self.ms_report.setText(self._error(exc))
             return
@@ -391,6 +400,8 @@ class FitPanel:
         for b in (self.btn_ms_apply, self.btn_ms_dream):
             b.setEnabled(bool(minima))
         self._ms_start_item(bool(minima))
+        if minima:
+            self._suggest_sigma(problem, minima[0]['x'])
         hits = sum(m['hits'] for m in minima)
         note = self._ms_note if source == 'multistart' else ''
         self.ms_report.setText(
@@ -398,6 +409,20 @@ class FitPanel:
             % (source, hits, len(minima), 'um' if len(minima) == 1 else 'a',
                cost, minima[0]['chi2']) if minima
             else '%s: stopped before any start ended.' % source)
+
+    def _suggest_sigma(self, problem, x):
+        """After an optimum with chi^2/N > 2: tick "fit error scale" on the
+        DREAM page and say why (the user can untick it)."""
+        if problem.cost != 'chi2':
+            return
+        c = float(np.mean(problem.residuals(x)**2))
+        if not c > SIGMA_SUGGEST:
+            return
+        self.dream_sigma.setChecked(True)
+        self.dream_note.setText(
+            '<i>χ²/N = %.3g at the optimum: the error bars underestimate the '
+            'misfit by ×%.2g; the error scale is fitted.</i>'
+            % (c, np.sqrt(c)))
 
     def _ms_start_item(self, on):
         """Enable the DREAM start 'multistart minimum'."""
@@ -477,6 +502,12 @@ class FitPanel:
         self.dream_sigma.setToolTip(
             'Sample a common factor 10^s on every dR, s in [-1, 1] '
             '(log10_sigma_scale)')
+        self.dream_floor = QtWidgets.QCheckBox('fit error floor')
+        self.dream_floor.setToolTip(
+            'Sample a relative error floor f, log10 f in [-4, -0.5]: errors '
+            'sqrt((s dR)² + (f R)²) (log10_error_floor);\nthe general page\'s '
+            'fixed floor is then not used')
+        self.dream_note = QtWidgets.QLabel(wordWrap=True)
         self.dream_stop = QtWidgets.QCheckBox('stop when converged')
         self.dream_stop.setChecked(True)
         self.dream_stop.setToolTip(
@@ -540,9 +571,13 @@ class FitPanel:
         opts = QtWidgets.QGridLayout()
         opts.setContentsMargins(0, 0, 0, 0)
         for k, w in enumerate((self.dream_archive, self.dream_sigma,
-                               self.dream_stop, self.dream_temper)):
+                               self.dream_stop, self.dream_temper,
+                               self.dream_floor)):
             opts.addWidget(w, k // 2, k % 2)
         f.addRow(opts)
+        f.addRow(self.dream_note)
+        self.dream_sigma.toggled.connect(
+            lambda on: None if on else self.dream_note.setText(''))
         self.dream_archive.toggled.connect(self.dream_snooker.setEnabled)
         f.addRow(QtWidgets.QLabel(
             '<i>χ² likelihood with the measured dR, whatever the DE '
@@ -669,7 +704,7 @@ class FitPanel:
                 problem = FitProblem(
                     sim.stack, data,
                     FIT_COSTS[self.fit_cost.currentIndex()][0], qmin, qmax,
-                    grid)
+                    grid, error_floor=self.fit_floor.value() / 100)
         except ValueError as exc:
             self.fit_report.setText(self._error(exc))
             return
@@ -768,8 +803,10 @@ class FitPanel:
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter('always')
                 problem = PosteriorProblem(
-                    FitProblem(sim.stack, data, 'chi2', qmin, qmax, grid),
-                    sigma_free=self.dream_sigma.isChecked())
+                    FitProblem(sim.stack, data, 'chi2', qmin, qmax, grid,
+                               error_floor=self.fit_floor.value() / 100),
+                    sigma_free=self.dream_sigma.isChecked(),
+                    floor_free=self.dream_floor.isChecked())
         except ValueError as exc:
             self.dream_report.setText(self._error(exc))
             return
@@ -1009,6 +1046,7 @@ class FitPanel:
 
     def _fit_done(self, x, cost, gen, msg):
         self.fit_window.finish(x, cost, gen, msg)
+        self._suggest_sigma(self._fit_problem, x)
         tension = ''.join(self._error(t) + '<br>' for t in prior_tension(
             self._fit_problem, x, parameter_names(
                 self._fit_problem.stack, self._fit_problem.params)))

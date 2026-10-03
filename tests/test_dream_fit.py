@@ -336,3 +336,49 @@ def test_split_chains_reported():
               vectorized=True, seed=1, x0=x0)
     assert not chains_split(r)
     assert not any('different minima' in w for w in posterior_warnings(r))
+
+
+# -- relative error floor -------------------------------------------------------
+def floor_data(seed=0, f=0.05):
+    """R+ / R- of the film with a multiplicative 5 % noise on top of the
+    counting noise, and dR of the counting part only."""
+    st = film()
+    p = [channel_pair(c, N) for c in '+-']
+    R = st.reflectivities(Q, p, warn=False)
+    rng = np.random.default_rng(seed)
+    out = []
+    for k, c in enumerate('+-'):
+        dR = 0.005 * R[:, k] + 1e-8
+        Ro = R[:, k] * (1 + f * rng.normal(size=len(Q))) + \
+            dR * rng.normal(size=len(Q))
+        out.append(dict(Q=Q, R=Ro, dR=dR, P0=p[k][0], P=p[k][1],
+                        name='R' + c))
+    return out
+
+
+def test_error_floor_recovered(tmp_path):
+    pp = posterior_problem(free(film(), ()), floor_data(), floor_free=True)
+    assert pp.names[-1] == 'log10_error_floor'
+    res = sample(pp, n_gen=3000, seed=1, stop_when_converged=False)
+    f = 10 ** res.samples(0.5)[:, -1]
+    assert abs(np.median(f) - 0.05) <= 0.01, np.median(f)
+    # the errors and chi^2 of a state, and a round trip
+    x = res.best()[0]
+    E = pp.errors(x)
+    s, fl = pp.noise(x)
+    assert s == 1.0 and np.allclose(E[0], np.hypot(pp.data[0][1],
+                                                   fl * pp.data[0][0]))
+    save_result(tmp_path / 'f.npz', res, pp)
+    _, back, _ = load_run(tmp_path / 'f.npz')
+    assert back.floor_free and back(x) == pp(x)
+
+
+def test_fixed_floor_round_trip(tmp_path):
+    pp = posterior_problem(free(film(), ()), floor_data(), error_floor=0.05)
+    assert np.allclose(pp.data[0][1], np.hypot(pp.fit.raw_sigma[0],
+                                               0.05 * pp.data[0][0]))
+    res = sample(pp, **OLD, n_gen=200, seed=0, stop_when_converged=False)
+    save_result(tmp_path / 'g.npz', res, pp)
+    _, back, _ = load_run(tmp_path / 'g.npz')        # the floor once
+    x = res.best()[0]
+    assert back.fit.error_floor == 0.05 and back(x) == pp(x)

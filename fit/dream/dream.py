@@ -523,7 +523,8 @@ def dream(
 # ----------------------------------------------------------------------------
 # Likelihood helper for reflectometry data
 # ----------------------------------------------------------------------------
-def make_gaussian_loglike(model: Callable, data: Sequence[tuple], sigma_free: bool = False):
+def make_gaussian_loglike(model: Callable, data: Sequence[tuple], sigma_free: bool = False,
+                          floor_free: bool = False):
     """Gaussian log-likelihood summed over polarisation channels.
 
     model(x) -> list of model reflectivities, one array per channel, already
@@ -531,6 +532,9 @@ def make_gaussian_loglike(model: Callable, data: Sequence[tuple], sigma_free: bo
     data     -> list of (R_obs, dR_obs) arrays, same order as model output.
     sigma_free: if True, the last element of x is log10(s), a common
                 multiplier on all dR (accounts for under/over-estimated errors).
+    floor_free: if True, the last element of x (after log10 s) is log10(f),
+                a relative error floor: the errors are sqrt((s dR)^2 +
+                (f R_obs)^2), and the normalisation is recomputed with them.
     """
     R_obs = [np.asarray(r, float) for r, _ in data]
     dR = [np.asarray(e, float) for _, e in data]
@@ -540,6 +544,10 @@ def make_gaussian_loglike(model: Callable, data: Sequence[tuple], sigma_free: bo
     def loglike(x):
         x = np.asarray(x, float)
         s = 1.0
+        f = 0.0
+        if floor_free:
+            f = 10.0 ** x[-1]
+            x = x[:-1]
         if sigma_free:
             s = 10.0 ** x[-1]
             x = x[:-1]
@@ -547,6 +555,13 @@ def make_gaussian_loglike(model: Callable, data: Sequence[tuple], sigma_free: bo
             R_mod = model(x)
         except (FloatingPointError, ValueError, np.linalg.LinAlgError):
             return -np.inf
+        if floor_free:
+            E = [np.sqrt((s * e) ** 2 + (f * r) ** 2) for r, e in zip(R_obs, dR)]
+            chi2 = sum((((m - r) / e) ** 2).sum() for m, r, e in zip(R_mod, R_obs, E))
+            if not np.isfinite(chi2):
+                return -np.inf
+            return (-0.5 * n_pts * np.log(2 * np.pi)
+                    - sum(np.log(e).sum() for e in E) - 0.5 * chi2)
         chi2 = sum((((m - r) / e) ** 2).sum() for m, r, e in zip(R_mod, R_obs, dR))
         if not np.isfinite(chi2):
             return -np.inf

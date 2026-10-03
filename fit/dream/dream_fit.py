@@ -8,7 +8,10 @@ model (Stack.reflectivities with the stack's resolution, scale and
 background, ONE call for every channel).  The likelihood is Gaussian in
 linear R with the measured dR, normalisation constant included
 (dream.make_gaussian_loglike); points with dR <= 0 use dR = |R|, as in the
-DE fit.  The prior is uniform inside the bounds, times the priors of the
+DE fit, and with the FitProblem's fixed error_floor.  floor_free instead
+appends 'log10_error_floor' in (-4, -0.5): a relative floor f, the errors
+being sqrt((s dR)^2 + (f R)^2) (after log10_sigma_scale if both).  The
+prior is uniform inside the bounds, times the priors of the
 stack's fit entries (fit.priors) and any `priors` {name: log density}
 given (these win on a clash).  sigma_free appends 'log10_sigma_scale' in
 (-1, 1): a common factor 10^s on every dR.  A model that cannot be
@@ -55,6 +58,11 @@ from model.stack import Stack
 BAND_PERCENTILES = (2.5, 16, 50, 84, 97.5)
 SIGMA_NAME = 'log10_sigma_scale'
 SIGMA_BOUNDS = (-1.0, 1.0)
+FLOOR_NAME = 'log10_error_floor'
+FLOOR_BOUNDS = (-4.0, -0.5)
+# where the extra parameters start (jittered_start, the DE start): the
+# measured dR, a 1 % floor
+EXTRA_START = {SIGMA_NAME: 0.0, FLOOR_NAME: -2.0}
 
 
 def parameter_names(stack, params):
@@ -76,18 +84,23 @@ class PosteriorProblem:
     """Picklable bundle: FitProblem parameters + model + data -> log
     posterior (see POSTERIOR)."""
 
-    def __init__(self, fit_problem, *, sigma_free=False, priors=None):
+    def __init__(self, fit_problem, *, sigma_free=False, floor_free=False,
+                 priors=None):
         if fit_problem.cost != 'chi2':
             raise ValueError("the likelihood needs the 'chi2' cost (linear R "
                              "with its errors)")
         self.fit = fit_problem
         self.sigma_free = bool(sigma_free)
+        self.floor_free = bool(floor_free)
         self.names = parameter_names(fit_problem.stack, fit_problem.params)
         self.bounds = [(float(a), float(b))
                        for a, b in zip(fit_problem.lo, fit_problem.hi)]
         if self.sigma_free:
             self.names.append(SIGMA_NAME)
             self.bounds.append(SIGMA_BOUNDS)
+        if self.floor_free:
+            self.names.append(FLOOR_NAME)
+            self.bounds.append(FLOOR_BOUNDS)
         # the stack's priors (fit.priors), then the API's
         self.priors = {n: p for n, p in zip(self.names, fit_problem.priors)
                        if p is not None}
@@ -96,7 +109,10 @@ class PosteriorProblem:
         if unknown:
             raise ValueError('priors on unknown parameters: %s'
                              % ', '.join(sorted(unknown)))
-        self.data = [(R, sigma) for _, _, R, sigma in fit_problem.channels]
+        # a fitted floor replaces the FitProblem's fixed one
+        self.data = [(R, raw if self.floor_free else sigma)
+                     for (_, _, R, sigma), raw in zip(fit_problem.channels,
+                                                      fit_problem.raw_sigma)]
         self.lo = np.array([b[0] for b in self.bounds])
         self.hi = np.array([b[1] for b in self.bounds])
         self._loglike = None
@@ -125,7 +141,8 @@ class PosteriorProblem:
     def loglike(self, x):
         if self._loglike is None:
             self._loglike = make_gaussian_loglike(self._safe_model, self.data,
-                                                  self.sigma_free)
+                                                  self.sigma_free,
+                                                  self.floor_free)
         with np.errstate(all='ignore'):
             return float(self._loglike(x))
 
@@ -159,19 +176,40 @@ class PosteriorProblem:
         return float(np.mean(self.fit.residuals(
             self.fit.to_x(self.fit.to_u(x)))**2))
 
+    @property
+    def n_extra(self):
+        """Sampled parameters besides the fit's (sigma scale, floor)."""
+        return self.sigma_free + self.floor_free
+
+    def noise(self, x):
+        """(s, f): the error scale and floor of state x (1, 0 when not
+        sampled)."""
+        k = len(self.fit.params)
+        s = 10.0 ** x[k] if self.sigma_free else 1.0
+        f = 10.0 ** x[-1] if self.floor_free else 0.0
+        return s, f
+
+    def errors(self, x):
+        """The likelihood's error of every channel's points at state x."""
+        s, f = self.noise(x)
+        return [np.sqrt((s * e) ** 2 + (f * r) ** 2) for r, e in self.data]
+
     def chi2_from_logp(self, x, logp):
         """chi^2 / N of states x (n, d) from their log posterior logp (n,),
         without evaluating the model: the likelihood's inverse (nan where
-        logp is not finite)."""
+        logp is not finite).  With the measured dR (times nothing), or with
+        a fitted floor, with the likelihood's errors at that state."""
         x = np.atleast_2d(np.asarray(x, dtype=float))
         n = self.fit.npoints
-        log_norm = -0.5 * n * np.log(2 * np.pi) - sum(
-            np.log(e).sum() for _, e in self.data)
-        ll = np.asarray(logp, dtype=float) - np.array(
-            [self.logprior(xi) for xi in x])
-        s = 10.0 ** x[:, -1] if self.sigma_free else np.ones(len(x))
-        with np.errstate(invalid='ignore'):
-            chi2 = -2.0 * (ll - log_norm + n * np.log(s)) * s**2
+        out = []
+        for xi, lp in zip(x, np.asarray(logp, dtype=float)):
+            E = self.errors(xi)
+            log_norm = -0.5 * n * np.log(2 * np.pi) - sum(
+                np.log(e).sum() for e in E)
+            s = 1.0 if self.floor_free else self.noise(xi)[0]
+            with np.errstate(invalid='ignore'):
+                out.append(-2.0 * (lp - self.logprior(xi) - log_norm) * s**2)
+        chi2 = np.array(out)
         return np.where(np.isfinite(chi2), chi2 / n, np.nan)
 
     def to_x(self, u):
@@ -205,20 +243,23 @@ def _de_start(problem, n_chains, seed, de_options):
         raise ValueError('the DE population (%d) is smaller than the number '
                          'of chains (%d)' % (len(pop), n_chains))
     x0 = pop[:n_chains]
-    if problem.sigma_free:
-        x0 = np.column_stack([x0, np.zeros(n_chains)])
+    extra = [EXTRA_START[n] for n in problem.names[len(problem.fit.params):]]
+    if extra:
+        x0 = np.column_stack([x0, np.tile(extra, (n_chains, 1))])
     return x0
 
 
 def jittered_start(problem, n_chains, seed=None, x=None):
     """n_chains jittered copies (physical units) of x, the fit parameters'
     values (default: the current ones), e.g. a minimum of fit.multistart:
-    N(0, 0.002 (hi - lo)) each, clipped to the bounds; the sigma parameter,
-    if any, around 0."""
+    N(0, 0.002 (hi - lo)) each, clipped to the bounds; the error scale and
+    floor, if sampled, around EXTRA_START."""
     rng = np.random.default_rng(seed)
     u = problem.fit.x0() if x is None else problem.fit.to_u(x)
-    if problem.sigma_free:                    # s = 0: the measured dR
-        u = np.r_[u, -problem.lo[-1] / (problem.hi[-1] - problem.lo[-1])]
+    k = len(problem.fit.params)
+    for j, n in enumerate(problem.names[k:], k):
+        u = np.r_[u, (EXTRA_START[n] - problem.lo[j])
+                  / (problem.hi[j] - problem.lo[j])]
     U = np.clip(u + rng.normal(0.0, 0.002, (n_chains, len(u))), 0.0, 1.0)
     return problem.to_x(U)
 
@@ -344,7 +385,9 @@ def save_result(path, result, problem, sources=()):
     functions)."""
     st = problem.fit.stack
     meta = dict(names=list(problem.names), bounds=problem.bounds,
-                sigma_free=problem.sigma_free, adapt_until=result.adapt_until,
+                sigma_free=problem.sigma_free, floor_free=problem.floor_free,
+                error_floor=problem.fit.error_floor,
+                adapt_until=result.adapt_until,
                 n_evals=result.n_evals, data_hash=data_hash(problem),
                 sources=list(sources), git=_git_hash(),
                 roughness_scheme=st.roughness_scheme,
@@ -356,7 +399,9 @@ def save_result(path, result, problem, sources=()):
                           in zip(problem.fit.channels, problem.fit.pairs,
                                  problem.fit.norms)])
     data = {}
-    for k, (_, idx, R, dR) in enumerate(problem.fit.channels):
+    # the measured dR, before any floor (meta error_floor)
+    for k, ((_, idx, R, _), dR) in enumerate(zip(problem.fit.channels,
+                                                 problem.fit.raw_sigma)):
         data.update({'ch%d_Q' % k: problem.fit.Q[idx], 'ch%d_R' % k: R,
                      'ch%d_dR' % k: dR})
     state = result.state
@@ -426,7 +471,9 @@ def load_run(path):
     grid = meta.get('grid')
     problem = posterior_problem(Stack.from_dict(meta['stack']), data,
                                 grid=None if grid is None else np.array(grid),
-                                sigma_free=meta['sigma_free'])
+                                error_floor=meta.get('error_floor', 0.0),
+                                sigma_free=meta['sigma_free'],
+                                floor_free=meta.get('floor_free', False))
     if problem.names != list(meta['names']):
         raise ValueError('the stored stack gives the parameters %s, the '
                          'chains have %s' % (problem.names, meta['names']))
@@ -564,11 +611,11 @@ def prior_tension(fit_problem, x, names=None):
 
 
 def posterior_problem(stack, data, qmin=-np.inf, qmax=np.inf, grid=None,
-                      **kw):
+                      error_floor=0.0, **kw):
     """PosteriorProblem of FitProblem(stack, data, 'chi2', qmin, qmax,
-    grid)."""
-    return PosteriorProblem(FitProblem(stack, data, 'chi2', qmin, qmax, grid),
-                            **kw)
+    grid, error_floor)."""
+    return PosteriorProblem(FitProblem(stack, data, 'chi2', qmin, qmax, grid,
+                                       error_floor), **kw)
 
 
 # -- bands ---------------------------------------------------------------------
@@ -596,8 +643,8 @@ def predictive_bands(result, problem, n=200, discard=0.5, seed=0,
      'asymmetry': {'Q', 'A', 'dA', 'bands', 'predictive'} or None},
     each (5, nQ) at BAND_PERCENTILES.  'bands' is the model alone (the
     uncertainty of the parameters); 'predictive' adds to every draw the
-    measurement noise of the likelihood, N(0, dR) (times 10^s of that draw
-    with sigma_free), `replicates` times per draw so its percentiles are
+    measurement noise of the likelihood, N(0, dR) (with the error scale and
+    floor of that draw when they are sampled), `replicates` times per draw so its percentiles are
     smooth: where replicated data would fall, about as wide as the error
     bars.  The spin asymmetry (a - b) / (a + b) is given for R+ /
     R- (or R++ / R--) fitted on the same Q points."""
@@ -605,13 +652,14 @@ def predictive_bands(result, problem, n=200, discard=0.5, seed=0,
     nfit = len(fit.params)
     X = draws(result, n, discard, seed)
     models = [problem.model(x[:nfit]) for x in X]
-    s = 10.0 ** X[:, -1] if problem.sigma_free else np.ones(len(X))
+    errs = [problem.errors(x) for x in X]
     rng = np.random.default_rng(seed + 1)
     channels, reps = [], []
     for k, (name, idx, R, dR) in enumerate(fit.channels):
         M = np.array([m[k] for m in models])
+        E = np.array([e[k] for e in errs])
         rep = (M[:, None] + rng.normal(size=(len(M), replicates, M.shape[1]))
-               * dR * s[:, None, None]).reshape(-1, M.shape[1])
+               * E[:, None]).reshape(-1, M.shape[1])
         reps.append(rep)
         channels.append(dict(
             name=name, Q=fit.Q[idx], R=R, dR=dR,
