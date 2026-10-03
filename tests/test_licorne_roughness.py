@@ -271,13 +271,21 @@ def test_defaults_unchanged():
     assert st.licorne_outer == 'infinite'
     assert st.resolution['scheme'] == 'quadrature'
     assert not st.is_licorne_exact()
-    # Licorne-exact on, then off: the physical defaults come back, the
-    # scheme and the smearing stay
+    # Licorne-exact on, then off: the settings from before come back
+    before = st.to_dict()
     st.set_licorne_exact()
     assert st.is_licorne_exact() and st.roughness_scheme == 'licorne'
     assert (st.magnetic_smearing, st.step_fallback, st.licorne_renorm,
             st.licorne_outer, st.resolution['scheme']) == \
         ('step', False, 'licorne', 'licorne', 'licorne')
+    st.set_licorne_exact()                   # again: still remembers them
+    st.set_licorne_exact(False)
+    assert not st.is_licorne_exact() and st.to_dict() == before
+    # a stack that was never anything but exact: the physical defaults, the
+    # scheme and the smearing stay
+    st = S.Stack.from_dict(st.to_dict())
+    st.set_licorne_exact()
+    st = S.Stack.from_dict(st.to_dict())
     st.set_licorne_exact(False)
     assert not st.is_licorne_exact()
     assert (st.roughness_scheme, st.magnetic_smearing, st.step_fallback,

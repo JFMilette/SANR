@@ -8,6 +8,9 @@ settings under 'simulation' and the Experimental tab's under 'experimental'
 (datasets by file path, display and fit settings).  Opening a plain model
 file only replaces the model.
 
+Settings -> Dark mode switches between the dark and light themes (style.py);
+the choice is remembered for the next launch.
+
 File -> Import Licorne session reads a saved Licorne session folder
 (model.licorne_io.load_licorne_session) into the same form: its rexp<k>.dat
 channels as one dataset, Licorne's rtheory<k>.dat as a second one drawn as
@@ -20,7 +23,7 @@ import os
 import sys
 
 import numpy as np
-from PyQt6 import QtGui, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 
 import style
 from model.licorne_io import load_licorne_session
@@ -61,7 +64,20 @@ class MainWindow(QtWidgets.QMainWindow):
         menu.addAction('&Import experimental data…', self.import_data)
         menu.addAction('Import &Licorne session…', self.import_licorne)
 
+        menu = self.menuBar().addMenu('&Settings')
+        self.dark_mode = menu.addAction('&Dark mode')
+        self.dark_mode.setCheckable(True)
+        self.dark_mode.setChecked(style.theme == 'dark')
+        # keep it in this menu (macOS moves "settings"-like actions)
+        self.dark_mode.setMenuRole(QtGui.QAction.MenuRole.NoRole)
+        self.dark_mode.toggled.connect(self.set_dark_mode)
+
         self.resize(1600, 950)
+
+    def set_dark_mode(self, on):
+        theme = 'dark' if on else 'light'
+        style.apply(QtWidgets.QApplication.instance(), theme)
+        settings().setValue('theme', theme)
 
     def closeEvent(self, ev):
         self.experimental.shutdown()
@@ -206,6 +222,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle('SANR — %s' % os.path.basename(path))
 
 
+def settings():
+    """Preferences kept between launches (the theme)."""
+    return QtCore.QSettings('SANR', 'SANR')
+
+
 def _plain(obj):
     """json.dump fallback: numpy arrays and scalars as plain numbers."""
     if isinstance(obj, (np.ndarray, np.generic)):
@@ -261,7 +282,7 @@ def main():
     app.setApplicationName('SANR')
     # every window's icon, and the Dock / task-bar icon
     app.setWindowIcon(QtGui.QIcon(APP_ICON))
-    style.apply(app)
+    style.apply(app, settings().value('theme', style.DEFAULT))
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

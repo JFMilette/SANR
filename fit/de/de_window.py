@@ -23,6 +23,7 @@ import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 from fit.de.de_fit import run_de
+import style
 from tabs.simulation import (ASYM_COLOUR, PARAM_DISPLAY, PROFILE_QUANTITIES,
                              REFL_QUANTITIES, RIGHT, LayerLabels, plot_widget,
                              profile_data)
@@ -211,7 +212,7 @@ class DEWindow(QtWidgets.QWidget):
         self.quantity.currentIndexChanged.connect(self._redraw_reflectance)
         bar.addWidget(self.quantity)
         self.formula = QtWidgets.QLabel()
-        self.formula.setStyleSheet('color: #9aa0a6')
+        self.formula.setProperty('role', 'muted')
         bar.addWidget(self.formula)
         bar.addStretch(1)
         self.logy = QtWidgets.QCheckBox('log R')
@@ -232,7 +233,7 @@ class DEWindow(QtWidgets.QWidget):
         self._model = None                    # model channels, as self.data
         v.addWidget(w)
         self.refl_note = QtWidgets.QLabel()
-        self.refl_note.setStyleSheet('color: #f87171')
+        self.refl_note.setStyleSheet('color: %s' % style.ERROR)
         v.addWidget(self.refl_note)
         return box
 
@@ -300,7 +301,7 @@ class DEWindow(QtWidgets.QWidget):
     def fail(self, msg):
         self.running = False
         self.status.setText('Fit failed: %s' % html_escape(msg))
-        self.status.setStyleSheet('color: #f87171')
+        self.status.setStyleSheet('color: %s' % style.ERROR)
         self.btn_stop.setEnabled(False)
         self.btn_send.setEnabled(self.history.currentItem() is not None)
 
@@ -366,7 +367,7 @@ class DEWindow(QtWidgets.QWidget):
             self._redraw_reflectance()
         except Exception as exc:                      # keep the window alive
             self.status.setText('Cannot draw this entry: %s' % exc)
-            self.status.setStyleSheet('color: #f87171')
+            self.status.setStyleSheet('color: %s' % style.ERROR)
 
     def _fill_params(self):
         t = self.params

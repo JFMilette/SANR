@@ -56,7 +56,8 @@ the layer; Stack.tail is unused.  model.licorne_io reads a Licorne export.
 Stack.set_licorne_exact() makes every Licorne choice at once (the scheme,
 'step' without step_fallback, licorne_renorm and licorne_outer 'licorne',
 Licorne's resolution convolution: LICORNE_EXACT); the importer does so, and
-set_licorne_exact(False) restores the physical defaults.
+set_licorne_exact(False) restores the settings from before it was turned on,
+or the physical defaults when the stack was never anything but exact.
 
 MAGNETISATION -- Stack.magnetic_smearing chooses how M crosses an interface
 (default 'vector' for the 'rms' scheme, 'step' for 'licorne'):
@@ -499,6 +500,9 @@ class Stack:
                                   else magnetic_smearing)
         self.step_fallback = True        # 'step': a rho = 0 layer has no angle
         self._licorne_W = {}             # cached Licorne resolution kernels
+        # the LICORNE_EXACT settings set_licorne_exact() overwrote, for
+        # set_licorne_exact(False); None: nothing to go back to
+        self._before_exact = None
 
     # -- Licorne-exact ----------------------------------------------------------
     # settings with which the stack reproduces Licorne 1.4.2 (MATLAB path):
@@ -507,8 +511,8 @@ class Stack:
                      'step_fallback': False, 'licorne_renorm': 'licorne',
                      'licorne_outer': 'licorne',
                      'resolution.scheme': 'licorne'}
-    # what set_licorne_exact(False) restores (the roughness scheme and the
-    # smearing stay as they are)
+    # what set_licorne_exact(False) restores when there are no earlier
+    # settings (the roughness scheme and the smearing stay as they are)
     PHYSICAL = {'step_fallback': True, 'licorne_renorm': 'manual',
                 'licorne_outer': 'infinite', 'resolution.scheme': 'quadrature'}
 
@@ -525,9 +529,19 @@ class Stack:
     def set_licorne_exact(self, on=True):
         """on: every setting of LICORNE_EXACT (Licorne's roughness scheme,
         'step' without fallback, its 50-point J, its 1.5 t outer
-        pseudo-layers, its convolution on the data grid).  off: the
-        physical defaults of PHYSICAL."""
-        for k, v in (self.LICORNE_EXACT if on else self.PHYSICAL).items():
+        pseudo-layers, its convolution on the data grid), remembering the
+        ones it replaces.  off: those settings back, or the physical
+        defaults of PHYSICAL when there are none (a stack built or loaded
+        exact)."""
+        if on:
+            if not self.is_licorne_exact():
+                self._before_exact = {k: self._setting(k)
+                                      for k in self.LICORNE_EXACT}
+            new = self.LICORNE_EXACT
+        else:
+            new = self._before_exact or self.PHYSICAL
+            self._before_exact = None
+        for k, v in new.items():
             self._setting(k, v)
 
     def is_licorne_exact(self):

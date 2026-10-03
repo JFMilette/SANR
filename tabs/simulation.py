@@ -33,6 +33,7 @@ from model.polarisation import (CHANNEL_NAMES, default_vectors, in_plane,
                                 vectors_pair)
 from model.stack import (DEFAULT_SMEARING, ROUGHNESS_SCHEMES,
                          SMEARING_MODES, Layer, Stack, cos_turns, wrap_turns)
+import style
 
 
 SLD_SCALE = 1e-6                      # SLDs are edited / plotted in 1e-6 A^-2
@@ -61,8 +62,6 @@ REFL_QUANTITIES = [
 ASYM_COLOUR = '#b392f0'
 # smallest font for the layer names in the depth profile
 LABEL_MIN_PT = 6
-# layer shading in the depth profile: alternating greys
-BANDS = ['#00000000', '#ffffff0c']
 
 
 def ratio(a, b):
@@ -238,15 +237,14 @@ class Crosshair(QtCore.QObject):
         self.plot, self.readout = plot, readout
         self._pos = None                        # last scene position
         vb = plot.vb
-        self.line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(
-            '#9aa0a6', width=0.8, style=QtCore.Qt.PenStyle.DashLine))
-        self.text = pg.TextItem(anchor=(0, 1), color='#e3e5e8',
-                                fill=pg.mkBrush(43, 45, 49, 235),
-                                border=pg.mkPen('#55585f'))
+        self.line = pg.InfiniteLine(angle=90, movable=False)
+        self.text = pg.TextItem(anchor=(0, 1))
         for item in (self.line, self.text):
             item.setZValue(1000)
             vb.addItem(item, ignoreBounds=True)
         self.markers = {}                       # viewbox -> ScatterPlotItem
+        self.restyle()
+        style.notifier().changed.connect(self.restyle)
         self.hide()
         self._proxy = pg.SignalProxy(plot.scene().sigMouseMoved,
                                      rateLimit=60, slot=self._moved)
@@ -257,6 +255,20 @@ class Crosshair(QtCore.QObject):
             self._pos = None
             self.hide()
         return False
+
+    def restyle(self, *_):
+        """Colours of the current theme (style)."""
+        self.line.setPen(pg.mkPen(style.MUTED, width=0.8,
+                                  style=QtCore.Qt.PenStyle.DashLine))
+        self.text.setColor(style.TEXT)
+        fill = QtGui.QColor(style.SURFACE)
+        fill.setAlpha(235)
+        self.text.fill = pg.mkBrush(fill)
+        self.text.border = pg.mkPen(style.BORDER_STRONG)
+        self.text.update()
+        for m in self.markers.values():
+            m.setPen(pg.mkPen(style.PLOT_BG, width=1))
+        self.refresh()
 
     def hide(self):
         for item in [self.line, self.text] + list(self.markers.values()):
@@ -273,7 +285,7 @@ class Crosshair(QtCore.QObject):
 
     def _marker(self, vb):
         if vb not in self.markers:
-            m = pg.ScatterPlotItem(size=8, pen=pg.mkPen('#1b1c1f', width=1))
+            m = pg.ScatterPlotItem(size=8, pen=pg.mkPen(style.PLOT_BG, width=1))
             m.setZValue(999)
             vb.addItem(m, ignoreBounds=True)
             self.markers[vb] = m
@@ -334,6 +346,7 @@ class LayerLabels:
         plot.vb.sigYRangeChanged.connect(self.place)
         plot.vb.sigXRangeChanged.connect(self.fit)
         plot.vb.sigResized.connect(self.fit)
+        style.notifier().changed.connect(self.style)
 
     def set_layers(self, layers, Z, zlo, zhi):
         """One band per layer between the interfaces Z; the semi-infinite
@@ -363,17 +376,18 @@ class LayerLabels:
             self.spans.append((bounds[j], bounds[j + 1], texts))
         self.style()
 
-    def style(self):
+    def style(self, *_):
         """Alternate grey shading per layer; bold the selected layer's name."""
         sel = self.selected()
         for j, (band, t) in enumerate(zip(self.bands, self.labels)):
-            brush = pg.mkBrush(BANDS[j % 2])
+            # alternating shading, the theme's band colour on odd layers
+            brush = pg.mkBrush(style.BAND if j % 2 else '#00000000')
             band.setBrush(brush)
             band.setHoverBrush(brush)
             font = t.textItem.font()
             font.setBold(j == sel)
             t.setFont(font)
-            t.setColor('#e3e5e8' if j == sel else '#9aa0a6')
+            t.setColor(style.TEXT if j == sel else style.MUTED)
         self.fit()
 
     def fit(self, *_):
@@ -477,7 +491,6 @@ PARAM_DISPLAY = {attr: (label.split(' (')[0], scale,
                  for attr, label, *_, suffix, scale in EDITOR_PARAMS}
 PARAM_DISPLAY.update(scale=('Scale', 1.0, ''),
                      background=('Background', 1.0, ''))
-OUT_OF_BOUNDS = 'QDoubleSpinBox { background: #4a1f22; border: 1px solid #f87171 }'
 RES_MODES = ('mono', 'tof')     # res_mode combo order
 # res_conv combo: label, resolution['scheme'], resolution['licorne_fun']
 RES_CONVOLUTIONS = [('quadrature', 'quadrature', None),
@@ -580,7 +593,7 @@ class PairTable(QtWidgets.QTableWidget):
             for vec, val in ((row[:3], v[:3]), (row[3:], v[3:])):
                 bad = np.linalg.norm(val) > 1 + 1e-9
                 for w in vec:
-                    w.setStyleSheet(OUT_OF_BOUNDS if bad else '')
+                    w.setStyleSheet(style.out_of_bounds() if bad else '')
                     w.setToolTip('|P| > 1' if bad else '')
 
     def _follow(self, r, on):
@@ -813,7 +826,7 @@ class LayerEditor(QtWidgets.QGroupBox):
             bad = row_on and vary and not (
                 bmin.value() <= val.value() <= bmax.value()
                 and bmin.value() < bmax.value())
-            val.setStyleSheet(OUT_OF_BOUNDS if bad else '')
+            val.setStyleSheet(style.out_of_bounds() if bad else '')
             val.setToolTip('Outside the fit bounds' if bad else '')
 
     def _store(self):
@@ -961,9 +974,10 @@ class SimulationTab(QtWidgets.QWidget):
             'Licorne roughness, step M smearing\n  without fallback, '
             'Licorne\'s 50-point window integral, its 1.5·t fronting / '
             'substrate pseudo-layers\n  and its resolution convolution on '
-            'the data grid.  Unticked: the physical defaults\n  (exact '
-            'integral, semi-infinite outer media, quadrature).  Changing any '
-            'of these unticks it.')
+            'the data grid.  Unticking brings back the settings from before '
+            'it was ticked\n  (the physical defaults if it was never off: '
+            'exact integral, semi-infinite outer media,\n  quadrature).  '
+            'Changing any of these unticks it.')
         self.lic_exact.toggled.connect(self._licorne_exact)
 
         # instrumental resolution, Gaussian in Q (see model.stack RESOLUTION)
@@ -1301,7 +1315,7 @@ class SimulationTab(QtWidgets.QWidget):
         self.refl_quantity.currentIndexChanged.connect(self.schedule)
         bar.addWidget(self.refl_quantity)
         self.refl_formula = QtWidgets.QLabel()
-        self.refl_formula.setStyleSheet('color: #9aa0a6')
+        self.refl_formula.setProperty('role', 'muted')
         bar.addWidget(self.refl_formula)
         bar.addStretch(1)
         self.logy = QtWidgets.QCheckBox('log R')
@@ -1559,8 +1573,8 @@ class SimulationTab(QtWidgets.QWidget):
             text = '%d layers, %d sublayers' % (len(self.stack.layers),
                                                 len(self.stack.sublayers))
             if self._refl_note:
-                text += ('<br><span style="color:#f87171">%s</span>'
-                         % html.escape(self._refl_note))
+                text += ('<br><span style="color:%s">%s</span>'
+                         % (style.ERROR, html.escape(self._refl_note)))
             self.status.setText(text)
             self.status.setStyleSheet('')
             self.prof_cursor.refresh()
@@ -1568,7 +1582,7 @@ class SimulationTab(QtWidgets.QWidget):
             self.reflectanceChanged.emit()
         except Exception as exc:                      # keep the UI alive
             self.status.setText('Error: %s' % exc)
-            self.status.setStyleSheet('color: #f87171')
+            self.status.setStyleSheet('color: %s' % style.ERROR)
 
     def _sync_resolution(self, *_):
         on = self.res_on.isChecked()
@@ -1868,6 +1882,9 @@ class SimulationTab(QtWidgets.QWidget):
         self.stack.licorne_renorm = new.licorne_renorm
         self.stack.licorne_outer = new.licorne_outer
         self.stack.step_fallback = new.step_fallback
+        # unticking Licorne-exact must not bring back the previous session's
+        # settings
+        self.stack._before_exact = new._before_exact
         sim = d.get('simulation', {})
         widgets = [self.qmin, self.qmax, self.nq, self.tail, self.pol,
                    self.background, self.q_fronting, self.res_on,

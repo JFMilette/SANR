@@ -37,10 +37,9 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 
 from model.polarisation import CHANNEL_NAMES
 from model.stack import cos_turns, sin_turns
-from style import MUTED, PLOT_BG
+import style
 from tabs.simulation import PROFILE_QUANTITIES, SLD_SCALE
 
-BEAM = '#d0d4da'
 PI_COLOUR, PA_COLOUR = '#4c8dff', '#b392f0'
 M_COLOUR = PROFILE_QUANTITIES[1][2]
 THETA_COLOUR, PHI_COLOUR = PROFILE_QUANTITIES[2][2], PROFILE_QUANTITIES[3][2]
@@ -152,7 +151,8 @@ class GeometryTab(QtWidgets.QWidget):
         self._dirty = True
 
         self.view = gl.GLViewWidget()
-        self.view.setBackgroundColor(PLOT_BG)
+        self.view.setBackgroundColor(style.PLOT_BG)
+        style.notifier().changed.connect(self._changed)   # beam, axes colours
 
         self.layer = QtWidgets.QComboBox()
         self.layer.setToolTip('Follows the layer selected in the Simulation '
@@ -299,9 +299,10 @@ class GeometryTab(QtWidgets.QWidget):
         z = np.array([0.0, 0.0, 1.0])
         ki = np.cos(al) * u - np.sin(al) * z
         kf = np.cos(al) * u + np.sin(al) * z
-        arrow(v, -BEAM_LEN * ki, BEAM_LEN * ki * 0.97, BEAM, radius=0.045)
-        arrow(v, [0, 0, 0], BEAM_LEN * kf, BEAM, radius=0.045)
-        arrow(v, [0, 0, 0], 1.4 * z, MUTED, radius=0.025, head=0.16)
+        arrow(v, -BEAM_LEN * ki, BEAM_LEN * ki * 0.97, style.BEAM,
+              radius=0.045)
+        arrow(v, [0, 0, 0], BEAM_LEN * kf, style.BEAM, radius=0.045)
+        arrow(v, [0, 0, 0], 1.4 * z, style.MUTED, radius=0.025, head=0.16)
         pi_at, pa_at = -0.6 * BEAM_LEN * ki, 0.6 * BEAM_LEN * kf
         arrow(v, pi_at, P_LEN * Pi, PI_COLOUR, radius=0.04)
         if np.any(Pa):
@@ -310,9 +311,9 @@ class GeometryTab(QtWidgets.QWidget):
         if p is not None:
             dashed(v, -3.4 * p, 3.4 * p, PI_COLOUR, 0.55)
         if labels:
-            label(v, -1.02 * BEAM_LEN * ki, 'k_i', BEAM)
-            label(v, 1.04 * BEAM_LEN * kf, 'k_f', BEAM)
-            label(v, 1.5 * z, 'Q', MUTED)
+            label(v, -1.02 * BEAM_LEN * ki, 'k_i', style.BEAM)
+            label(v, 1.04 * BEAM_LEN * kf, 'k_f', style.BEAM)
+            label(v, 1.5 * z, 'Q', style.MUTED)
             label(v, pi_at + P_LEN * Pi + 0.1, 'Pi', PI_COLOUR)
             if np.any(Pa):
                 label(v, pa_at + P_LEN * Pa + 0.1, 'Pa', PA_COLOUR)
@@ -363,9 +364,9 @@ class GeometryTab(QtWidgets.QWidget):
         for e, name in ((np.eye(3)[0], 'x'), (np.eye(3)[1], 'y'),
                         (np.eye(3)[2], 'z')):
             far = (PLATE_HALF + 0.6) if name != 'z' else 3.0
-            line(v, [[0, 0, 0], far * e], MUTED, 0.6)
+            line(v, [[0, 0, 0], far * e], style.MUTED, 0.6)
             if labels:
-                label(v, (far + 0.15) * e, name, MUTED, 12)
+                label(v, (far + 0.15) * e, name, style.MUTED, 12)
 
     def _arcs(self, v, M, labels):
         """phi in the film plane from x and theta, up from the film plane or
@@ -464,5 +465,5 @@ class GeometryTab(QtWidgets.QWidget):
         rows.append('')
         rows.append('<span style="color:%s">SLDs in 10⁻⁶ Å⁻². Arrows: M '
                     'scaled to the largest |M| of the stack, P to its '
-                    'efficiency.</span>' % MUTED)
+                    'efficiency.</span>' % style.MUTED)
         return '<br>'.join(rows)

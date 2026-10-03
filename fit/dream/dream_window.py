@@ -39,6 +39,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from fit.dream.dream_fit import (SIGMA_NAME, format_summary, posterior_warnings,
                          predictive_bands, profile_bands, sample, save_result,
                          summary_table)
+import style
 from tabs.simulation import (CH_COLOURS, HP_COLOURS, PARAM_DISPLAY,
                              PROFILE_QUANTITIES, shown_names)
 
@@ -52,9 +53,6 @@ CHANNEL_COLOURS = {'R++': CH_COLOURS[0], 'R+-': CH_COLOURS[1],
                    'R-+': CH_COLOURS[2], 'R--': CH_COLOURS[3],
                    'R+': HP_COLOURS[0], 'R-': HP_COLOURS[1]}
 NSLD_COLOUR, MSLD_COLOUR = PROFILE_QUANTITIES[0][2], PROFILE_QUANTITIES[1][2]
-# 2-D histograms: plot background -> accent -> near white
-DENSITY = pg.ColorMap([0.0, 0.35, 0.75, 1.0],
-                      ['#1b1c1f', '#2a3b5c', '#4c8dff', '#dce8ff'])
 CORRELATION = pg.colormap.get('CET-D1A')
 ADAPT_BRUSH = pg.mkBrush(154, 160, 166, 40)
 # speed for the time left: over the last minute (progress signals are
@@ -115,10 +113,19 @@ def vbars(values, bins=50, colour='#4c8dff'):
                            brush=pg.mkBrush(colour))
 
 
+def density():
+    """Colour map of the 2-D histograms in the current theme: plot
+    background -> accent -> the far end (near white on dark, navy on
+    light)."""
+    return pg.ColorMap([0.0, 0.35, 0.75, 1.0],
+                       [style.PLOT_BG, style.ACCENT_SOFT, style.ACCENT,
+                        style.DENSITY_TOP])
+
+
 def placeholder(text):
     lab = QtWidgets.QLabel(text)
     lab.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-    lab.setStyleSheet('color: #9aa0a6')
+    lab.setProperty('role', 'muted')
     return lab
 
 
@@ -362,7 +369,7 @@ class CornerPanel(QtWidgets.QWidget):
         self.mimg.setLevels((-1, 1))
         self.mp.addItem(self.mimg)
         self.sel = QtWidgets.QGraphicsRectItem(0, 0, 1, 1)
-        self.sel.setPen(pg.mkPen('#e3e5e8', width=2))
+        self.sel.setPen(pg.mkPen(style.TEXT, width=2))
         self.mp.addItem(self.sel)
         bar = pg.ColorBarItem(values=(-1, 1), colorMap=CORRELATION,
                               interactive=False, width=12)
@@ -409,12 +416,12 @@ class CornerPanel(QtWidgets.QWidget):
         lay.setRowStretchFactor(0, 1)
         lay.setRowStretchFactor(1, 4)
         self.dimg = pg.ImageItem(axisOrder='col-major')
-        self.dimg.setLookupTable(DENSITY.getLookupTable(nPts=256))
+        self.dimg.setLookupTable(density().getLookupTable(nPts=256))
         self.main.addItem(self.dimg)
         self.medx = pg.InfiniteLine(angle=90, pen=pg.mkPen(
-            '#e3e5e8', width=0.8, style=QtCore.Qt.PenStyle.DashLine))
+            style.TEXT, width=0.8, style=QtCore.Qt.PenStyle.DashLine))
         self.medy = pg.InfiniteLine(angle=0, pen=pg.mkPen(
-            '#e3e5e8', width=0.8, style=QtCore.Qt.PenStyle.DashLine))
+            style.TEXT, width=0.8, style=QtCore.Qt.PenStyle.DashLine))
         for ln in (self.medx, self.medy):
             self.main.addItem(ln, ignoreBounds=True)
         self.hist_items = []
@@ -430,7 +437,7 @@ class CornerPanel(QtWidgets.QWidget):
         split.addWidget(right)
         split.setSizes([380, 620])
         self.note = QtWidgets.QLabel()
-        self.note.setStyleSheet('color: #9aa0a6')
+        self.note.setProperty('role', 'muted')
         v = QtWidgets.QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.addWidget(self.note)
@@ -629,7 +636,7 @@ class PredictivePanel(QtWidgets.QWidget):
         view = self.view
         view.clear()
         self.items, self.points = [], {}
-        view.addLabel(self.KEY, row=0, col=0, color='#9aa0a6', size='9pt')
+        view.addLabel(self.KEY, row=0, col=0, color=style.MUTED, size='9pt')
         p = plot_item('', 'R')
         p.setLogMode(y=True)
         p.addLegend(offset=(-10, 10))

@@ -104,6 +104,41 @@ def test_session_restores_the_box(app):
     assert other.lic_exact.isChecked() and other.stack.is_licorne_exact()
 
 
+def shown(sim):
+    """The tab's settings: the model, minus the layers, and the combos."""
+    sim.recompute()
+    d = sim.stack.to_dict()
+    del d['layers']
+    return d, [w.currentIndex() for w in (sim.rscheme, sim.msmear,
+                                          sim.res_conv)]
+
+
+def test_untick_restores_the_settings(app):
+    """Ticking then unticking goes back to where the tab was, also when it
+    was not on the physical defaults (here Licorne's convolution)."""
+    for conv in (0, 2):
+        sim = SimulationTab()
+        sim.res_conv.setCurrentIndex(conv)
+        before = shown(sim)
+        sim.lic_exact.setChecked(True)
+        sim.recompute()
+        sim.lic_exact.setChecked(False)
+        assert shown(sim) == before and not sim.lic_exact.isChecked()
+
+
+def test_session_forgets_the_settings(app):
+    """A session loaded exact unticks to the physical defaults, not to the
+    settings of the session before it."""
+    sim = exact_tab()                     # remembers the default settings
+    state = exact_tab().session_state()
+    sim.restore_state(state)
+    assert sim.lic_exact.isChecked()
+    sim.lic_exact.setChecked(False)
+    sim.recompute()
+    assert sim.rscheme.currentText() == 'Licorne'     # kept: none to restore
+    assert RES_CONVOLUTIONS[sim.res_conv.currentIndex()][1] == 'quadrature'
+
+
 def test_angle_letters(app):
     """The GUI writes the in-plane angle (MSLD_theta) as φ and the
     out-of-plane one (MSLD_phi) as θ, Licorne's letters."""

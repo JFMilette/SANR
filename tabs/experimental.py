@@ -54,6 +54,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 
 from fit.panel import FitPanel
 from model.polarisation import CHANNEL_NAMES, default_vectors, vectors_pair
+import style
 from .simulation import (CH_COLOURS, HP_COLOURS, REFL_QUANTITIES, Crosshair,
                          PairTable, dspin, fmt, plot_widget)
 
@@ -244,7 +245,7 @@ class NumberedText(QtWidgets.QPlainTextEdit):
         # the gutter does not inherit the editor's fixed font under the app
         # stylesheet; number_width() is measured with it, so draw with it
         p.setFont(self.font())
-        p.fillRect(ev.rect(), QtGui.QColor('#2b2d31'))
+        p.fillRect(ev.rect(), QtGui.QColor(style.SURFACE))
         block = self.firstVisibleBlock()
         top = self.blockBoundingGeometry(block).translated(
             self.contentOffset()).top()
@@ -252,8 +253,8 @@ class NumberedText(QtWidgets.QPlainTextEdit):
         while block.isValid() and top <= ev.rect().bottom():
             n = block.blockNumber()
             if block.isVisible() and top + h >= ev.rect().top():
-                p.setPen(QtGui.QColor('#f87171' if n == self.start
-                                      else '#62666d'))
+                p.setPen(QtGui.QColor(style.ERROR if n == self.start
+                                      else style.DISABLED))
                 p.drawText(0, int(top), self.gutter.width() - 8, h,
                            QtCore.Qt.AlignmentFlag.AlignRight, str(n + 1))
             top += self.blockBoundingRect(block).height()
@@ -266,13 +267,13 @@ class NumberedText(QtWidgets.QPlainTextEdit):
         block = self.document().findBlockByNumber(line)
         if block.isValid():
             first = QtWidgets.QTextEdit.ExtraSelection()
-            first.format.setBackground(QtGui.QColor('#5a4a1c'))
+            first.format.setBackground(QtGui.QColor(style.START_LINE))
             first.format.setProperty(
                 QtGui.QTextFormat.Property.FullWidthSelection, True)
             first.cursor = QtGui.QTextCursor(block)
             sel.append(first)
             rest = QtWidgets.QTextEdit.ExtraSelection()
-            rest.format.setBackground(QtGui.QColor('#34301f'))
+            rest.format.setBackground(QtGui.QColor(style.START_REST))
             cur = QtGui.QTextCursor(block)
             cur.movePosition(QtGui.QTextCursor.MoveOperation.NextBlock)
             cur.movePosition(QtGui.QTextCursor.MoveOperation.End,
@@ -430,7 +431,8 @@ class ImportDialog(QtWidgets.QDialog):
                                             self.q_shift.value())
         except ValueError as exc:
             self.data = None
-            self.preview.setText('<span style="color:#f87171">%s</span>' % exc)
+            self.preview.setText('<span style="color:%s">%s</span>'
+                                 % (style.ERROR, exc))
             self.ok.setEnabled(False)
             return
         if separate:
@@ -443,8 +445,8 @@ class ImportDialog(QtWidgets.QDialog):
         if not np.any(d['dR']):
             msg += ', no dR column (errors = 0)'
         if skipped:
-            msg += ('  <span style="color:#f87171">(%d non-numeric lines '
-                    'skipped)</span>' % skipped)
+            msg += ('  <span style="color:%s">(%d non-numeric lines '
+                    'skipped)</span>' % (style.ERROR, skipped))
         self.preview.setText(msg)
         self.ok.setEnabled(True)
 
@@ -614,7 +616,7 @@ def glyph_icon(glyph):
     pix = QtGui.QPixmap(16, 16)
     pix.fill(QtCore.Qt.GlobalColor.transparent)
     p = QtGui.QPainter(pix)
-    p.setPen(QtGui.QColor('#e3e5e8'))
+    p.setPen(QtGui.QColor(style.TEXT))
     p.drawText(pix.rect(), QtCore.Qt.AlignmentFlag.AlignCenter, glyph)
     p.end()
     return QtGui.QIcon(pix)
@@ -635,10 +637,21 @@ class DataTree(QtWidgets.QTreeWidget):
         self.header().setStretchLastSection(False)
         self.header().setSectionResizeMode(
             0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        style.notifier().changed.connect(self._restyle)
         self.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
         self.setDragDropMode(
             QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
         self.setDefaultDropAction(QtCore.Qt.DropAction.MoveAction)
+
+    @staticmethod
+    def set_icon(item, i):
+        """Marker glyph of dataset i on its top-level item."""
+        item.setIcon(0, glyph_icon(SYMBOL_GLYPH[SYMBOLS[i % len(SYMBOLS)]]))
+
+    def _restyle(self, *_):
+        """Redraw the glyphs in the theme's text colour."""
+        for i in range(self.topLevelItemCount()):
+            self.set_icon(self.topLevelItem(i), i)
 
     def dropEvent(self, ev):
         src = self.currentItem()
@@ -784,7 +797,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self.quantity.currentIndexChanged.connect(self.redraw)
         bar.addWidget(self.quantity)
         self.formula = QtWidgets.QLabel()
-        self.formula.setStyleSheet('color: #9aa0a6')
+        self.formula.setProperty('role', 'muted')
         bar.addWidget(self.formula)
         bar.addStretch(1)
         v.addLayout(bar)
@@ -810,7 +823,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         current = None
         for i, s in enumerate(self.sets):
             top = QtWidgets.QTreeWidgetItem([s['name']])
-            top.setIcon(0, glyph_icon(SYMBOL_GLYPH[SYMBOLS[i % len(SYMBOLS)]]))
+            t.set_icon(top, i)
             top.setData(0, ROLE, (i, None))
             live = s.get('live', False)
             flags = (top.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable
@@ -1282,8 +1295,8 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         if not n:
             self.status.setText('No data loaded — use Import…')
         elif notes:
-            self.status.setText('<span style="color:#f87171">%s — %s</span>'
-                                % (name, '<br>'.join(notes)))
+            self.status.setText('<span style="color:%s">%s — %s</span>'
+                                % (style.ERROR, name, '<br>'.join(notes)))
         else:
             self.status.setText('%d channel(s) in %d dataset(s), %d plotted'
                                 % (n, len(self.sets), len(shown)))
