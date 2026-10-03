@@ -904,8 +904,6 @@ def test_thin_sublayers():
     assert rel(R, st.reflectivities(q, nsf)) < 1e-6
 
 
-@pytest.mark.xfail(strict=True, reason='model.stack._slab_matrices has no '
-                   'sinh(Sd)/S regularisation: S == 0 exactly gives 0/0')
 def test_slab_at_its_own_critical_Q():
     L = [S.Layer('vac', 0), S.Layer('a', 10, 4e-6 / np.pi),
          S.Layer('s', 0, 2e-6)]

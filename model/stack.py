@@ -947,7 +947,10 @@ class Stack:
         c1, s1 = np.cosh(S1*d), np.sinh(S1*d)
         c3, s3 = np.cosh(S3*d), np.sinh(S3*d)
         sS1, sS3 = s1*S1, s3*S3
-        s1S, s3S = s1/S1, s3/S3
+        # sinh(S d)/S -> d at S = 0 (Q at a slab's own critical edge)
+        with np.errstate(invalid='ignore', divide='ignore'):
+            s1S = np.where(S1 == 0, d, s1/S1)
+            s3S = np.where(S3 == 0, d, s3/S3)
 
         # mu_1 = e^{i theta}, mu_3 = -mu_1 (mu_2 = mu_1, mu_4 = mu_3), so
         # 1/(mu_3-mu_1) = -1/(2 mu_1) and every entry of Eq. 1.128 reduces to
