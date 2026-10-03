@@ -383,7 +383,8 @@ class DEWindow(QtWidgets.QWidget):
         for (i, attr, _, lo, hi), v in zip(self.problem.params, self._x):
             label, scale, unit = PARAM_DISPLAY[attr]
             it = QtWidgets.QTreeWidgetItem(
-                ['(stack)' if i is None else layers[i].name, label,
+                ['(stack)' if i is None else self.stack.tie_name(i[1])
+                 if isinstance(i, tuple) else layers[i].name, label,
                  '%.6g' % (v * scale), unit])
             it.setTextAlignment(2, QtCore.Qt.AlignmentFlag.AlignRight
                                 | QtCore.Qt.AlignmentFlag.AlignVCenter)

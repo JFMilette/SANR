@@ -763,6 +763,7 @@ class LayerEditor(QtWidgets.QGroupBox):
     def __init__(self):
         super().__init__('Layer properties')
         self.layer = None
+        self.stack, self.index = None, None     # for ties (load)
         self._loading = False
         self._sliding = False           # value change coming from a slider
 
@@ -797,6 +798,14 @@ class LayerEditor(QtWidgets.QGroupBox):
             cb = QtWidgets.QCheckBox()
             cb.setToolTip('Vary %s in the fit, between Min and Max' % label)
             self.rows[attr] = (val, bmin, bmax, cb, QtWidgets.QLabel(label))
+        # right-click a row's name: tie it with other layers (model.stack
+        # ties), or untie it
+        for attr, row in self.rows.items():
+            lab = row[4]
+            lab.setContextMenuPolicy(
+                QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+            lab.customContextMenuRequested.connect(
+                lambda pos, a=attr: self._tie_menu(a, pos))
         # attr -> button of its prior from other measurements (fit.priors)
         self.priors = {attr: prior_button() for attr, *_ in EDITOR_PARAMS}
         for attr, b in self.priors.items():
@@ -861,8 +870,9 @@ class LayerEditor(QtWidgets.QGroupBox):
         self.model.currentIndexChanged.connect(self._store)
         self.setEnabled(False)
 
-    def load(self, layer, is_fronting, is_backing):
+    def load(self, layer, is_fronting, is_backing, stack=None, index=None):
         self.layer = layer
+        self.stack, self.index = stack, index
         self.setEnabled(layer is not None)
         if layer is None:
             return
@@ -877,6 +887,7 @@ class LayerEditor(QtWidgets.QGroupBox):
             cb.setChecked(e['vary'])
             show_prior(self.priors[attr], e.get('prior'), scale,
                        PARAM_DISPLAY[attr][2])
+            self._show_tie(attr)
         self.model.setCurrentText(layer.roughness_model)
         n = int(layer.roughness_sublayer)
         e = layer.fit.get('roughness_sublayer') or \
@@ -899,6 +910,68 @@ class LayerEditor(QtWidgets.QGroupBox):
     def _set_row_enabled(self, attr, on):
         for w in self.rows[attr] + (self.priors[attr],):
             w.setEnabled(on)
+
+    def _show_tie(self, attr):
+        """Mark a tied row (⛓ and the other members in its tooltip)."""
+        lab = self.rows[attr][4]
+        label = [l for a, l, *_ in EDITOR_PARAMS if a == attr][0]
+        k = None if self.stack is None else \
+            self.stack.tie_of(self.index, attr)
+        lab.setText(label + (' ⛓' if k is not None else ''))
+        lab.setToolTip(
+            'Tied: %s, fitted as one parameter (right-click to untie)'
+            % self.stack.tie_name(k) if k is not None else
+            'Right-click to tie with the same parameter of other layers')
+
+    def _tie_menu(self, attr, pos):
+        if self.stack is None or self.index is None:
+            return
+        menu = QtWidgets.QMenu(self)
+        k = self.stack.tie_of(self.index, attr)
+        if k is not None:
+            menu.addAction('Untie %s' % self.stack.tie_name(k),
+                           lambda: self._untie(attr))
+        else:
+            menu.addAction('Tie with…', lambda: self._tie_with(attr))
+        menu.exec(self.rows[attr][4].mapToGlobal(pos))
+
+    def _tie_with(self, attr):
+        """Choose the layers whose `attr` is fitted equal to this one's."""
+        st, i = self.stack, self.index
+        tied = st.tied()
+        others = [j for j in range(len(st.layers)) if j != i and
+                  st.fit_allowed(j, attr) and (j, attr) not in tied]
+        if not others:
+            return
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle('Tie %s.%s' % (st.layers[i].name, attr))
+        v = QtWidgets.QVBoxLayout(dlg)
+        v.addWidget(QtWidgets.QLabel(
+            'Fit these layers\' value equal to %s\'s, as one parameter:'
+            % st.layers[i].name))
+        boxes = []
+        for j in others:
+            b = QtWidgets.QCheckBox(st.layers[j].name)
+            v.addWidget(b)
+            boxes.append((j, b))
+        bb = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok |
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        v.addWidget(bb)
+        if not dlg.exec():
+            return
+        chosen = [j for j, b in boxes if b.isChecked()]
+        if chosen:
+            st.tie([(i, attr)] + [(j, attr) for j in chosen])
+            self._show_tie(attr)
+            self.changed.emit()
+
+    def _untie(self, attr):
+        self.stack.untie(self.index, attr)
+        self._show_tie(attr)
+        self.changed.emit()
 
     def _edit_prior(self, attr):
         if self.layer is None:
@@ -1504,7 +1577,7 @@ class SimulationTab(QtWidgets.QWidget):
         n = len(self.stack.layers)
         ok = 0 <= row < n
         self.editor.load(self.stack.layers[row] if ok else None,
-                         row == 0, row == n - 1)
+                         row == 0, row == n - 1, self.stack, row)
         self.toolbox.setItemText(0, 'Layer properties — %s'
                                  % self.stack.layers[row].name if ok
                                  else 'Layer properties')
@@ -1532,9 +1605,11 @@ class SimulationTab(QtWidgets.QWidget):
     def add_layer(self):
         row = self.list.currentRow()
         pos = min(max(row + 1, 1), len(self.stack.layers) - 1)
+        old = list(self.stack.layers)
         self.stack.layers.insert(pos, Layer('L%d' % pos, thickness=50.0,
                                             NSLD_real=2.0e-6, roughness_sigma=3.0,
                                             roughness_sublayer=10))
+        self.stack.reindex_ties(old)
         self._renumber()
         self.refresh_list(select=pos)
         self.schedule()
@@ -1542,7 +1617,9 @@ class SimulationTab(QtWidgets.QWidget):
     def remove_layer(self):
         row = self.list.currentRow()
         if 0 < row < len(self.stack.layers) - 1:
+            old = list(self.stack.layers)
             del self.stack.layers[row]
+            self.stack.reindex_ties(old)
             self._renumber()
             self.refresh_list(select=row)
             self.schedule()
@@ -1560,7 +1637,9 @@ class SimulationTab(QtWidgets.QWidget):
         if 0 < row < len(self.stack.layers) - 1 and \
                 0 < new < len(self.stack.layers) - 1:
             L = self.stack.layers
+            old = list(L)
             L[row], L[new] = L[new], L[row]
+            self.stack.reindex_ties(old)
             self._renumber()
             self.refresh_list(select=new)
             self.schedule()
@@ -1571,7 +1650,9 @@ class SimulationTab(QtWidgets.QWidget):
         L = self.stack.layers
         new = dest if dest < start else dest - 1
         if 0 < start < len(L) - 1 and 0 < new < len(L) - 1 and new != start:
+            old = list(L)
             L.insert(new, L.pop(start))
+            self.stack.reindex_ties(old)
             self._renumber()
             self.schedule()
         else:
@@ -2030,6 +2111,7 @@ class SimulationTab(QtWidgets.QWidget):
         self.stack.licorne_renorm = new.licorne_renorm
         self.stack.licorne_outer = new.licorne_outer
         self.stack.step_fallback = new.step_fallback
+        self.stack.ties = new.ties
         # unticking Licorne-exact must not bring back the previous session's
         # settings
         self.stack._before_exact = new._before_exact

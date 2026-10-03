@@ -47,11 +47,15 @@ def session(name):
         return folder, load_licorne_session(folder)
 
 
-def problem(name, vary=None, **kw):
+def problem(name, vary=None, untie=False, **kw):
     """(FitProblem, session) of a session's own data, cost chi2; `vary`
-    [(layer index, attr)] replaces the session's fit flags."""
+    [(layer index, attr)] replaces the session's fit flags; untie drops
+    Licorne's coupled parameters (A's layer 2 / 3 NSLD: the 12 parameters
+    of the landscape in benchmarks/README.md)."""
     folder, s = session(name)
     st = s['stack']
+    if untie:
+        st.ties = []
     if vary:
         for layer in st.layers:
             for e in layer.fit.values():
@@ -112,3 +116,20 @@ def test_session_B_dream_defaults():
     r = sample(pp, n_gen=8000, seed=1, stop_when_converged=False)
     assert pp.chi2_per_point(r.best()[0]) <= 13.30
     assert r.rhat_history[-1][1].max() <= 1.1
+
+
+def test_session_A_coupled_nsld():
+    """A's layer 2 and 3 NSLD share Licorne's fit number 6: one 'licorne'
+    tie, 11 parameters; a polish from the session values reaches 5.63 (the
+    untied problem: 4.93)."""
+    from scipy.optimize import minimize
+    p, s = problem('session_A')
+    assert len(p.params) == 11
+    assert p.stack.ties == [s['stack'].ties[0]]
+    t = p.stack.ties[0]
+    assert t['mode'] == 'licorne' and t['members'] == [[2, 'NSLD_real'],
+                                                        [3, 'NSLD_real']]
+    assert any('Coupled parameter 6' in n for n in s['notes'])
+    r = minimize(p, p.x0(), method='L-BFGS-B',
+                 bounds=[(0, 1)] * len(p.params), options={'maxiter': 3000})
+    assert r.fun == pytest.approx(5.63, abs=0.05)

@@ -31,16 +31,20 @@ from scipy.optimize import minimize
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from fit.dream.dream_fit import parameter_names          # noqa: E402
 from fit.problem import FitProblem                      # noqa: E402
 from model.licorne_io import load_licorne_session        # noqa: E402
 
 
-def load(folder, vary=None):
-    """(FitProblem, names) of a Licorne session, cost chi2, its own data."""
+def load(folder, vary=None, untie=False):
+    """(FitProblem, names) of a Licorne session, cost chi2, its own data;
+    untie drops Licorne's coupled parameters (ties)."""
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         lic = load_licorne_session(folder)
     st = lic['stack']
+    if untie:
+        st.ties = []
     if vary:
         for l in st.layers:
             for e in l.fit.values():
@@ -59,7 +63,7 @@ def load(folder, vary=None):
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         p = FitProblem(st, data, cost='chi2')
-    names = ['%s.%s' % (st.layers[i].name, a) for i, a, *_ in p.params]
+    names = parameter_names(st, p.params)
     return p, names
 
 
@@ -131,6 +135,9 @@ def main():
     a.add_argument('mode', choices=['landscape', 'dream'])
     a.add_argument('session')
     a.add_argument('--vary', default=None)
+    a.add_argument('--untie', action='store_true',
+                   help="fit Licorne's coupled parameters separately (the "
+                        "reference numbers of session A)")
     a.add_argument('--starts', type=int, default=24)
     a.add_argument('--seed', type=int, default=0)
     a.add_argument('--seeds', type=int, nargs='+', default=[1, 2, 3])
@@ -143,7 +150,7 @@ def main():
                    help='tempered burn-in (beta_start 1e-3)')
     a.add_argument('--out', default='benchmarks/results.jsonl')
     o = a.parse_args()
-    p, names = load(o.session, o.vary)
+    p, names = load(o.session, o.vary, o.untie)
     print('%s: %d free parameters, %d points, chi2/N at the session values %.4f'
           % (o.session, len(names), p.npoints, p(p.x0())))
     if o.mode == 'landscape':

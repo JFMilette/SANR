@@ -98,10 +98,11 @@ def test_session_B_landscape():
 
 @pytest.mark.slow
 def test_session_A_landscape(tmp_path):
-    """A: the best minimum is reached only from the session's own values
-    (a benchmark: the table of minima is written for reading)."""
+    """A, untied (12 parameters): the best minimum is reached only from the
+    session's own values (a benchmark: the table of minima is written for
+    reading)."""
     from test_licorne_sessions import problem
-    p, _ = problem('session_A')
+    p, _ = problem('session_A', untie=True)
     m = run_multistart(p, n_starts=24, seed=0)
     lines = ['%10.4f %4d %5s %s' % (r['chi2'], r['hits'], r['from_current'],
                                     np.flatnonzero(r['at_bound']).tolist())
@@ -175,7 +176,7 @@ def test_session_A_de_restarts():
     from fit.de.de_fit import run_de_restarts
     from fit.multistart import merge
     from test_licorne_sessions import problem
-    p, _ = problem('session_A')
+    p, _ = problem('session_A', untie=True)
     (x, cost, gen, msg), ends = run_de_restarts(
         p, restarts=3, seed=0, maxiter=50, popsize=5, tol=1e-6, init='sobol')
     m = merge(p, ends)

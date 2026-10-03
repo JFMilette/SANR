@@ -69,6 +69,13 @@ Norm_factor(k) with one (fit.problem DATA 'norm', Stack.reflectivities
 norms); when every channel in use has the same norm it becomes the stack's
 scale instead, and the norms stay 1.
 
+FIT -- <field>_fit / _min / _max become the fit flags and bounds.  A
+nonzero <field>_fit is a parameter NUMBER: fields sharing one are fitted as
+one coupled parameter (licorne_cb.m prepare_fitstr), imported as a
+'licorne' tie (model.stack ties) when they are the same field of different
+layers; coupled fields of different kinds are fitted separately, with a
+note.
+
 NOT REPRODUCED -- reported in the session notes: Formalism 'Parratt' (SANR
 computes the supermatrix), a second incoherent fraction (Fraction < 100,
 Layers2), Q-dependent polariser / analyser efficiencies (Polarizer /
@@ -482,9 +489,11 @@ def import_notes(top):
     return notes
 
 
-def _set_fit(stack, par):
-    """Licorne's <field>_fit / _min / _max as the layers' fit settings."""
+def _set_fit(stack, par, notes=None):
+    """Licorne's <field>_fit / _min / _max as the layers' fit settings, and
+    equal fit numbers as ties (see FIT)."""
     lay_p = par['layers'] + [par['substrate']]
+    numbers = {}                         # fit number -> [(layer, attr)]
     for i, (layer, p) in enumerate(zip(stack.layers[1:], lay_p), start=1):
         for attr, key, j in _FIT_FIELDS:
             vals = [p.get(key + s) for s in ('_fit', '_min', '_max')]
@@ -494,6 +503,21 @@ def _set_fit(stack, par):
                 vals = [v[j] for v in vals]
             layer.fit[attr] = {'vary': bool(vals[0]), 'min': float(vals[1]),
                                'max': float(vals[2])}
+            if vals[0]:
+                numbers.setdefault(int(vals[0]), []).append((i, attr))
+    for num, members in sorted(numbers.items()):
+        if len(members) < 2:
+            continue
+        if len({a for _, a in members}) == 1:
+            k = stack.tie(members, 'licorne')
+            if notes is not None:
+                notes.append('Coupled parameter %d (equal fit numbers): '
+                             '%s, as in Licorne.' % (num, stack.tie_name(k)))
+        elif notes is not None:
+            notes.append('Coupled parameter %d couples different fields '
+                         '(%s): fitted separately here.' % (num, ', '.join(
+                             '%s.%s' % (stack.layers[i].name, a)
+                             for i, a in members)))
 
 
 def _source(path):
@@ -538,7 +562,7 @@ def load_licorne_session(folder, axis_map=None):
         R = np.asarray(axis_map, dtype=float)
     notes = import_notes(top)
     stack = load_licorne_model(par_path, prof, axis_map, notes)
-    _set_fit(stack, par)
+    _set_fit(stack, par, notes)
     if any(any(p.get('msld_fit', [0, 0, 0])[1:]) for p in par['layers']):
         notes.append('Fitted magnetisation angles are not carried over.')
     stack.background = float(top.get('Background', 0.0))

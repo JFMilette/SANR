@@ -67,12 +67,15 @@ EXTRA_START = {SIGMA_NAME: 0.0, FLOOR_NAME: -2.0}
 
 def parameter_names(stack, params):
     """'layer.attr' of each free_parameters() entry ('stack.attr' for the
-    stack's own); layers sharing a name get their index: '#2 Fe.thickness'."""
+    stack's own, 'tie(Fe.thickness, Co.thickness)' for a tie); layers
+    sharing a name get their index: '#2 Fe.thickness'."""
     names = [l.name for l in stack.layers]
     out = []
     for i, attr, *_ in params:
         if i is None:
             out.append('stack.%s' % attr)
+        elif isinstance(i, tuple):
+            out.append(stack.tie_name(i[1]))
         elif names.count(names[i]) > 1:
             out.append('#%d %s.%s' % (i, names[i], attr))
         else:
@@ -599,9 +602,7 @@ def posterior_warnings(result, bounds=None, discard=0.5, rhat_max=1.1,
 def prior_tension(fit_problem, x, names=None):
     """'Prior–data tension' texts of the values x (physical) of
     fit_problem's parameters that pull against their priors."""
-    names = names or ['%s.%s' % ('stack' if i is None else
-                                 fit_problem.stack.layers[i].name, a)
-                      for i, a, *_ in fit_problem.params]
+    names = names or parameter_names(fit_problem.stack, fit_problem.params)
     out = []
     for n, p, v in zip(names, fit_problem.priors, x):
         t = None if p is None else tension(p.spec, v)

@@ -465,6 +465,49 @@ def _profile(z, Z, sigmas, models, vals):
     return out
 
 
+# ----------------------------------------------------------------- ties ----
+# A tie fits several layers' values of one attribute as ONE parameter.
+# Stack.ties = [{'members': [[i, attr], ...], 'mode': 'equal' | 'licorne',
+#                'v0': [...], 'lo': [...], 'hi': [...]}]
+# (v0, lo, hi: each member's value and bounds when the tie was made).
+#   'equal'    every member takes the fitted value S; S starts at the first
+#              member's value, its bounds are the intersection of the
+#              members' (current) bounds
+#   'licorne'  Licorne's coupled parameters (equal <field>_fit numbers,
+#              licorne_cb.m prepare_fitstr, l. 8936-8938, and PAR = sum of
+#              the members' values, l. 8747): S = sum of the members, in
+#              [sum lo, sum hi]; above S0 = sum v0 each member moves from
+#              its v0 towards its hi in proportion, below towards its lo:
+#              m_j = v0_j + (S - S0) (hi_j - v0_j) / (sum hi - S0), S >= S0
+#              m_j = v0_j + (S - S0) (lo_j - v0_j) / (sum lo - S0), S < S0
+# Stack.free_parameters() lists a tie once, as (('tie', k), attr, S, lo,
+# hi), when any member is ticked Fit; the members are not listed
+# themselves.  Stack.owner(('tie', k)) is a TieOwner, so setattr(owner,
+# attr, S) sets every member.
+TIE_MODES = ('equal', 'licorne')
+
+
+class TieOwner:
+    """What Stack.owner returns for tie k: reading any attribute gives its
+    fitted value S, writing one sets every member (see ties); `fit` is
+    empty (a tie has no prior; its bounds come from the members)."""
+
+    def __init__(self, stack, k):
+        object.__setattr__(self, '_stack', stack)
+        object.__setattr__(self, '_k', k)
+        object.__setattr__(self, 'fit', {})
+
+    def __getattr__(self, name):
+        return self._stack.tie_value(self._k)
+
+    def __setattr__(self, name, value):
+        self._stack.set_tie(self._k, value)
+
+    def fit_entry(self, attr):
+        lo, hi = self._stack.tie_bounds(self._k)
+        return {'vary': True, 'min': lo, 'max': hi}
+
+
 # ---------------------------------------------------------------- Stack ----
 class Stack:
     """[fronting, L1, ..., LN, backing].  Fronting and backing are
@@ -504,6 +547,7 @@ class Stack:
         # the LICORNE_EXACT settings set_licorne_exact() overwrote, for
         # set_licorne_exact(False); None: nothing to go back to
         self._before_exact = None
+        self.ties = []                   # see ties above
 
     # -- Licorne-exact ----------------------------------------------------------
     # settings with which the stack reproduces Licorne 1.4.2 (MATLAB path):
@@ -565,6 +609,7 @@ class Stack:
                 'licorne_renorm': self.licorne_renorm,
                 'licorne_outer': self.licorne_outer,
                 'step_fallback': self.step_fallback,
+                'ties': copy.deepcopy(self.ties),
                 'layers': [dict(vars(l), fit=copy.deepcopy(l.fit))
                            for l in self.layers]}
 
@@ -583,6 +628,7 @@ class Stack:
         s.licorne_renorm = d.get('licorne_renorm', 'manual')
         s.licorne_outer = d.get('licorne_outer', 'infinite')
         s.step_fallback = bool(d.get('step_fallback', True))
+        s.ties = copy.deepcopy(d.get('ties', []))
         return s
 
     # -- fitting ------------------------------------------------------------
@@ -603,15 +649,114 @@ class Stack:
             self.fit[attr] = default_fit(attr)
         return self.fit[attr]
 
+    # -- ties (see ties above) ------------------------------------------
+    def tie(self, members, mode='equal'):
+        """Add a tie of members [(layer index, attr)] (one attr, two or
+        more layers, none already tied); returns its index."""
+        members = [[int(i), str(a)] for i, a in members]
+        if mode not in TIE_MODES:
+            raise ValueError('tie mode must be one of %s' % ', '.join(TIE_MODES))
+        if len(members) < 2 or len({a for _, a in members}) != 1:
+            raise ValueError('a tie needs two or more layers and one '
+                             'attribute')
+        if len({i for i, _ in members}) != len(members):
+            raise ValueError('a layer appears twice in the tie')
+        if self.tied() & {tuple(m) for m in members}:
+            raise ValueError('a member is already tied')
+        entries = [self.layers[i].fit_entry(a) for i, a in members]
+        self.ties.append({
+            'members': members, 'mode': mode,
+            'v0': [float(getattr(self.layers[i], a)) for i, a in members],
+            'lo': [float(e['min']) for e in entries],
+            'hi': [float(e['max']) for e in entries]})
+        return len(self.ties) - 1
+
+    def untie(self, i, attr):
+        """Remove the tie holding (layer i, attr), if any."""
+        self.ties = [t for t in self.ties
+                     if [i, attr] not in [list(m) for m in t['members']]]
+
+    def tied(self):
+        """{(layer index, attr)} of every tie member."""
+        return {tuple(m) for t in self.ties for m in t['members']}
+
+    def tie_of(self, i, attr):
+        """Index of the tie holding (layer i, attr), or None."""
+        for k, t in enumerate(self.ties):
+            if [i, attr] in [list(m) for m in t['members']]:
+                return k
+        return None
+
+    def tie_name(self, k):
+        """'tie(Layer 2.NSLD_real, Layer 3.NSLD_real)'."""
+        return 'tie(%s)' % ', '.join('%s.%s' % (self.layers[i].name, a)
+                                     for i, a in self.ties[k]['members'])
+
+    def tie_bounds(self, k):
+        t = self.ties[k]
+        if t['mode'] == 'licorne':
+            return float(sum(t['lo'])), float(sum(t['hi']))
+        es = [self.layers[i].fit_entry(a) for i, a in t['members']]
+        return (float(max(e['min'] for e in es)),
+                float(min(e['max'] for e in es)))
+
+    def tie_value(self, k):
+        t = self.ties[k]
+        vals = [getattr(self.layers[i], a) for i, a in t['members']]
+        return float(sum(vals)) if t['mode'] == 'licorne' else float(vals[0])
+
+    def set_tie(self, k, S):
+        """Set every member of tie k from its fitted value S."""
+        t = self.ties[k]
+        S = float(S)
+        if t['mode'] == 'equal':
+            vals = [S] * len(t['members'])
+        else:
+            S0 = sum(t['v0'])
+            end = t['hi'] if S >= S0 else t['lo']
+            span = sum(end) - S0
+            vals = [v if span == 0 else v + (S - S0) * (e - v) / span
+                    for v, e in zip(t['v0'], end)]
+        for (i, a), v in zip(t['members'], vals):
+            setattr(self.layers[i], a, float(v))
+
+    def reindex_ties(self, old_layers):
+        """Follow the layers after they were added, removed or moved
+        (old_layers: the list before): members of a removed layer leave
+        their tie, a tie left with one member goes."""
+        where = {id(l): i for i, l in enumerate(self.layers)}
+        ties = []
+        for t in self.ties:
+            keep = [j for j, (i, _) in enumerate(t['members'])
+                    if i < len(old_layers) and id(old_layers[i]) in where]
+            if len(keep) < 2:
+                continue
+            t = {k: ([t[k][j] for j in keep] if isinstance(t[k], list)
+                     else t[k]) for k in t}
+            t['members'] = [[where[id(old_layers[i])], a]
+                            for i, a in t['members']]
+            ties.append(t)
+        self.ties = ties
+
     def free_parameters(self):
         """[(layer index, attr, value, min, max)] of every varied parameter:
-        the layers' in order, then the stack's own (layer index None)."""
+        the layers' in order, then the ties (layer index ('tie', k), when
+        any member is ticked Fit), then the stack's own (layer index
+        None)."""
         out = []
+        tied = self.tied()
         for i, l in enumerate(self.layers):
             for attr in FIT_PARAMS:
                 e = l.fit.get(attr)
-                if e and e['vary'] and self.fit_allowed(i, attr):
+                if e and e['vary'] and self.fit_allowed(i, attr) and \
+                        (i, attr) not in tied:
                     out.append((i, attr, getattr(l, attr), e['min'], e['max']))
+        for k, t in enumerate(self.ties):
+            attr = t['members'][0][1]
+            if any(self.layers[i].fit.get(a, {}).get('vary')
+                   and self.fit_allowed(i, a) for i, a in t['members']):
+                out.append((('tie', k), attr, self.tie_value(k),
+                            *self.tie_bounds(k)))
         for attr in STACK_FIT_PARAMS:
             e = self.fit.get(attr)
             if e and e['vary']:
@@ -621,8 +766,12 @@ class Stack:
 
     def owner(self, i):
         """The object a free_parameters() entry with layer index i sets:
-        layer i, or the stack itself for None."""
-        return self if i is None else self.layers[i]
+        layer i, the stack itself for None, a TieOwner for ('tie', k)."""
+        if i is None:
+            return self
+        if isinstance(i, tuple):
+            return TieOwner(self, i[1])
+        return self.layers[i]
 
     # -- geometry -----------------------------------------------------------
     @property

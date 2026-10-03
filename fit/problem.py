@@ -5,7 +5,7 @@ vector.
 
 PARAMETERS -- the varied ones are Stack.free_parameters(): every Layer.fit
 and Stack.fit (scale, background) entry with vary = True, bounded by its
-[min, max].  The methods work in normalised coordinates u in [0, 1]^n,
+[min, max], with tied layers (model.stack ties) as one parameter.  The methods work in normalised coordinates u in [0, 1]^n,
 x = min + u (max - min) (FitProblem.to_x / to_u), so SLDs (~1e-6) and
 thicknesses (~100) are on the same footing.
 
@@ -87,11 +87,13 @@ class FitProblem:
         bad = [p for p in self.params if not p[3] < p[4]]
         if bad:
             raise ValueError('empty bounds for %s' % ', '.join(
+                self.stack.tie_name(i[1]) if isinstance(i, tuple) else
                 '%s.%s' % ('stack' if i is None else
                            self.stack.layers[i].name, a)
                 for i, a, *_ in bad))
         # HALPERIN: only rho cos(phi) reaches the neutrons
-        for i in sorted({p[0] for p in self.params if p[0] is not None}):
+        for i in sorted({p[0] for p in self.params
+                         if isinstance(p[0], int)}):
             varied = {p[1] for p in self.params if p[0] == i}
             if {'MSLD_rho', 'MSLD_phi'} <= varied:
                 warnings.warn(
