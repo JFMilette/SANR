@@ -156,10 +156,14 @@ def test_panel_table_apply_and_dream(monkeypatch):
     seen = {}
     monkeypatch.setattr(exp, '_launch_dream',
                         lambda problem, options, report: seen.update(options))
+    # this flat data leaves chi^2/N > 2: the error scale is fitted too,
+    # starting at the measured dR (log10 s = 0)
+    assert exp.dream_sigma.isChecked()
     exp._ms_dream()
-    assert seen['x0'].shape == (8, 1)
+    assert seen['x0'].shape == (8, 2)
     assert np.allclose(seen['x0'][:, 0], m[-1]['x'][0],
                        atol=0.01 * (fp.hi[0] - fp.lo[0]))
+    assert np.allclose(seen['x0'][:, 1], 0.0, atol=0.02)
 
 
 @pytest.mark.slow
