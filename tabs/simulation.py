@@ -491,7 +491,8 @@ PARAM_DISPLAY = {attr: (label.split(' (')[0], scale,
                                            '10⁻⁶ Å⁻²'))
                  for attr, label, *_, suffix, scale in EDITOR_PARAMS}
 PARAM_DISPLAY.update(scale=('Scale', 1.0, ''),
-                     background=('Background', 1.0, ''))
+                     background=('Background', 1.0, ''),
+                     MSLD_moment=('MSLD ρ·t', 1 / SLD_SCALE, '10⁻⁶ Å⁻¹'))
 RES_MODES = ('mono', 'tof')     # res_mode combo order
 # res_conv combo: label, resolution['scheme'], resolution['licorne_fun']
 RES_CONVOLUTIONS = [('quadrature', 'quadrature', None),
@@ -806,6 +807,13 @@ class LayerEditor(QtWidgets.QGroupBox):
                 QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
             lab.customContextMenuRequested.connect(
                 lambda pos, a=attr: self._tie_menu(a, pos))
+        # fit the sheet moment rho t instead of rho (model.stack FIT_PARAMS)
+        self.moment = QtWidgets.QCheckBox('as ρ·t')
+        self.moment.setToolTip(
+            'Fit the sheet moment ρ·t (between ρ min·t min and ρ max·t max) '
+            'instead of ρ:\nthe data often fix their product, not each '
+            'one; ρ follows as moment / t')
+        self.moment.toggled.connect(self._store)
         # attr -> button of its prior from other measurements (fit.priors)
         self.priors = {attr: prior_button() for attr, *_ in EDITOR_PARAMS}
         for attr, b in self.priors.items():
@@ -849,6 +857,8 @@ class LayerEditor(QtWidgets.QGroupBox):
             g.addWidget(cb, r, 4, alignment=QtCore.Qt.AlignmentFlag.AlignCenter)
             g.addWidget(self.sliders[attr], r + 1, 1, 1, 3)
             g.addWidget(self.priors[attr], r + 1, 4)
+            if attr == 'MSLD_rho':
+                g.addWidget(self.moment, r + 1, 0)
             r += 2
         g.addWidget(QtWidgets.QLabel('Roughness model'), r, 0)
         g.addWidget(self.model, r, 1)
@@ -888,6 +898,8 @@ class LayerEditor(QtWidgets.QGroupBox):
             show_prior(self.priors[attr], e.get('prior'), scale,
                        PARAM_DISPLAY[attr][2])
             self._show_tie(attr)
+        self.moment.setChecked(
+            bool(layer.fit.get('MSLD_moment', {}).get('on')))
         self.model.setCurrentText(layer.roughness_model)
         n = int(layer.roughness_sublayer)
         e = layer.fit.get('roughness_sublayer') or \
@@ -901,6 +913,7 @@ class LayerEditor(QtWidgets.QGroupBox):
             self._sync_slider(attr)
         # semi-infinite media have no thickness; fronting has no top interface
         self._set_row_enabled('thickness', not (is_fronting or is_backing))
+        self.moment.setEnabled(not (is_fronting or is_backing))
         self._set_row_enabled('roughness_sigma', not is_fronting)
         for w in (self.model, self.nsub, self.nsub_min, self.nsub_max,
                   self.nsub_slider):
@@ -1043,6 +1056,14 @@ class LayerEditor(QtWidgets.QGroupBox):
             L.fit[attr] = dict(L.fit.get(attr, {}), vary=cb.isChecked(),
                                min=bmin.value() / scale,
                                max=bmax.value() / scale)
+        # the sheet moment: varied when "as ρ·t" and ρ's Fit are ticked,
+        # its bounds following ρ's and t's
+        on = self.moment.isChecked()
+        if on or 'MSLD_moment' in L.fit:
+            lo, hi = L.moment_bounds()
+            L.fit['MSLD_moment'] = dict(
+                L.fit.get('MSLD_moment', {}), on=on, min=lo, max=hi,
+                vary=on and self.rows['MSLD_rho'][3].isChecked())
         L.roughness_model = self.model.currentText()
         L.roughness_sublayer = self.nsub.value()
         L.fit['roughness_sublayer'] = {'vary': False,
@@ -1663,8 +1684,7 @@ class SimulationTab(QtWidgets.QWidget):
     def set_parameters(self, params, x):
         """Write values x of Stack.free_parameters() entries `params` into
         the stack (e.g. from a fit) and refresh the editor and plots."""
-        for (i, attr, *_), v in zip(params, x):
-            setattr(self.stack.owner(i), attr, float(v))
+        self.stack.set_values(params, x)
         self._load_stack_fit()             # recompute reads these boxes
         self.refresh_list(select=self.list.currentRow())
         self.schedule()

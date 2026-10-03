@@ -123,3 +123,47 @@ def test_simulation_tab_keeps_ties(monkeypatch):
     sim.list.setCurrentRow(1)
     sim.editor._untie('NSLD_real')
     assert sim.stack.ties == []
+
+
+# -- the sheet moment (T2) -------------------------------------------------------
+def test_moment_mode():
+    st = bilayer()
+    A = st.layers[1]
+    A.MSLD_rho = 2e-6
+    A.fit['MSLD_rho'] = {'vary': True, 'min': 0.0, 'max': 4e-6}
+    e = A.fit_entry('MSLD_moment')
+    assert (e['min'], e['max']) == (0.0, 4e-6 * 80)
+    e['vary'] = True
+    attrs = [p[:2] for p in st.free_parameters()]
+    assert (1, 'MSLD_moment') in attrs and (1, 'MSLD_rho') not in attrs
+    assert A.MSLD_moment == pytest.approx(2e-6 * 60)
+    # with the thickness tied to B's: the moment still uses the new t
+    st.tie([(1, 'thickness'), (2, 'thickness')])
+    st.layers[2].fit['thickness'] = {'vary': True, 'min': 20, 'max': 80}
+    params = st.free_parameters()
+    x = [{'MSLD_moment': 1.5e-4, 'thickness': 50.0}.get(p[1], p[2])
+         for p in params]
+    st.set_values(params, x)
+    assert A.thickness == 50.0 and A.MSLD_rho == pytest.approx(3e-6)
+    back = S.Stack.from_dict(st.to_dict())
+    assert back.free_parameters() == st.free_parameters()
+
+
+def test_moment_check_box():
+    from PyQt6 import QtWidgets
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    from tabs import SimulationTab
+    sim = SimulationTab()
+    sim.list.setCurrentRow(1)
+    ed = sim.editor
+    ed.rows['MSLD_rho'][3].setChecked(True)
+    ed.moment.setChecked(True)
+    L = sim.stack.layers[1]
+    assert L.fit['MSLD_moment']['vary'] and L.fit['MSLD_moment']['on']
+    attrs = [p[1] for p in sim.stack.free_parameters()]
+    assert 'MSLD_moment' in attrs and 'MSLD_rho' not in attrs
+    ed.rows['MSLD_rho'][3].setChecked(False)          # rho not fitted
+    assert not L.fit['MSLD_moment']['vary'] and L.fit['MSLD_moment']['on']
+    sim.list.setCurrentRow(2)
+    sim.list.setCurrentRow(1)
+    assert ed.moment.isChecked()

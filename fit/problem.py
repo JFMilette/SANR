@@ -95,7 +95,8 @@ class FitProblem:
         for i in sorted({p[0] for p in self.params
                          if isinstance(p[0], int)}):
             varied = {p[1] for p in self.params if p[0] == i}
-            if {'MSLD_rho', 'MSLD_phi'} <= varied:
+            if 'MSLD_phi' in varied and \
+                    varied & {'MSLD_rho', 'MSLD_moment'}:
                 warnings.warn(
                     '%s: MSLD ρ and the out-of-plane angle MSLD θ '
                     '(MSLD_phi) are both varied, but only ρ cos θ is '
@@ -222,8 +223,7 @@ class FitProblem:
     def apply(self, x, stack=None):
         """Write parameter values x into `stack` (default: the fit's copy)."""
         stack = self.stack if stack is None else stack
-        for (i, attr, *_), v in zip(self.params, x):
-            setattr(stack.owner(i), attr, float(v))
+        stack.set_values(self.params, x)
 
     # -- cost ---------------------------------------------------------------
     def model(self, x):
