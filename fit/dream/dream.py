@@ -18,8 +18,10 @@ Variant ('archive' flag):
     archive=True   DREAM(ZS) (ter Braak & Vrugt 2008; Laloy & Vrugt 2012):
                    jump vectors from an archive Z of past states, seeded with
                    M0 = 10*d prior draws and appended every K generations.
-                   Works with N = 3 chains, cannot permanently lose a mode,
-                   and makes outlier resetting unnecessary.  Snooker updates
+                   Works with N = 3 chains, keeps every mode some chain has
+                   visited (a mode never visited is not found: see the start
+                   options and the tempered burn-in), and makes outlier
+                   resetting unnecessary.  Snooker updates
                    are not implemented.
 
 Both pCR adaptation and outlier-chain resetting break reversibility, so they
