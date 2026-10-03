@@ -21,8 +21,23 @@ Variant ('archive' flag):
                    Works with N = 3 chains, keeps every mode some chain has
                    visited (a mode never visited is not found: see the start
                    options and the tempered burn-in), and makes outlier
-                   resetting unnecessary.  Snooker updates
-                   are not implemented.
+                   resetting unnecessary.
+
+Snooker updates (DREAM(ZS) only, p_snooker > 0; ter Braak & Vrugt 2008):
+with probability p_snooker a chain jumps along the line from an archive
+point z through x, x' = x + g e (e.(z1 - z2)) / (e.e), e = x - z, g ~
+U(1.2, 2.2), z, z1, z2 three distinct archive points, all coordinates at
+once.  The Metropolis ratio carries the Jacobian ((|x' - z| / |x - z|)^(d-1));
+a snooker proposal is never folded back into the bounds (that would break
+its detailed balance): outside them it is rejected without evaluating
+logpdf.  Snooker moves do not enter the crossover adaptation.
+
+Tempered burn-in (beta_start < 1, needs logpdf_split(x) -> (log prior,
+log likelihood)): up to generation temper_until (default adapt_until, never
+past it) the chains target prior x likelihood^beta, beta rising
+geometrically from beta_start to 1, so they cross between distant modes
+before they settle.  It lies inside the adaptation phase, whose samples are
+never returned, so the posterior stays exact.
 
 Both pCR adaptation and outlier-chain resetting break reversibility, so they
 are restricted to the adaptation phase (first `adapt_until` generations).
@@ -214,6 +229,10 @@ def dream(
     seed=None,
     callback: Optional[Callable] = None,
     resume: Optional[dict] = None,
+    p_snooker: float = 0.0,
+    logpdf_split: Optional[Callable] = None,
+    temper_until: Optional[int] = None,
+    beta_start: float = 1.0,
 ) -> DreamResult:
     """Run DREAM.
 
@@ -233,7 +252,14 @@ def dream(
              adapt_until, thin, outlier and x0 are then ignored); the same
              logpdf and bounds must be given.  Convergence is detected
              afresh, so stop_when_converged runs at least
-             min_gen_after_converged more generations.
+             min_gen_after_converged more generations.  Its p_snooker and
+             tempering are kept too.
+    p_snooker : probability of a snooker update per chain and generation
+             (archive only; see the module docstring).
+    logpdf_split : x (d,) -> (log prior, log likelihood), or X (N, d) ->
+             two (N,) arrays if vectorized; their sum is logpdf.  Needed,
+             and used for every evaluation, when beta_start < 1.
+    temper_until, beta_start : the tempered burn-in (module docstring).
     """
     rng = np.random.default_rng(seed)
     lo, hi = (np.asarray(b, float) for b in zip(*bounds))
@@ -256,17 +282,45 @@ def dream(
         N, archive, thin = st['N'], st['archive'], st['thin']
         outlier, adapt_until = st['outlier'], st['adapt_until']
         archive_every = st['archive_every']
+        # states from before snooker and tempering: neither
+        p_snooker = st.get('p_snooker', 0.0)
+        beta_start = st.get('beta_start', 1.0)
+        temper_until = st.get('temper_until', 0)
+    if temper_until is None:
+        temper_until = adapt_until
+    temper = beta_start < 1.0
+    if temper:
+        if logpdf_split is None:
+            raise ValueError('the tempered burn-in needs logpdf_split')
+        if not 0 < temper_until <= adapt_until:
+            raise ValueError('temper_until must lie in the adaptation phase '
+                             '(1 to adapt_until)')
+    if p_snooker > 0 and not archive:
+        raise ValueError('snooker updates need the archive (DREAM(ZS))')
 
     def evaluate(Xs):
         if vectorized:
             return np.asarray(logpdf(Xs), float)
         return np.fromiter(map_func(logpdf, list(Xs)), float, count=len(Xs))
 
+    def evaluate_split(Xs):
+        """(log prior, log likelihood) arrays of the states Xs."""
+        if len(Xs) == 0:
+            return np.empty(0), np.empty(0)
+        if vectorized:
+            a, b = logpdf_split(Xs)
+        else:
+            a, b = zip(*map_func(logpdf_split, list(Xs)))
+        return np.asarray(a, float), np.asarray(b, float)
+
     # --- initial population --------------------------------------------------
+    lp_X = ll_X = None
     if resume is not None:
         rng.bit_generator.state = st['rng']
         X, logp_X = st['X'].copy(), st['logp_X'].copy()
         n_evals = st['n_evals']
+        if temper:
+            lp_X, ll_X = st['lp_X'].copy(), st['ll_X'].copy()
     elif x0 is not None:
         X = np.array(x0, float, copy=True)
         if X.shape != (N, d):
@@ -274,7 +328,11 @@ def dream(
     else:
         X = latin_hypercube(N, lo, hi, rng)
     if resume is None:
-        logp_X = evaluate(X)
+        if temper:
+            lp_X, ll_X = evaluate_split(X)
+            logp_X = lp_X + ll_X
+        else:
+            logp_X = evaluate(X)
         n_evals = N
 
     if archive and resume is not None:
@@ -327,7 +385,20 @@ def dream(
         D = rng.integers(1, delta + 1, size=N)
         lam = rng.uniform(-c, c, size=(N, d))
         zeta = rng.normal(0.0, c_star, size=(N, d))
+        snk = np.zeros(N, bool)                  # snooker proposals
+        log_jac = np.zeros(N)
         for i in range(N):
+            if p_snooker > 0 and rng.random() < p_snooker:
+                z, z1, z2 = Z[rng.choice(m, size=3, replace=False)]
+                e = X[i] - z
+                ee = e @ e
+                if ee > 0:                       # else a regular move
+                    dX[i] = rng.uniform(1.2, 2.2) * e * (e @ (z1 - z2)) / ee
+                    snk[i] = True
+                    log_jac[i] = (d - 1) * (
+                        np.log(np.linalg.norm(X[i] + dX[i] - z))
+                        - 0.5 * np.log(ee))
+                    continue
             if archive:
                 r = rng.choice(m, size=2 * D[i], replace=False)
                 P = Z
@@ -345,24 +416,44 @@ def dream(
             dX[i, A] = (zeta[i, A] + (1.0 + lam[i, A]) * gamma
                         * (P[a][:, A] - P[b][:, A]).sum(axis=0))
         Xp = handle_bounds(X + dX, X, lo, hi, boundary, rng)
+        # a snooker proposal is never folded: outside the bounds, rejected
+        Xp[snk] = (X + dX)[snk]
+        ok = ~(snk & np.any((Xp < lo) | (Xp > hi), axis=1))
 
         # ---------- evaluate & Metropolis (Eq. 19) ----------------------------
-        logp_p = evaluate(Xp)
-        n_evals += N
+        logp_p = np.full(N, -np.inf)
+        if temper:
+            lp_p, ll_p = np.full(N, -np.inf), np.full(N, -np.inf)
+            lp_p[ok], ll_p[ok] = evaluate_split(Xp[ok])
+            logp_p = lp_p + ll_p
+        elif ok.all():
+            logp_p = evaluate(Xp)
+        elif ok.any():
+            logp_p[ok] = evaluate(Xp[ok])
+        n_evals += int(ok.sum())
         with np.errstate(invalid="ignore"):
-            log_ratio = logp_p - logp_X
+            if temper and t <= temper_until:
+                beta = beta_start ** (1.0 - t / temper_until)
+                log_ratio = (lp_p + beta * ll_p) - (lp_X + beta * ll_X)
+            else:
+                log_ratio = logp_p - logp_X
+            log_ratio = log_ratio + log_jac
         log_ratio = np.where(np.isnan(log_ratio), -np.inf, log_ratio)
         accept = np.log(rng.random(N)) < log_ratio
         X_old = X
         X = np.where(accept[:, None], Xp, X)
         logp_X = np.where(accept, logp_p, logp_X)
+        if temper:
+            lp_X = np.where(accept, lp_p, lp_X)
+            ll_X = np.where(accept, ll_p, ll_X)
         acc[t - 1] = accept.mean()
 
         # ---------- adaptation phase -----------------------------------------
         if t <= adapt_until:
             move = X - X_old                     # zero for rejected proposals
-            np.add.at(J, id_cr, ((move / std_X) ** 2).sum(axis=1))
-            np.add.at(n_id, id_cr, 1)
+            pm = ~snk                            # snooker moves do not count
+            np.add.at(J, id_cr[pm], ((move[pm] / std_X) ** 2).sum(axis=1))
+            np.add.at(n_id, id_cr[pm], 1)
             if np.all(n_id > 0) and J.sum() > 0:
                 pCR = J / n_id
                 pCR = pCR / pCR.sum()
@@ -380,6 +471,8 @@ def dream(
                 best = np.argmax(np.where(bad, -np.inf, logp_X))
                 X[bad] = X[best]
                 logp_X[bad] = logp_X[best]
+                if temper:
+                    lp_X[bad], ll_X[bad] = lp_X[best], ll_X[best]
                 hist_logp[: t + 1, bad] = hist_logp[: t + 1, best][:, None]
 
         # ---------- storage ----------------------------------------------------
@@ -410,7 +503,10 @@ def dream(
         rhat_target=rhat_target,
         d=d, N=N, archive=archive, thin=thin, outlier=outlier,
         adapt_until=adapt_until, archive_every=archive_every,
+        p_snooker=p_snooker, beta_start=beta_start, temper_until=temper_until,
         X=X.copy(), logp_X=logp_X.copy(), n_evals=n_evals,
+        lp_X=None if lp_X is None else lp_X.copy(),
+        ll_X=None if ll_X is None else ll_X.copy(),
         m=m if archive else 0, Z=Z[:m].copy() if archive else None,
         pCR=pCR.copy(), J=J.copy(), n_id=n_id.copy(),
         rng=rng.bit_generator.state, hist_logp=hist_logp[:t + 1].copy(),

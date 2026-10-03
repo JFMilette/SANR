@@ -128,11 +128,17 @@ class PosteriorProblem:
                 lp += float(self.priors[n](x[j]))
         return lp
 
-    def __call__(self, x):
+    def split(self, x):
+        """(log prior, log likelihood) of x; the likelihood is -inf where
+        the prior is (not evaluated there).  Their sum is self(x)."""
         lp = self.logprior(x)
         if not np.isfinite(lp):
-            return -np.inf
+            return -np.inf, -np.inf
         ll = self.loglike(x)
+        return lp, ll if np.isfinite(ll) else -np.inf
+
+    def __call__(self, x):
+        lp, ll = self.split(x)
         return lp + ll if np.isfinite(ll) else -np.inf
 
     def chi2_per_point(self, x):
@@ -155,6 +161,9 @@ class _Unit:
 
     def __call__(self, u):
         return self.problem(self.problem.to_x(u))
+
+    def split(self, u):
+        return self.problem.split(self.problem.to_x(u))
 
 
 def _de_start(problem, n_chains, seed, de_options):
@@ -258,12 +267,13 @@ def data_hash(problem):
 
 
 # DreamResult.state: scalars (JSON meta) and arrays (state_<name> in .npz)
+# (a state saved before snooker and tempering lacks theirs: neither)
 _STATE_SCALARS = ('t', 'n_gen', 'cancelled', 'rhat_target', 'd', 'N',
                   'archive', 'thin',
                   'outlier', 'adapt_until', 'archive_every', 'n_evals', 'm',
-                  'rng')
+                  'rng', 'p_snooker', 'beta_start', 'temper_until')
 _STATE_ARRAYS = ('X', 'logp_X', 'Z', 'pCR', 'J', 'n_id', 'hist_logp', 'acc',
-                 'chains', 'logps', 'gens')
+                 'chains', 'logps', 'gens', 'lp_X', 'll_X')
 
 
 def save_result(path, result, problem, sources=()):
@@ -296,9 +306,9 @@ def save_result(path, result, problem, sources=()):
                      'ch%d_dR' % k: dR})
     state = result.state
     if state is not None:                   # what sample(resume=...) needs
-        meta['state'] = {k: state[k] for k in _STATE_SCALARS}
+        meta['state'] = {k: state[k] for k in _STATE_SCALARS if k in state}
         for k in _STATE_ARRAYS:
-            if state[k] is not None:
+            if state.get(k) is not None:
                 data['state_' + k] = state[k]
         data['state_rhat_gens'] = np.array([g for g, _ in state['rhat_hist']],
                                            dtype=int)
