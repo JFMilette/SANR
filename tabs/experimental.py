@@ -754,7 +754,14 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self.last_q_shift = 0.0       # Q shift of the last import
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-        splitter.addWidget(self._build_controls())
+        # the controls scroll when the window is shorter than they are
+        controls = QtWidgets.QScrollArea()
+        controls.setWidget(self._build_controls())
+        controls.setWidgetResizable(True)
+        controls.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        controls.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        splitter.addWidget(controls)
         splitter.addWidget(self._build_plot())
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -825,7 +832,8 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         for w in (self.logy, self.rq4, self.show_err):
             w.toggled.connect(self.redraw)
         v.addWidget(disp)
-        v.addWidget(self._build_fit_box())
+        # the fit tools get most of the height the window has to spare
+        v.addWidget(self._build_fit_box(), 2)
 
         self.status = QtWidgets.QLabel()
         self.status.setWordWrap(True)

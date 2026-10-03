@@ -42,6 +42,9 @@ DREAM_STARTS = [('Latin hypercube', None), ('DE population', 'de'),
                 ('current values', 'current'),
                 ('multistart minimum', 'multistart')]
 MS_METHODS = [('L-BFGS-B', 'lbfgs'), ('short DE', 'de')]
+# height (px) a tool-box page keeps however short the window; taller pages
+# scroll
+FIT_PAGE_MIN = 200
 # chi^2/N of an optimum above which DREAM's error scale is ticked
 SIGMA_SUGGEST = 2.0
 
@@ -187,7 +190,7 @@ class FitPanel:
         row.addStretch(1)
         row.addWidget(self.btn_revert)
         f.addRow(row)
-        self.fit_tools.addItem(page, 'Fit — general')
+        self._add_page(page, 'Fit — general')
 
         # -- differential evolution
         page, f = self._page()
@@ -226,25 +229,32 @@ class FitPanel:
         self._fit_warnings = ''        # html, shown above the fit report
         self._grid_choice = {}         # dataset -> channel of its Licorne Q
         self.fit_window = None         # DEWindow, made by the first fit
-        self.fit_tools.addItem(page, 'Fit — differential evolution')
+        self._add_page(page, 'Fit — differential evolution')
 
         # -- multistart
-        self.fit_tools.addItem(self._build_multistart_page(),
-                               'Fit — multistart')
+        self._add_page(self._build_multistart_page(), 'Fit — multistart')
 
         # -- DREAM
-        self.fit_tools.addItem(self._build_dream_page(),
-                               'Fit — Bayesian (DREAM)')
+        self._add_page(self._build_dream_page(), 'Fit — Bayesian (DREAM)')
         self.fit_tools.setCurrentIndex(1)
-        # room for the tallest page: the tool box would scroll it otherwise
+        # every page title stays on screen: the pages scroll when the
+        # window is too short for them (FIT_PAGE_MIN at least is kept)
         tabs = sum(b.sizeHint().height() + 2 for b in
                    self.fit_tools.findChildren(QtWidgets.QAbstractButton)
                    if b.parent() is self.fit_tools)
-        self.fit_tools.setMinimumHeight(tabs + max(
-            self.fit_tools.widget(i).sizeHint().height()
-            for i in range(self.fit_tools.count())))
+        self.fit_tools.setMinimumHeight(tabs + FIT_PAGE_MIN)
         self.fit_tools.setEnabled(self.simulation is not None)
         return self.fit_tools
+
+    def _add_page(self, page, title):
+        """A tool-box page in a scroll area (vertical only)."""
+        area = QtWidgets.QScrollArea()
+        area.setWidget(page)
+        area.setWidgetResizable(True)
+        area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        area.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.fit_tools.addItem(area, title)
 
     def _build_multistart_page(self):
         """The multistart page: local fits from the current values and
@@ -286,7 +296,7 @@ class FitPanel:
         self.ms_table.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.ms_table.verticalHeader().setVisible(False)
-        self.ms_table.setMinimumHeight(150)
+        self.ms_table.setMinimumHeight(90)
         self.ms_table.setToolTip(
             'Distinct minima, best first: cost, how many starts ended there, '
             'whether the current values did, the parameters held by a '
