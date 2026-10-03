@@ -99,3 +99,16 @@ def test_session_A_has_repeated_Q():
     Q = np.loadtxt(folder / 'q.dat', comments='#', ndmin=2)[:, 0]
     rep = Q[1:][np.diff(Q) == 0]
     assert np.allclose(rep, [0.0226139, 0.0617789], rtol=1e-5)
+
+
+@pytest.mark.slow
+def test_session_B_dream_defaults():
+    """DREAM with sample()'s defaults (8 chains, snooker, tempered burn-in)
+    on B's 7 parameters finds the minimum every start finds and converges
+    (at the old defaults: chi^2/N 13.29, R-hat <= 1.09)."""
+    from fit.dream.dream_fit import PosteriorProblem, sample
+    p, _ = problem('session_B', VARY_B)
+    pp = PosteriorProblem(p)
+    r = sample(pp, n_gen=8000, seed=1, stop_when_converged=False)
+    assert pp.chi2_per_point(r.best()[0]) <= 13.30
+    assert r.rhat_history[-1][1].max() <= 1.1

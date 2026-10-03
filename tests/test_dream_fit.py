@@ -19,6 +19,9 @@ from fit.dream.dream_fit import (SIGMA_NAME, format_summary, load_result,  # noq
 from fit.de.de_fit import run_de                           # noqa: E402
 from model.polarisation import channel_pair, in_plane      # noqa: E402
 
+# the sampler settings these tests were written for (sample's defaults
+# before the snooker and the tempered burn-in): their meaning and runtime
+OLD = dict(n_chains=3, p_snooker=0.0, beta_start=1.0, rhat_target=1.2)
 Q = np.linspace(0.006, 0.15, 150)
 N = in_plane(0.0)
 TRUTH = dict(thickness=80.0, MSLD_rho=5e-6, roughness_sigma=4.0)
@@ -77,7 +80,7 @@ def within3sd(rows, name, value):
 def noise_free():
     data = measure(film(), ['++', '--', '+-', '-+'])
     pp = posterior_problem(free(film()), data)
-    return pp, sample(pp, n_gen=8000, seed=1, stop_when_converged=False)
+    return pp, sample(pp, **OLD, n_gen=8000, seed=1, stop_when_converged=False)
 
 
 def test_noise_free_recovers_truth(noise_free):
@@ -90,7 +93,7 @@ def test_noise_free_recovers_truth(noise_free):
         assert abs(r['median'] - truth[name]) < 0.2 * sd, r
         assert r['rhat'] < 1.2
     assert best['chi2'] < 1e-3
-    assert posterior_warnings(res, pp.bounds) == []
+    assert posterior_warnings(res, pp.bounds, rhat_max=1.2) == []
     assert 'Fe.thickness' in format_summary(res, pp)
 
 
@@ -100,7 +103,7 @@ def noisy():
     truth = film(scale=0.97, background=2e-6)
     data = measure(truth, ['+', '-'], np.random.default_rng(5))
     pp = posterior_problem(free(film(), ('scale', 'background')), data)
-    return pp, sample(pp, n_gen=10000, seed=2, stop_when_converged=False)
+    return pp, sample(pp, **OLD, n_gen=10000, seed=2, stop_when_converged=False)
 
 
 def test_nuisance_parameters_contain_truth(noisy):
@@ -137,7 +140,7 @@ def test_sigma_free_finds_underestimated_errors():
         d['dR'] = d['dR'] / 2
     pp = posterior_problem(free(film(), ()), data, sigma_free=True)
     assert pp.names[-1] == SIGMA_NAME and pp.bounds[-1] == (-1.0, 1.0)
-    res = sample(pp, n_gen=4000, seed=4, min_gen_after_converged=1000)
+    res = sample(pp, **OLD, n_gen=4000, seed=4, min_gen_after_converged=1000)
     s = res.samples(0.5)[:, -1]
     assert abs(np.median(s) - np.log10(2)) < 0.05
 
@@ -176,8 +179,8 @@ def test_pickle_and_seed():
     back = pickle.loads(pickle.dumps(pp))
     x = np.array([79.0, 4.5e-6, 3.0])
     assert back(x) == pp(x)
-    a = sample(pp, n_gen=300, seed=7, stop_when_converged=False)
-    b = sample(back, n_gen=300, seed=7, stop_when_converged=False)
+    a = sample(pp, **OLD, n_gen=300, seed=7, stop_when_converged=False)
+    b = sample(back, **OLD, n_gen=300, seed=7, stop_when_converged=False)
     assert np.array_equal(a.chains, b.chains)
 
 
@@ -187,14 +190,14 @@ def test_cancel_returns_partial():
     def cb(t, X, logp, rhat):
         seen.append(X)
         return t >= 50
-    res = sample(small_problem(), n_gen=1000, seed=0, callback=cb)
+    res = sample(small_problem(), **OLD, n_gen=1000, seed=0, callback=cb)
     assert res.generations[-1] == 50 and len(res.acceptance) == 50
     assert seen[0].shape == (3, 3) and 60 <= seen[0][0, 0] <= 100
 
 
 def test_save_load_round_trip(tmp_path):
     pp = small_problem()
-    res = sample(pp, n_gen=400, seed=0, stop_when_converged=False)
+    res = sample(pp, **OLD, n_gen=400, seed=0, stop_when_converged=False)
     f = tmp_path / 'run.npz'
     save_result(f, res, pp, sources=['a.dat', 'b.dat'])
     back, meta = load_result(f)
@@ -212,7 +215,7 @@ def test_save_load_round_trip(tmp_path):
 
 def test_de_start():
     pp = small_problem()
-    res = sample(pp, n_gen=200, seed=0, x0='de', stop_when_converged=False,
+    res = sample(pp, **OLD, n_gen=200, seed=0, x0='de', stop_when_converged=False,
                  de_options=dict(maxiter=30))
     # every chain starts at a DE population member: near the optimum
     assert np.all(np.abs(res.chains[0][:, 0] - 80.0) < 5.0)
@@ -225,7 +228,7 @@ def test_load_run_rebuilds_the_problem(tmp_path):
     data[1]['dR'][:5] = 0.0                 # dR <= 0: |R| used, as fitted
     pp = posterior_problem(free(film(), ('scale', 'background')), data,
                            sigma_free=True)
-    res = sample(pp, n_gen=300, seed=0, stop_when_converged=False)
+    res = sample(pp, **OLD, n_gen=300, seed=0, stop_when_converged=False)
     f = tmp_path / 'run.npz'
     save_result(f, res, pp)
     back, problem, meta = load_run(f)
@@ -249,8 +252,8 @@ def test_continue_equals_one_run(tmp_path):
     """Stop a run, continue it (also from a saved file): the chains are
     those of one uninterrupted run."""
     pp = small_problem()
-    full = sample(pp, n_gen=400, seed=3, stop_when_converged=False)
-    part = sample(pp, n_gen=400, seed=3, stop_when_converged=False,
+    full = sample(pp, **OLD, n_gen=400, seed=3, stop_when_converged=False)
+    part = sample(pp, **OLD, n_gen=400, seed=3, stop_when_converged=False,
                   callback=lambda t, *a: t >= 150)
     assert part.generations[-1] == 150
     assert part.state['cancelled'] and part.state['n_gen'] == 400
@@ -271,3 +274,65 @@ def test_continue_equals_one_run(tmp_path):
     assert np.array_equal(more.chains[:len(full.chains)], full.chains)
     with pytest.raises(ValueError, match='exceed'):
         sample(pp, n_gen=400, resume=full)
+
+
+# -- the new defaults: start options, chains in different minima --------------
+def test_current_start():
+    pp = small_problem(sigma_free=True)
+    from fit.dream.dream_fit import _current_start
+    X = _current_start(pp, 8, seed=0)
+    cur = np.r_[[p[2] for p in pp.fit.params], 0.0]
+    assert X.shape == (8, 4) and len(np.unique(X, axis=0)) == 8
+    assert np.all(np.abs(X - cur) <= 0.01 * (pp.hi - pp.lo))
+
+
+def test_chi2_from_logp():
+    pp = small_problem(sigma_free=True)
+    X = np.array([[80.0, 5e-6, 4.0, 0.0], [78.0, 4.6e-6, 3.0, 0.3]])
+    lp = np.array([pp(x) for x in X])
+    assert np.allclose(pp.chi2_from_logp(X, lp),
+                       [pp.chi2_per_point(x) for x in X], rtol=1e-8)
+
+
+def test_tempered_run_saved_and_continued(tmp_path):
+    """The new defaults (8 chains, snooker, tempered burn-in): a run stopped
+    in its tempered phase, saved and loaded, continues as if it had not
+    stopped."""
+    pp = small_problem()
+    full = sample(pp, n_gen=400, seed=3, stop_when_converged=False)
+    assert full.chains.shape[1] == 8
+    part = sample(pp, n_gen=400, seed=3, stop_when_converged=False,
+                  callback=lambda t, *a: t >= 20)
+    save_result(tmp_path / 'r.npz', part, pp)
+    back, problem, _ = load_run(tmp_path / 'r.npz')
+    assert back.state['beta_start'] == 1e-3 and back.state['p_snooker'] == 0.1
+    cont = sample(problem, n_gen=400, resume=back, stop_when_converged=False)
+    assert np.array_equal(cont.chains, full.chains)
+
+
+def test_split_chains_reported():
+    """Chains whose mean log p differ by more than 10 nats sit in minima of
+    different depth (session A: chi^2/N 12 against 6): reported however
+    R-hat reads.  TWO_MODES's two modes are equally deep (0.85 nats
+    apart): all chains in one mode or split between them, log p cannot
+    tell (R-hat sees the split, nothing sees one mode)."""
+    from fit.dream.dream import DreamResult, dream
+    from fit.dream.dream_fit import chains_split
+    from test_dream_sampler import two_modes
+    rng = np.random.default_rng(0)
+    gens = np.arange(0, 2001, 10)
+    logp = rng.normal(0.0, 2.0, (len(gens), 8)) - 50.0
+    logp[:, :3] -= 15.0                              # 3 chains 15 nats down
+    split = DreamResult(chains=rng.random((len(gens), 8, 2)), logp=logp,
+                        generations=gens, acceptance=np.full(2000, 0.2),
+                        rhat_history=[(2000, np.array([1.01, 1.02]))],
+                        adapt_until=200, names=['a', 'b'])
+    assert chains_split(split)
+    assert any('different minima' in w for w in posterior_warnings(split))
+    logp[:, :3] += 15.0
+    assert not chains_split(split)
+    x0 = 0.75 + rng.normal(0, 0.01, (8, 10))
+    r = dream(two_modes, [(0, 1)] * 10, n_gen=3000, n_chains=8,
+              vectorized=True, seed=1, x0=x0)
+    assert not chains_split(r)
+    assert not any('different minima' in w for w in posterior_warnings(r))

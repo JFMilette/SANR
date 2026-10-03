@@ -7,8 +7,10 @@ max R-hat), Stop, and its results, all drawn with pyqtgraph:
               warnings are shown under the tabs
   Traces      one parameter (or log p) at a time, chosen in a combo: every
               chain against generation, the adaptation phase shaded, and
-              the histogram of the kept samples beside it.  Updated live
-              while the run goes on (from a thinned copy of the chains).
+              the histogram of the kept samples beside it, and with log p
+              each chain's current chi^2/N (chains in different minima
+              show at once).  Updated live while the run goes on (from a
+              thinned copy of the chains).
   Corner      the correlation matrix of all parameters (click a cell to pick
               a pair, hover to read it) and the pair chosen: 2-D histogram
               with both marginals.  Updated live (provisional, from the
@@ -36,9 +38,9 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from fit.dream.dream_fit import (SIGMA_NAME, format_summary, posterior_warnings,
-                         predictive_bands, profile_bands, sample, save_result,
-                         summary_table)
+from fit.dream.dream_fit import (SIGMA_NAME, chains_split, format_summary,
+                         posterior_warnings, predictive_bands, profile_bands,
+                         sample, save_result, summary_table)
 import style
 from tabs.simulation import (CH_COLOURS, HP_COLOURS, PARAM_DISPLAY,
                              PROFILE_QUANTITIES, shown_names)
@@ -243,6 +245,7 @@ class TracePanel(QtWidgets.QWidget):
         self.adapt.setZValue(-10)
         self.p.addItem(self.adapt)
         self.curves, self.bars = [], None
+        self.chain_chi2 = None           # chi^2/N of each chain, last state
 
         v = QtWidgets.QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -257,7 +260,7 @@ class TracePanel(QtWidgets.QWidget):
             self.combo.setCurrentIndex((self.combo.currentIndex() + k) % n)
 
     def clear(self):
-        self.infos, self.data = [], None
+        self.infos, self.data, self.chain_chi2 = [], None, None
         self.combo.blockSignals(True)
         self.combo.clear()
         self.combo.blockSignals(False)
@@ -333,6 +336,9 @@ class TracePanel(QtWidgets.QWidget):
                                                      q[2] - q[1])
         if k > 0 and rhat is not None:
             text += '    R̂ = %.3f' % rhat[k - 1]
+        if k == 0 and self.chain_chi2 is not None:
+            text += '    χ²/N per chain now: %s' % ', '.join(
+                '%.4g' % c for c in self.chain_chi2)
         self.info.setText(text)
         if k == 0:                        # the first log p are far below
             fin = logp[np.isfinite(logp)]
@@ -906,6 +912,7 @@ class DreamWindow(QtWidgets.QWidget):
     def snapshot(self, gens, X, logp, rhat):
         if self.result is not None:            # a late one after the end
             return
+        self._chain_chi2(X[-1], logp[-1])
         self.trace.set_data(gens, X, logp, rhat)
         self._live = (gens, X)
         if self.tabs.currentWidget() is self.pages['Corner'] and \
@@ -946,6 +953,7 @@ class DreamWindow(QtWidgets.QWidget):
         rhat = result.rhat_history[-1][1] if result.rhat_history else None
         self.trace.adapt_until = result.adapt_until
         self.trace.adapt.setRegion((0, result.adapt_until))
+        self._chain_chi2(result.chains[-1], result.logp[-1])
         self.trace.set_data(result.generations, result.chains, result.logp,
                             rhat)
         self.btn_save.setEnabled(True)
@@ -968,15 +976,17 @@ class DreamWindow(QtWidgets.QWidget):
         # the run's own convergence target (1.2 for runs saved without one)
         target = float((result.state or {}).get('rhat_target', 1.2))
         warn = posterior_warnings(result, self.problem.bounds,
-                                  rhat_max=target)
+                                  rhat_max=target, problem=self.problem)
         head = ''.join(['Warnings:\n'] + ['  • %s\n' % w for w in warn]
                        + ['\n']) if warn else ''
         self.summary.setPlainText(
             shown_names(head + format_summary(result, self.problem)))
-        ok = rhat is not None and bool(np.all(rhat < target))
+        split = chains_split(result)
+        ok = rhat is not None and bool(np.all(rhat < target)) and not split
         text = '<span style="color:%s">● %s</span>' % (
             (OK, 'Converged: R̂ &lt; %g for every parameter' % target) if ok
-            else (BAD, 'Not converged (R̂ target %g)' % target))
+            else (BAD, 'Not converged: chains in different minima' if split
+                  else 'Not converged (R̂ target %g)' % target))
         if warn:
             text += ('&nbsp;&nbsp;&nbsp;<span style="color:%s">%d warning%s '
                      '— see Summary</span>'
@@ -987,6 +997,13 @@ class DreamWindow(QtWidgets.QWidget):
         for page in self.pages.values():
             page.widget(0).setText('Computing…')
         self._draw_tab(self.tabs.currentIndex())
+
+    def _chain_chi2(self, X, logp):
+        """Each chain's chi^2/N at states X (N, d) for the trace page."""
+        try:
+            self.trace.chain_chi2 = self.problem.chi2_from_logp(X, logp)
+        except Exception:                     # e.g. a run of another problem
+            self.trace.chain_chi2 = None
 
     def fail(self, msg):
         self.btn_stop.setEnabled(False)

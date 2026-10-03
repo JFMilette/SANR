@@ -15,12 +15,18 @@ evaluated (exception, non-finite R) has log-likelihood -inf.  The
 polarisation of each channel is fixed (the Simulation tab's pairs, or the
 channel's own).
 
-SAMPLING -- sample() runs DREAM(ZS) (archive=True, 3 chains) or classic
-DREAM in the normalised coordinates u in [0, 1]^d of FitProblem (so SLDs
-~1e-6 and thicknesses ~100 are on one footing), and returns the chains in
-physical units.  The first 10 % of the generations (dream adapt_until) are
-the adaptation phase and are never used as posterior samples, also when
-x0='de' starts the chains from the DE optimum's final population.
+SAMPLING -- sample() runs DREAM(ZS) (archive=True: 8 chains, snooker
+updates with p_snooker 0.1 and a tempered burn-in from beta_start 1e-3, see
+fit.dream.dream) or classic DREAM in the normalised coordinates u in
+[0, 1]^d of FitProblem (so SLDs ~1e-6 and thicknesses ~100 are on one
+footing), and returns the chains in physical units.  The first 10 % of the
+generations (dream adapt_until) are the adaptation phase and are never used
+as posterior samples, also when x0 starts the chains from the DE optimum's
+final population ('de') or around the current values ('current').  Three
+plain chains (the defaults before) can all settle in one of two modes with
+R-hat ~ 1 (tests/test_dream_sampler.py TWO_MODES); chains in different
+minima are reported by posterior_warnings, chains all in the wrong one
+cannot be told from R-hat or log p.
 
 RESULTS -- save_result / load_result (.npz), summary_table, derived, and
 the bands the plots draw: predictive_bands (model R and spin asymmetry of
@@ -146,6 +152,21 @@ class PosteriorProblem:
         x = np.asarray(x, dtype=float)[:len(self.fit.params)]
         return self.fit(self.fit.to_u(x))
 
+    def chi2_from_logp(self, x, logp):
+        """chi^2 / N of states x (n, d) from their log posterior logp (n,),
+        without evaluating the model: the likelihood's inverse (nan where
+        logp is not finite)."""
+        x = np.atleast_2d(np.asarray(x, dtype=float))
+        n = self.fit.npoints
+        log_norm = -0.5 * n * np.log(2 * np.pi) - sum(
+            np.log(e).sum() for _, e in self.data)
+        ll = np.asarray(logp, dtype=float) - np.array(
+            [self.logprior(xi) for xi in x])
+        s = 10.0 ** x[:, -1] if self.sigma_free else np.ones(len(x))
+        with np.errstate(invalid='ignore'):
+            chi2 = -2.0 * (ll - log_norm + n * np.log(s)) * s**2
+        return np.where(np.isfinite(chi2), chi2 / n, np.nan)
+
     def to_x(self, u):
         return self.lo + np.asarray(u) * (self.hi - self.lo)
 
@@ -182,17 +203,35 @@ def _de_start(problem, n_chains, seed, de_options):
     return x0
 
 
+def _current_start(problem, n_chains, seed):
+    """n_chains jittered copies of the problem's current values (physical
+    units): N(0, 0.002 (hi - lo)) each, clipped to the bounds; the sigma
+    parameter, if any, around 0."""
+    rng = np.random.default_rng(seed)
+    u = problem.fit.x0()
+    if problem.sigma_free:                    # s = 0: the measured dR
+        u = np.r_[u, -problem.lo[-1] / (problem.hi[-1] - problem.lo[-1])]
+    U = np.clip(u + rng.normal(0.0, 0.002, (n_chains, len(u))), 0.0, 1.0)
+    return problem.to_x(U)
+
+
 def sample(problem, *, n_gen=30000, archive=True, n_chains=None, x0=None,
            n_workers=1, seed=None, stop_when_converged=True,
            min_gen_after_converged=5000, callback=None, de_options=None,
-           resume=None, rhat_target=1.2):
+           resume=None, rhat_target=1.1, p_snooker=0.1, beta_start=1e-3,
+           temper_until=None):
     """DREAM posterior sample of `problem` (a PosteriorProblem), chains in
     physical units.
 
-    x0: None (Latin hypercube in the bounds), an (n_chains, d) array, or
+    x0: None (Latin hypercube in the bounds), an (n_chains, d) array,
         'de' to start from the best members of a fit.de.de_fit.run_de final
-        population (run with de_options).  The DREAM(ZS) archive is still
-        seeded from the prior, and the adaptation phase is still discarded.
+        population (run with de_options), or 'current' for jittered copies
+        of the current values (_current_start).  The DREAM(ZS) archive is
+        still seeded from the prior, and the adaptation phase is still
+        discarded.
+    p_snooker: snooker updates (archive only; 0 without it).
+    beta_start, temper_until: the tempered burn-in of fit.dream.dream
+        (beta_start 1: none).
     n_workers > 1 evaluates the chains of each generation in that many
         'spawn' processes.
     callback(generation, X, logp, rhat or None) is called after every
@@ -217,11 +256,16 @@ def sample(problem, *, n_gen=30000, archive=True, n_chains=None, x0=None,
                              % (state['d'], problem.ndim))
         n_chains, archive, x0 = state['N'], state['archive'], None
     if n_chains is None:
-        n_chains = 3 if archive else max(7, problem.ndim + 1)
+        n_chains = 8 if archive else max(7, problem.ndim + 1)
+    if not archive:
+        p_snooker = 0.0
     if isinstance(x0, str):
-        if x0 != 'de':
-            raise ValueError("x0 must be None, an array or 'de'")
-        x0 = _de_start(problem, n_chains, seed, de_options)
+        if x0 == 'de':
+            x0 = _de_start(problem, n_chains, seed, de_options)
+        elif x0 == 'current':
+            x0 = _current_start(problem, n_chains, seed)
+        else:
+            raise ValueError("x0 must be None, an array, 'de' or 'current'")
     u0 = None if x0 is None else np.clip(problem.to_u(x0), 0.0, 1.0)
 
     def cb(t, U, logp, pCR, rhat):
@@ -231,13 +275,16 @@ def sample(problem, *, n_gen=30000, archive=True, n_chains=None, x0=None,
     try:
         if n_workers > 1:
             pool = multiprocessing.get_context('spawn').Pool(n_workers)
-        res = dream(_Unit(problem), [(0.0, 1.0)] * problem.ndim, n_gen,
+        unit = _Unit(problem)
+        res = dream(unit, [(0.0, 1.0)] * problem.ndim, n_gen,
                     n_chains, names=list(problem.names), archive=archive,
                     x0=u0, map_func=pool.map if pool else map, seed=seed,
                     stop_when_converged=stop_when_converged,
                     min_gen_after_converged=min_gen_after_converged,
                     callback=cb if callback is not None else None,
-                    resume=state, rhat_target=rhat_target)
+                    resume=state, rhat_target=rhat_target,
+                    p_snooker=p_snooker, beta_start=beta_start,
+                    temper_until=temper_until, logpdf_split=unit.split)
     finally:
         if pool is not None:
             pool.terminate()
@@ -426,12 +473,41 @@ def derived(result, func, discard=0.5):
     return np.array([func(x) for x in result.samples(discard)])
 
 
-def posterior_warnings(result, bounds=None, discard=0.5, rhat_max=1.2,
-                       acc_min=0.05, edge=0.01, edge_frac=0.05):
-    """Texts for: R-hat above rhat_max at the end, acceptance below acc_min
-    after adaptation, a parameter with more than edge_frac of its samples
-    within `edge` x its bound width of a bound (the bound cuts into the
-    posterior; only with `bounds`, e.g. PosteriorProblem.bounds)."""
+def chains_split(result, discard=0.5, split_nats=10):
+    """True when the chains' mean log posteriors over the kept samples
+    differ by more than split_nats: they sit in different minima, which
+    R-hat can miss.  Chains all in one wrong minimum are not detected
+    this way (hence the tempered burn-in of fit.dream.dream)."""
+    g_max = result.generations[-1]
+    g0 = discard * g_max if discard < 1 else discard
+    keep = result.generations >= max(g0, result.adapt_until)
+    if keep.sum() < 1 or g_max <= result.adapt_until:
+        return False
+    with np.errstate(invalid='ignore'):
+        m = result.logp[keep].mean(axis=0)
+    m = m[np.isfinite(m)]
+    return m.size > 1 and np.ptp(m) > split_nats
+
+
+def chain_chi2(result, problem, discard=0.5):
+    """chi^2 / N of each chain's best kept state."""
+    g_max = result.generations[-1]
+    g0 = discard * g_max if discard < 1 else discard
+    keep = result.generations >= max(g0, result.adapt_until)
+    lp = np.where(np.isfinite(result.logp[keep]), result.logp[keep], -np.inf)
+    best = lp.argmax(axis=0)
+    X = result.chains[keep]
+    return [problem.chi2_per_point(X[k, j]) for j, k in enumerate(best)]
+
+
+def posterior_warnings(result, bounds=None, discard=0.5, rhat_max=1.1,
+                       acc_min=0.05, edge=0.01, edge_frac=0.05,
+                       problem=None, split_nats=10):
+    """Texts for: R-hat above rhat_max at the end, chains in different
+    minima (chains_split; chi^2/N of each with `problem`), acceptance below
+    acc_min after adaptation, a parameter with more than edge_frac of its
+    samples within `edge` x its bound width of a bound (the bound cuts into
+    the posterior; only with `bounds`, e.g. PosteriorProblem.bounds)."""
     out = []
     names = result.names or []
     if result.rhat_history:
@@ -442,6 +518,11 @@ def posterior_warnings(result, bounds=None, discard=0.5, rhat_max=1.2,
                                                        ', '.join(bad)))
     else:
         out.append('No R̂ yet: the run ended within the adaptation phase.')
+    if chains_split(result, discard, split_nats):
+        per = '' if problem is None else ' (χ²/N per chain: %s)' % ', '.join(
+            '%.4g' % c for c in chain_chi2(result, problem, discard))
+        out.append('Chains sit in different minima%s: not converged, '
+                   'whatever R̂ says' % per)
     acc = result.acceptance[result.adapt_until:]
     if acc.size and acc.mean() < acc_min:
         out.append('Low acceptance after adaptation: %.3f' % acc.mean())

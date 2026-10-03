@@ -31,6 +31,9 @@ from fit.dream.dream_window import DreamThread, DreamWindow
 
 DIALOG_OPTIONS = QtWidgets.QFileDialog.Option.DontUseNativeDialog
 FIT_COSTS = [('chi2', 'χ² (weighted by dR)'), ('log', 'log R (per decade)')]
+# DREAM start (dream_fit.sample x0): label, key
+DREAM_STARTS = [('Latin hypercube', None), ('DE population', 'de'),
+                ('current values', 'current')]
 
 
 class FitPanel:
@@ -201,10 +204,11 @@ class FitPanel:
         self.dream_chains.setRange(0, 200)
         self.dream_chains.setSpecialValueText('auto')
         self.dream_chains.setToolTip(
-            'Number of chains; auto = 3 with the archive, otherwise '
+            'Number of chains; auto = 8 with the archive, otherwise '
             'max(7, d + 1).\nWith the archive any number from 2 works (R-hat '
-            'compares chains, so 1 can never converge); without it at least '
-            '7 (2δ + 1).')
+            'compares chains, so 1 can never converge), but 3 chains can all '
+            'settle in one of two minima and look converged; without it at '
+            'least 7 (2δ + 1).')
         self.dream_seed = QtWidgets.QSpinBox()
         self.dream_seed.setRange(-1, 999_999)
         self.dream_seed.setValue(-1)
@@ -215,7 +219,8 @@ class FitPanel:
         self.dream_archive.setChecked(True)
         self.dream_archive.setToolTip(
             'DREAM(ZS): jumps drawn from an archive of past states; works '
-            'with 2 chains or more (3 by default) and keeps every mode.\n'
+            'with 2 chains or more (8 by default) and keeps every mode a '
+            'chain has visited.\n'
             'Unchecked: classic DREAM with the outlier-chain test, at least 7 '
             'chains.')
         self._chains_last = 0
@@ -234,23 +239,62 @@ class FitPanel:
         self.dream_rhat.setRange(1.001, 2.0)
         self.dream_rhat.setDecimals(3)
         self.dream_rhat.setSingleStep(0.01)
-        self.dream_rhat.setValue(1.2)
+        self.dream_rhat.setValue(1.1)
         self.dream_rhat.setToolTip(
             'Converged once the Gelman-Rubin R-hat of every parameter is '
             'below this.\nUsed to stop the run (stop when converged), for '
             'the convergence flag and for the "Not converged" warning.\n'
-            '1.2 is Vrugt\'s default; 1.1 or 1.05 is stricter and needs '
-            'longer runs.')
+            '1.2 is Vrugt\'s default; 1.1 is stricter, 1.05 stricter still '
+            'and needs longer runs.')
+        self.dream_snooker = QtWidgets.QDoubleSpinBox()
+        self.dream_snooker.setRange(0.0, 0.5)
+        self.dream_snooker.setSingleStep(0.05)
+        self.dream_snooker.setDecimals(2)
+        self.dream_snooker.setValue(0.1)
+        self.dream_snooker.setToolTip(
+            'Probability of a snooker update (archive only): a chain jumps '
+            'along the line through an archive point,\nwhich helps it move '
+            'between distant modes.  0 = none.  The posterior stays exact.')
+        self.dream_temper = QtWidgets.QCheckBox('tempered burn-in')
+        self.dream_temper.setChecked(True)
+        self.dream_temper.setToolTip(
+            'During the adaptation phase the chains sample prior × '
+            'likelihood^β, β rising from β start to 1,\nso they can cross '
+            'between minima before settling; those generations are '
+            'discarded anyway.')
+        self.dream_beta = QtWidgets.QDoubleSpinBox()
+        self.dream_beta.setRange(-6.0, 0.0)
+        self.dream_beta.setSingleStep(0.5)
+        self.dream_beta.setDecimals(1)
+        self.dream_beta.setValue(-3.0)
+        self.dream_beta.setPrefix('10^')
+        self.dream_beta.setToolTip(
+            'β at the first generation (log10): 10^-3 flattens the '
+            'likelihood a thousandfold in log')
+        self.dream_temper.toggled.connect(self.dream_beta.setEnabled)
+        self.dream_start = QtWidgets.QComboBox()
+        for label, key in DREAM_STARTS:
+            self.dream_start.addItem(label, key)
+        self.dream_start.setToolTip(
+            'Where the chains start: spread over the bounds (Latin '
+            'hypercube), the final population of a DE fit with the Fit '
+            'page\'s settings,\nor jittered copies of the current values '
+            '(e.g. a fitted optimum).  The adaptation phase is discarded '
+            'either way.')
         f.addRow(self._grid([('Generations', self.dream_gen),
                              ('Chains', self.dream_chains),
                              ('Seed', self.dream_seed),
-                             ('R̂ target', self.dream_rhat)]))
+                             ('R̂ target', self.dream_rhat),
+                             ('Snooker', self.dream_snooker),
+                             ('β start', self.dream_beta)]))
+        f.addRow('Start', self.dream_start)
         opts = QtWidgets.QGridLayout()
         opts.setContentsMargins(0, 0, 0, 0)
         for k, w in enumerate((self.dream_archive, self.dream_sigma,
-                               self.dream_stop)):
+                               self.dream_stop, self.dream_temper)):
             opts.addWidget(w, k // 2, k % 2)
         f.addRow(opts)
+        self.dream_archive.toggled.connect(self.dream_snooker.setEnabled)
         f.addRow(QtWidgets.QLabel(
             '<i>χ² likelihood with the measured dR, whatever the DE '
             'cost.</i>', wordWrap=True))
@@ -488,7 +532,15 @@ class FitPanel:
             n_workers=self.fit_workers.value(),
             stop_when_converged=self.dream_stop.isChecked(),
             rhat_target=self.dream_rhat.value(),
-            min_gen_after_converged=min(5000, n_gen // 5))
+            min_gen_after_converged=min(5000, n_gen // 5),
+            p_snooker=self.dream_snooker.value(),
+            beta_start=10 ** self.dream_beta.value()
+            if self.dream_temper.isChecked() else 1.0,
+            x0=self.dream_start.currentData())
+        if options['x0'] == 'de':
+            options['de_options'] = dict(
+                maxiter=self.fit_maxiter.value(),
+                popsize=self.fit_pop.value(), tol=self.fit_tol.value())
         self._make_dream_window()
         header = ('%d parameter(s), %d points of %s (Q %.4g – %.4g Å⁻¹)'
                   % (problem.ndim, problem.fit.npoints, s['name'], qmin, qmax))
