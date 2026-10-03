@@ -1575,6 +1575,11 @@ class SimulationTab(QtWidgets.QWidget):
             if self._refl_note:
                 text += ('<br><span style="color:%s">%s</span>'
                          % (style.ERROR, html.escape(self._refl_note)))
+            res = self.stack.resolution
+            if res['enabled'] and res.get('scheme') == 'licorne':
+                text += ('<br><i>Licorne convolution: this curve depends on '
+                         'its Q grid; compare with data on the data\'s Q '
+                         '(the Experimental tab\'s live curves are)</i>')
             self.status.setText(text)
             self.status.setStyleSheet('')
             self.prof_cursor.refresh()

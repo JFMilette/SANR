@@ -395,6 +395,8 @@ class FitPanel:
                 ok &= d['R'] > 0
             if ok.any():
                 shown[ch] = {c: d[c][ok] for c in ('Q', 'R', 'dR', 'dQ')}
+        # imported here: tabs.experimental imports this module
+        from tabs.experimental import model_grid
         if self.fit_window is None:
             self.fit_window = DEWindow(self)
             self.fit_window.stopRequested.connect(self.stop_fit)
@@ -402,7 +404,8 @@ class FitPanel:
         # the model's other channels use the Simulation tab's pairs
         self.fit_window.start(
             problem, shown, dict(self.sim_vectors(), **vec),
-            np.linspace(qmin, qmax, sim.nq.value()), s['name'],
+            model_grid(sim.stack, np.linspace(qmin, qmax, sim.nq.value()),
+                       s['channels'], grid), s['name'],
             'χ²' if problem.cost == 'chi2' else 'cost (log R)',
             polish=self.fit_polish.isChecked())
         self.btn_window.setEnabled(True)

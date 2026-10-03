@@ -238,17 +238,18 @@ class DEWindow(QtWidgets.QWidget):
         return box
 
     # -- fit lifecycle (called by the Experimental tab) ---------------------
-    def start(self, problem, data, vectors, Q, title, cost_label,
+    def start(self, problem, data, vectors, grids, title, cost_label,
               polish=True):
         """A new fit: problem is the FitProblem the thread will run (copy its
         stack now, before the thread starts), data the fitted points
         {channel: dict(Q, R, dR, dQ)}, vectors the {channel: [Pi, Pa]} of
-        every model channel, Q the grid of the model curves, polish whether
-        the fit ends with a polish."""
+        every model channel, grids the {channel: Q} of the model curves
+        (tabs.experimental.model_grid), polish whether the fit ends with a
+        polish."""
         self.problem = problem
         self.polish, self.cost_label = polish, cost_label
         self.stack = copy.deepcopy(problem.stack)
-        self.data, self.vectors, self.model_Q = data, vectors, Q
+        self.data, self.vectors, self.model_Q = data, vectors, grids
         # the fitted channels' fixed norms (Licorne's Norm_factor)
         self.norms = {name[1:]: n for (name, *_), n
                       in zip(problem.channels, problem.norms)}
@@ -361,9 +362,9 @@ class DEWindow(QtWidgets.QWidget):
             self._fill_params()
             self._draw_profile()
             # imported here: the Experimental tab imports this module
-            from tabs.experimental import simulation_channels
-            self._model = simulation_channels(self.stack, self.model_Q,
-                                              self.vectors, self.norms)
+            from tabs.experimental import model_channels
+            self._model = model_channels(self.stack, self.model_Q,
+                                         self.vectors, self.norms)
             self._redraw_reflectance()
         except Exception as exc:                      # keep the window alive
             self.status.setText('Cannot draw this entry: %s' % exc)

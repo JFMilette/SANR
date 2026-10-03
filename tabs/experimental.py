@@ -22,7 +22,11 @@ Polarisation box.
 
 The "+ Simulation" button adds a live dataset holding the simulation tab's
 channels R++, R+-, R-+, R--, R+, R- (background included, once each) on its
-Q grid, with the Simulation tab's pairs unless it has its own.  Starting a
+Q grid, with the Simulation tab's pairs unless it has its own, and the fixed
+norms of the dataset chosen in the Fit box.  With the 'licorne' resolution
+scheme a curve depends on the grid it is convolved on (model.stack
+RESOLUTION), so the live channels are then computed on that dataset's Q
+points, as the fit computes them (model_grid).  Starting a
 fit gives every live dataset the fitted channels' pairs, so what is drawn
 against the data is exactly what is fitted.  It is recomputed whenever the
 simulation changes, drawn as lines without error bars, and can be frozen
@@ -567,6 +571,41 @@ def simulation_channels(stack, Q, vectors, norms=None):
             for j, ch in enumerate(names)}
 
 
+def model_grid(stack, Q, channels=None, grid=None):
+    """{channel: Q grid} of model curves, None for any channel not listed.
+    With the 'licorne' resolution scheme the curve depends on its grid, so
+    the curves of a dataset's `channels` are computed where
+    fit.problem.FitProblem computes them: on `grid` (the fit's one chosen
+    grid) if given, else on each channel's finite Q points, any other
+    channel on the first one's.  Otherwise, or without channels, on Q (the
+    Simulation tab's grid)."""
+    res = stack.resolution
+    if not (channels and res.get('enabled') and
+            res.get('scheme') == 'licorne'):
+        return {None: Q}
+    if grid is not None:
+        return {None: np.sort(np.asarray(grid, dtype=float))}
+    out = {}
+    for ch, d in channels.items():
+        q = np.asarray(d['Q'], dtype=float)
+        out[ch] = np.sort(q[np.isfinite(q)], kind='stable')
+    out[None] = next(iter(out.values()))
+    return out
+
+
+def model_channels(stack, grids, vectors, norms=None):
+    """simulation_channels with each channel on its grid of model_grid: one
+    reflectivity call per distinct grid."""
+    groups = {}
+    for ch in vectors:
+        g = grids.get(ch, grids[None])
+        groups.setdefault(g.tobytes(), (g, {}))[1][ch] = vectors[ch]
+    out = {}
+    for g, vec in groups.values():
+        out.update(simulation_channels(stack, g, vec, norms))
+    return {ch: out[ch] for ch in PLOT_ORDER if ch in out}
+
+
 def vec_text(vec):
     Pi, Pa = vec
     fmt3 = lambda v: '(%s)' % ', '.join('%.3g' % c for c in v)
@@ -720,6 +759,8 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         layout.addWidget(splitter)
         if simulation is not None:
             simulation.reflectanceChanged.connect(self._update_live)
+            # the live curves take that dataset's norms (and Licorne grid)
+            self.fit_set.currentIndexChanged.connect(self._update_live)
             # the plotted Q range follows the Simulation tab's
             simulation.qmin.valueChanged.connect(self.redraw)
             simulation.qmax.valueChanged.connect(self.redraw)
@@ -1013,11 +1054,31 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
             return
         s = dict(name=self._unique_name('Simulation'), visible=True,
                  live=True, line=True)
-        s['channels'] = simulation_channels(sim.stack, sim.last_Q,
-                                            self.live_vectors(s))
+        s['channels'] = self._live_channels(s)
         self.sets.append(s)
         self.refresh_tree((len(self.sets) - 1, None))
         self.redraw()
+
+    def _live_channels(self, s):
+        """Channels of live dataset s: the Simulation tab's model with the
+        norms of the dataset chosen in the Fit box, on its Q points with
+        the 'licorne' resolution scheme (model_grid; the grid chosen for
+        the fit when its channels differ)."""
+        sim = self.simulation
+        i = self._set_index(self.fit_set.currentText())
+        data = None if i is None else self.sets[i]
+        channels = data['channels'] if data else None
+        grid = None
+        ch = data and self._grid_choice.get(data['name'])
+        if ch in (channels or {}):
+            grid = channels[ch]['Q']
+            grid = grid[np.isfinite(grid)]
+        norms = {c: d.get('norm', 1.0) for c, d in channels.items()} \
+            if channels else None
+        return model_channels(sim.stack,
+                              model_grid(sim.stack, sim.last_Q, channels,
+                                         grid),
+                              self.live_vectors(s), norms)
 
     def freeze_simulation(self, i):
         """Static copy of live dataset i, e.g. to compare two models."""
@@ -1037,8 +1098,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         if not live or sim.last_R is None:
             return
         for s in live:
-            s['channels'] = simulation_channels(sim.stack, sim.last_Q,
-                                                self.live_vectors(s))
+            s['channels'] = self._live_channels(s)
         sel = self._selected()
         self.refresh_tree(sel)                # point counts may have changed
         self.redraw()
@@ -1206,8 +1266,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         sim = self.simulation
         for s in self.sets:
             if s.get('live') and sim is not None and sim.last_R is not None:
-                s['channels'] = simulation_channels(sim.stack, sim.last_Q,
-                                                    self.live_vectors(s))
+                s['channels'] = self._live_channels(s)
 
         disp, fit = state.get('display', {}), state.get('fit', {})
         widgets = (self.quantity, self.logy, self.rq4, self.show_err)
