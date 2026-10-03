@@ -388,3 +388,16 @@ def test_axis_map_keeps_phi(tmp_path):
     R = licorne_axis_map(read_parameters(p), read_assignments(p))
     assert np.allclose(R @ [0, 0, 1], [1, 0, 0])            # P -> sample x
     assert abs(np.linalg.det(R) - 1) < 1e-12
+
+
+def test_generated_q_grid_noted(tmp_path):
+    """q.dat generated in Licorne while rexp*.dat come from a measured
+    file: Licorne paired the measured points with the generated Q row by
+    row, so the import says their Q are wrong."""
+    d = session_folder(tmp_path)
+    assert not any('generated Q grid' in n
+                   for n in load_licorne_session(d)['notes'])
+    q = d / 'q.dat'
+    q.write_text(q.read_text().replace('#"a.dat"', '#"<generated>"'))
+    notes = load_licorne_session(d)['notes']
+    assert sum('generated Q grid' in n and 'a.dat' in n for n in notes) == 2

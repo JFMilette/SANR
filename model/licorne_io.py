@@ -474,6 +474,14 @@ def _set_fit(stack, par):
                                'max': float(vals[2])}
 
 
+def _source(path):
+    """The file named at the start of a Licorne .dat header (#"name" ...),
+    '<generated>' for a generated grid, None if there is none."""
+    with open(path) as fh:
+        m = re.match(r'#"([^"]*)"', fh.readline())
+    return m.group(1) if m else None
+
+
 def _curve(path):
     """Values of a rexp / rtheory file: (n, ncols) array, header skipped."""
     return np.loadtxt(path, comments='#', ndmin=2)
@@ -529,6 +537,7 @@ def load_licorne_session(folder, axis_map=None):
 
     q_path = os.path.join(folder, 'q.dat')
     Q = _curve(q_path)[:, 0]
+    generated = _source(q_path) == '<generated>'
     pols, ans = _channel_rows(top)
     norms = channel_norms(top, pols, ans)
     channels, theory, seen = [], [], set()
@@ -548,6 +557,13 @@ def load_licorne_session(folder, axis_map=None):
             notes.append('Channel %d left out: no rexp%d.dat.' % (k, k))
             continue
         seen.add(ch)
+        src = _source(rexp)
+        if generated and src not in (None, '<generated>'):
+            notes.append('Channel %d: q.dat is a generated Q grid, not the Q '
+                         'of the measured file %s; Licorne paired the measured '
+                         'points with it row by row, so their Q are wrong here '
+                         'as in Licorne.  Import %s itself (Experimental tab) '
+                         'for the measured Q.' % (k, src, src))
         channels.append({'channel': ch, 'path': rexp, 'pol': pol,
                          'norm': norms[k - 1], 'k': k})
         th = os.path.join(folder, 'rtheory%d.dat' % k)
