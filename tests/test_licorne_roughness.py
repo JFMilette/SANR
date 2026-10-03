@@ -690,7 +690,7 @@ def test_fixture1_angles_collinear():
     sample x (model.licorne_io ANGLES)."""
     _, _, _, rho, th, ph = cols(fixture1())
     mag = rho != 0
-    assert np.all(th[mag] == 0.75) and np.all(ph == 0)
+    assert np.all(th[mag] == 0.25) and np.all(ph == 0)
     assert np.all(REF1[:, 5:7] == 0)
 
 

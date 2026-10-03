@@ -367,4 +367,24 @@ def test_in_plane_angles_exact():
         assert all(l.MSLD_phi == 0.0 for l in st.layers)
     st = load_licorne_model(FIX1 / 'parameters.m', FIX1 / 'profile.dat')
     assert all(l.MSLD_phi == 0.0 for l in st.layers)
-    assert {l.MSLD_theta for l in st.layers[1:-1]} == {-0.25}
+    assert {l.MSLD_theta for l in st.layers[1:-1]} == {0.25}
+
+
+def test_axis_map_keeps_phi(tmp_path):
+    '''The plane's normal may point either way (same reflectivity): the
+    import picks the one that keeps the first magnetisation at +y.  With
+    P along Licorne z and M at phi = 90, theta = 90 (along Licorne y),
+    the in-plane angle is 90, not 270.'''
+    p = tmp_path / 'parameters.m'
+    p.write_text((FIX1 / 'parameters.m').read_text()
+                 .replace('Polarization=[1,0,0; -1,0,0;',
+                          'Polarization=[0,0,1; 0,0,-1;')
+                 .replace('Layers(2).msld=[2.31522e-006,0,0];',
+                          'Layers(2).msld=[2.31522e-006,90,90];')
+                 .replace('Layers(4).msld=[3.09713e-007,0,0];',
+                          'Layers(4).msld=[3.09713e-007,90,90];'))
+    st = load_licorne_model(p)
+    assert st.layers[2].MSLD_theta == 0.25 and st.layers[2].MSLD_phi == 0
+    R = licorne_axis_map(read_parameters(p), read_assignments(p))
+    assert np.allclose(R @ [0, 0, 1], [1, 0, 0])            # P -> sample x
+    assert abs(np.linalg.det(R) - 1) < 1e-12

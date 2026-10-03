@@ -45,7 +45,12 @@ that window, model.stack 'step' with step_fallback False).  Their SVD gives
 the rank r:
   r <= 2  R = [e1; e2; n]: e1 the first polarisation (sample x), n the
           normal of their plane (smallest singular vector; for r = 1 any
-          vector perpendicular to e1), e2 = n x e1; det R = +1
+          vector perpendicular to e1), e2 = n x e1; det R = +1.  n's sign
+          is free (both are rotations, with the same reflectivity): Licorne's
+          z when it is the normal, so Licorne's angles are kept (a model in
+          Licorne's x-y plane with P along x maps to itself); otherwise the
+          sign that puts the first magnetisation not along P at +y (an
+          in-plane angle between 0 and 180 deg)
   r = 3   the vectors are not coplanar: Licorne lets a component along the
           film normal act, which specular PNR cannot see.  Refused (ValueError)
           unless axis_map is given, which then warns that the out-of-plane
@@ -213,7 +218,8 @@ def model_vectors(par, top, profile=None):
     """Unit vectors (Licorne axes) that fix the model's orientation (see
     ANGLES): magnetic layers, a non-magnetic interior layer that shares a
     rough interface with a magnetic one, the channels' P; the first P
-    (else the first M) is returned first."""
+    (else the first M) is returned first.  Returns (vectors, number of P
+    among them, which come first)."""
     rho, phi, theta = _msld(par, profile)
     lay_p = par['layers'] + [par['substrate']]
     n = len(lay_p) - 1                       # interior layers 0..n-1
@@ -224,13 +230,13 @@ def model_vectors(par, top, profile=None):
     m = [licorne_direction(phi[i], theta[i]) for i in mag + shared]
     pols, ans = _channel_rows(top)
     p = [v / np.linalg.norm(v) for v in pols + ans if np.any(v)]
-    return p + m
+    return p + m, len(p)
 
 
 def licorne_axis_map(par, top, profile=None):
     """R with m_sample = R m_Licorne (see ANGLES); ValueError for a model
     whose vectors are not coplanar."""
-    vecs = model_vectors(par, top, profile)
+    vecs, n_p = model_vectors(par, top, profile)
     if not vecs:
         return np.eye(3)
     V = np.array(vecs)
@@ -250,7 +256,16 @@ def licorne_axis_map(par, top, profile=None):
         a = np.eye(3)[np.argmin(np.abs(e1))]
         n = np.cross(a, e1)
         n /= np.linalg.norm(n)
-    n = n * np.sign(n[np.argmax(np.abs(n))])     # a fixed sign: v127 -> I
+    # the normal's sign (either is a rotation, the physics is the same):
+    # Licorne's own z when it is the normal (Licorne's angles kept, e.g.
+    # v127: R = I), else the first magnetisation not along e1 on the +y side
+    if abs(abs(n[2]) - 1) < 1e-12:
+        n = n * np.sign(n[2])
+    else:
+        e2 = np.cross(n, e1)
+        side = [v @ e2 for v in V[n_p:] if abs(v @ e2) > 1e-9]
+        if side and side[0] < 0:
+            n = -n
     R = np.vstack([e1, np.cross(n, e1), n])
     assert np.allclose(R @ R.T, np.eye(3), atol=1e-12)
     assert abs(np.linalg.det(R) - 1) < 1e-12
@@ -293,7 +308,7 @@ def load_licorne_model(parameters_m_path, profile_dat_path=None,
         R = np.asarray(axis_map, dtype=float)
         if R.shape != (3, 3) or not np.allclose(R @ R.T, np.eye(3)):
             raise ValueError('axis_map must be an orthogonal 3x3 matrix')
-        if _out_of_plane(R, model_vectors(par, top, tab)) > 1e-9:
+        if _out_of_plane(R, model_vectors(par, top, tab)[0]) > 1e-9:
             warnings.warn('axis_map leaves magnetisations or polarisations '
                           'out of the film plane: that component is not seen '
                           'here (HALPERIN), Licorne used it', stacklevel=2)
