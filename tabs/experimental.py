@@ -137,10 +137,12 @@ def find_q_file(path):
     return None
 
 
-def parse_data(lines, start, Q=None, q_shift=0.0):
+def parse_data(lines, start, Q=None, q_shift=0.0, q_mult=1.0, r_mult=1.0):
     """Parse lines[start:] into a dict of Q, R, dR, dQ, theta arrays, sorted
     by Q.  With Q=None the columns are Q R [dR dQ theta]; otherwise they are
-    R [dR dQ theta] and row i belongs to Q[i].  q_shift is added to every Q.
+    R [dR dQ theta] and row i belongs to Q[i].  Q becomes Q q_mult +
+    q_shift, R and dR are multiplied by r_mult (Licorne's Q_mult and
+    Rexp_mult, model.licorne_io FILES).
     Missing dR / dQ are zero.  Blank / comment lines are skipped; returns
     (data, n_skipped)."""
     keys = ['Q', 'R', 'dR', 'dQ', 'theta']
@@ -170,7 +172,8 @@ def parse_data(lines, start, Q=None, q_shift=0.0):
     # absent errors / resolution count as zero, absent theta stays NaN
     for j in (2, 3):
         a[:, j] = np.where(np.isnan(a[:, j]), 0.0, a[:, j])
-    a[:, 0] += q_shift
+    a[:, 0] = a[:, 0] * q_mult + q_shift
+    a[:, 1:3] *= r_mult
     a = a[np.argsort(a[:, 0])]
     return {k: a[:, i] for i, k in enumerate(['Q', 'R', 'dR', 'dQ',
                                               'theta'])}, skipped
@@ -723,15 +726,18 @@ def find_file(ref, base):
     raise OSError('not found: %s' % ref['path'])
 
 
-def read_channel(ref, q_ref, start, base, q_shift=0.0):
-    """An imported channel read again, as the import dialog read it."""
+def read_channel(ref, q_ref, start, base, q_shift=0.0, q_mult=1.0,
+                 r_mult=1.0):
+    """An imported channel read again, as the import dialog read it (with
+    a Licorne session's Q_mult / Rexp_mult)."""
     path = find_file(ref, base)
     q_path = find_file(q_ref, base) if q_ref else None
     with open(path, errors='replace') as f:
         lines = f.read().splitlines()
     Q = read_q_file(q_path) if q_path else None
-    data, _ = parse_data(lines, start, Q, q_shift)
-    return dict(data, path=path, q_path=q_path, start=start, q_shift=q_shift)
+    data, _ = parse_data(lines, start, Q, q_shift, q_mult, r_mult)
+    return dict(data, path=path, q_path=q_path, start=start, q_shift=q_shift,
+                q_mult=q_mult, r_mult=r_mult)
 
 
 # ------------------------------------------------- experimental tab ----
@@ -907,6 +913,13 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                 if d.get('norm', 1.0) != 1.0:
                     tip += '\nnorm = %g (fixed factor on the model, ' \
                            'Licorne Norm_factor)' % d['norm']
+                if d.get('q_mult', 1.0) != 1.0 or d.get('r_mult', 1.0) != 1.0:
+                    tip += '\nQ × %g, R and dR × %g (Licorne Q_mult, ' \
+                           'Rexp_mult)' % (d.get('q_mult', 1.0),
+                                           d.get('r_mult', 1.0))
+                if not d.get('fit', True):
+                    it.setForeground(0, QtGui.QColor(style.DISABLED))
+                    tip += '\nnot fitted (Licorne ExpFit = 0)'
                 it.setToolTip(0, tip)
                 top.addChild(it)
                 if select == (i, ch):
@@ -1207,8 +1220,10 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                                  q_file=file_ref(d['q_path'], base)
                                  if d.get('q_path') else None,
                                  start=d['start'])
-                        if d.get('q_shift'):
-                            c['q_shift'] = d['q_shift']
+                        for k in ('q_shift', 'q_mult', 'r_mult'):
+                            if d.get(k, 1.0 if k != 'q_shift' else 0.0) \
+                                    != (0.0 if k == 'q_shift' else 1.0):
+                                c[k] = d[k]
                     else:                       # computed, no file to re-read
                         c = dict(values={k: d[k] for k in ('Q', 'R', 'dR',
                                                            'dQ')},
@@ -1216,6 +1231,8 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                     c['pol'] = d.get('pol')
                     if d.get('norm', 1.0) != 1.0:
                         c['norm'] = d['norm']
+                    if not d.get('fit', True):
+                        c['fit'] = False
                     e['channels'][ch] = c
             sets.append(e)
         return dict(
@@ -1256,12 +1273,15 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                     try:
                         d = read_channel(c['file'], c.get('q_file'),
                                          c['start'], base,
-                                         float(c.get('q_shift', 0.0)))
+                                         float(c.get('q_shift', 0.0)),
+                                         float(c.get('q_mult', 1.0)),
+                                         float(c.get('r_mult', 1.0)))
                     except (OSError, ValueError) as exc:
                         missing.append('%s — R%s: %s' % (e['name'], ch, exc))
                         continue
                 s['channels'][ch] = dict(d, pol=c.get('pol'),
-                                         norm=float(c.get('norm', 1.0)))
+                                         norm=float(c.get('norm', 1.0)),
+                                         fit=bool(c.get('fit', True)))
             self.sets.append(s)
         sim = self.simulation
         for s in self.sets:

@@ -171,7 +171,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         data = {c['channel']: dict(file=file_ref(c['path'], folder),
                                    q_file=file_ref(lic['q_path'], folder),
-                                   start=1, pol=own(c), norm=c['norm'])
+                                   start=1, pol=own(c), norm=c['norm'],
+                                   q_mult=c['q_mult'], r_mult=c['r_mult'],
+                                   fit=c['fit'])
                 for c in lic['channels']}
         theory = {c['channel']: dict(
             values=dict(Q=c['Q'], R=c['R'], dR=np.zeros_like(c['R']),

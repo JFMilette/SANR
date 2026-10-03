@@ -55,9 +55,11 @@ def load(folder, vary=None, untie=False):
     Q = np.loadtxt(os.path.join(folder, 'q.dat'), comments='#')
     data = []
     for c in lic['channels']:
-        E = np.loadtxt(c['path'], comments='#')
+        # raw files: Licorne's Q_mult and Rexp_mult apply
+        E = np.loadtxt(c['path'], comments='#') * c['r_mult']
         P = c['pol'][1]
-        data.append(dict(Q=Q, R=E[:, 0], dR=E[:, 1], P0=np.array(c['pol'][0]),
+        data.append(dict(Q=Q * c['q_mult'], R=E[:, 0], dR=E[:, 1],
+                         P0=np.array(c['pol'][0]),
                          P=None if not np.any(P) else np.array(P),
                          name='R' + c['channel'], norm=c['norm']))
     with warnings.catch_warnings():

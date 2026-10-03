@@ -422,3 +422,83 @@ def test_generated_q_grid_noted(tmp_path):
     q.write_text(q.read_text().replace('#"a.dat"', '#"<generated>"'))
     notes = load_licorne_session(d)['notes']
     assert sum('generated Q grid' in n and 'a.dat' in n for n in notes) == 2
+
+
+# -- parameters.m settings Licorne applies on use (Q_mult, Rexp_mult, QLims,
+#    ExpFit, ResolutionFun) ---------------------------------------------------
+def edited_session(tmp_path, **lines):
+    """session_folder with top-level lines of parameters.m replaced, e.g.
+    Q_mult='1.01' (None: line removed)."""
+    d = session_folder(tmp_path)
+    p = d / 'parameters.m'
+    text = p.read_text()
+    for key, value in lines.items():
+        text = re.sub(r'(?m)^%s=.*;\n' % key,
+                      '' if value is None else '%s=%s;\n' % (key, value),
+                      text)
+    p.write_text(text)
+    return d
+
+
+def test_q_mult_rexp_mult(tmp_path):
+    """q.dat and rexp are raw; Licorne multiplies on use."""
+    d = edited_session(tmp_path, Q_mult='1.01',
+                       Rexp_mult='[2,1,1,1,1,1]')
+    s = load_licorne_session(d)
+    Q = np.linspace(0.01, 0.2, 5)
+    assert [(c['q_mult'], c['r_mult']) for c in s['channels']] == \
+        [(1.01, 2.0), (1.01, 1.0)]
+    assert np.array_equal(s['theory'][0]['Q'], np.array(
+        ['%g' % q for q in Q], dtype=float) * 1.01)
+    assert s['qrange'] == pytest.approx((0.0101, 0.202))    # QLims 0.22
+    assert any('applied' in n for n in s['notes'])
+    from tabs.experimental import file_ref, read_channel
+    c = read_channel(file_ref(d / 'rexp1.dat', d), file_ref(d / 'q.dat', d),
+                     1, str(d), q_mult=1.01, r_mult=2.0)
+    raw = np.loadtxt(d / 'rexp1.dat', comments='#')
+    order = np.argsort(np.loadtxt(d / 'q.dat', comments='#'))
+    assert np.array_equal(c['R'], 2.0 * raw[order, 0])
+    assert np.array_equal(c['dR'], 2.0 * raw[order, 1])
+    assert np.allclose(c['Q'], 1.01 * np.loadtxt(d / 'q.dat',
+                                                 comments='#')[order],
+                       rtol=1e-15, atol=0)
+
+
+def test_qlims_expfit_resolutionfun(tmp_path):
+    d = edited_session(tmp_path, QLims='[0.05,0.15]', ExpFit='[1,0,1,1,1,1]',
+                       ResolutionFun=None)
+    s = load_licorne_session(d)
+    assert s['qrange'] == (0.05, 0.15)
+    assert [c['fit'] for c in s['channels']] == [True, False]
+    assert any('not fitted (ExpFit = 0)' in n for n in s['notes'])
+    assert s['stack'].resolution['licorne_fun'] == 2
+    assert any('ResolutionFun 3' in n for n in s['notes'])
+
+
+def test_import_into_the_tabs(tmp_path):
+    """The import as the main window does it: mults, unfitted channel and
+    fit range reach the Experimental and Simulation tabs, and survive a
+    session round trip."""
+    import os
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    from PyQt6 import QtWidgets
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    import main
+    d = edited_session(tmp_path, Q_mult='1.01', Rexp_mult='[2,1,1,1,1,1]',
+                       QLims='[0.05,0.15]', ExpFit='[1,0,1,1,1,1]')
+    win = main.MainWindow()
+    lic = load_licorne_session(d)
+    assert win._restore(win._licorne_state(lic, str(d)), str(d)) == []
+    exp, sim = win.experimental, win.simulation
+    assert (sim.qmin.value(), sim.qmax.value()) == (0.05, 0.15)
+    chans = exp.sets[0]['channels']
+    raw = np.loadtxt(d / 'rexp1.dat', comments='#')
+    assert np.allclose(np.sort(chans['+']['R']), np.sort(2.0 * raw[:, 0]))
+    assert chans['+']['fit'] and not chans['-']['fit']
+    inputs = exp._fit_inputs(exp.fit_report)
+    assert [c['name'] for c in inputs[2]] == ['R+']
+    state = exp.session_state(str(d))
+    c = state['sets'][0]['channels']
+    assert c['+']['q_mult'] == 1.01 and c['+']['r_mult'] == 2.0
+    assert c['-']['fit'] is False
+    win.close()

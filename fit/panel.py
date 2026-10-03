@@ -640,10 +640,17 @@ class FitPanel:
         sim = self.simulation
         sim.recompute()                 # push the tab's settings into the stack
         s = self.sets[i]
-        vec = {ch: self.channel_vectors(s, ch) for ch in s['channels']}
+        # a channel marked not fitted (Licorne ExpFit = 0) is only shown
+        fitted = {ch: d for ch, d in s['channels'].items()
+                  if d.get('fit', True)}
+        if not fitted:
+            report.setText(self._error('Every channel of %s is marked not '
+                                       'fitted.' % s['name']))
+            return None
+        vec = {ch: self.channel_vectors(s, ch) for ch in fitted}
         data = [dict(zip(('P0', 'P'), vectors_pair(*vec[ch])), name='R' + ch,
                      Q=d['Q'], R=d['R'], dR=d['dR'], norm=d.get('norm', 1.0))
-                for ch, d in s['channels'].items()]
+                for ch, d in fitted.items()]
         grid = None
         res = sim.stack.resolution
         if res.get('enabled') and res.get('scheme') == 'licorne':
@@ -718,6 +725,8 @@ class FitPanel:
         # the fitted points (Q range, R > 0 for log R) for the fit window
         shown = {}
         for ch, d in s['channels'].items():
+            if not d.get('fit', True):
+                continue
             ok = np.isfinite(d['Q']) & np.isfinite(d['R']) & \
                 (d['Q'] >= qmin) & (d['Q'] <= qmax)
             if problem.cost == 'log':

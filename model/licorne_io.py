@@ -23,7 +23,20 @@ A saved Licorne session folder (load_licorne_session) also holds
   resolution.m           MATLAB script giving Sigma(Q); only Licorne's TOF
                          template (Theta<i>, DTheta<i>, Q<i>, DLambda) is read
 and in parameters.m the top-level Polarization / Analysis (one row per
-channel, Licorne axes, length = efficiency), Pol_num and Background.
+channel, Licorne axes, length = efficiency), Pol_num, Background, and:
+  Q_mult, Rexp_mult      q.dat and rexp<k>.dat are saved raw (licorne_cb.m
+                         9414, 9602); Licorne uses Q Q_mult everywhere,
+                         resolution included (run_refl.m 4), and R, dR of
+                         channel k times Rexp_mult(k) (licorne_cb.m 8516):
+                         the channels carry them as 'q_mult' / 'r_mult',
+                         the theory curves are on Q Q_mult
+  QLims                  the Q range Licorne fits (QPOINTS, licorne_cb.m
+                         8760): 'qrange' is QLims within q.dat's range
+  ExpFit                 ExpFit(k) = 0: channel k is shown, not fitted
+                         (licorne_cb.m 8768): its 'fit' is False
+  ResolutionFun          missing before Licorne 1.2.3: mode 2, which the
+                         saved rtheory files show; 1.4.2 would recompute
+                         such a session with 3 (read_param.m 35), noted
 
 parameters.m keeps only 5 significant figures of the NSLD (1.54e-006 against
 1.53998e-006 in profile.dat), so with profile.dat given the thickness, NSLD
@@ -79,8 +92,8 @@ note.
 NOT REPRODUCED -- reported in the session notes: Formalism 'Parratt' (SANR
 computes the supermatrix), a second incoherent fraction (Fraction < 100,
 Layers2), Q-dependent polariser / analyser efficiencies (Polarizer /
-Analyser = 1, pol.dat / an.dat; |P| of Polarization / Analysis is used),
-Q_mult / Rexp_mult other than 1 (not applied).  An 'NC' (Nevot-Croce)
+Analyser = 1, pol.dat / an.dat; |P| of Polarization / Analysis is used).
+An 'NC' (Nevot-Croce)
 interface is sharp in Licorne's supermatrix (expandrough.m skips it,
 reflection_s never reads it) and is imported as 'none'; with Formalism
 'Parratt' it is refused (NotImplementedError).
@@ -479,14 +492,14 @@ def import_notes(top):
         notes.append('Q-dependent polariser / analyser efficiency '
                      '(pol.dat / an.dat) ignored; |P| from Polarization / '
                      'Analysis is used.')
-    pols, _ = _channel_rows(top)
-    rm = top.get('Rexp_mult', [])
-    rm = rm if isinstance(rm, list) else [rm]
-    qm = top.get('Q_mult', 1.0)
-    if qm != 1 or any(float(x) != 1 for x in rm[:len(pols)]):
-        notes.append('Q_mult = %g, Rexp_mult = %s are not applied.'
-                     % (qm, [float(x) for x in rm[:len(pols)]]))
     return notes
+
+
+def _top_list(top, key, n, default):
+    """The first n entries of a top-level vector of parameters.m."""
+    v = top.get(key, [])
+    v = [float(x) for x in (v if isinstance(v, list) else [v])]
+    return [v[k] if k < len(v) else default for k in range(n)]
 
 
 def _set_fit(stack, par, notes=None):
@@ -543,9 +556,11 @@ def load_licorne_session(folder, axis_map=None):
       name      the folder's name
       q_path    q.dat
       channels  [{'channel', 'path' (rexp<k>.dat), 'pol' [Pi, Pa],
-                  'norm', 'k'}]
-      theory    [{'channel', 'path', 'Q', 'R', 'pol'}] from rtheory<k>.dat
-      qrange    (min, max) of q.dat
+                  'norm', 'k', 'q_mult', 'r_mult' (Q of q.dat, R and dR
+                  of the file are multiplied by them), 'fit' (ExpFit)}]
+      theory    [{'channel', 'path', 'Q', 'R', 'pol'}] from rtheory<k>.dat,
+                Q = q.dat times Q_mult
+      qrange    (min, max): QLims within the range of Q
       axis_map  R, m_sample = R m_Licorne (see ANGLES)
       notes     what was not carried over, as text
     Only the first Pol_num rows of Polarization / Analysis are used."""
@@ -576,16 +591,27 @@ def load_licorne_session(folder, axis_map=None):
         fun = top.get('ResolutionFun', 2)
         if fun in (1, 2, 3):
             stack.resolution.update(scheme='licorne', licorne_fun=int(fun))
+        if 'ResolutionFun' not in top:
+            notes.append('No ResolutionFun (Licorne before 1.2.3): its '
+                         'convolution mode 2 is used, as in the saved '
+                         'rtheory files; Licorne 1.4.2 would recompute this '
+                         'session with ResolutionFun 3 (read_param.m).')
     else:
         stack.resolution['enabled'] = False
         notes.append('resolution.m is not one of Licorne\'s templates (TOF, '
                      'one-angle TOF, MONO): the resolution is off.')
 
     q_path = os.path.join(folder, 'q.dat')
-    Q = _curve(q_path)[:, 0]
+    q_mult = float(top.get('Q_mult', 1.0))
+    Q = _curve(q_path)[:, 0] * q_mult
     generated = _source(q_path) == '<generated>'
     pols, ans = _channel_rows(top)
     norms = channel_norms(top, pols, ans)
+    r_mult = _top_list(top, 'Rexp_mult', len(pols), 1.0)
+    exp_fit = _top_list(top, 'ExpFit', len(pols), 1.0)
+    if q_mult != 1 or any(m != 1 for m in r_mult):
+        notes.append('Q_mult = %g and Rexp_mult = %s applied to q.dat and '
+                     'the rexp files, as Licorne does.' % (q_mult, r_mult))
     channels, theory, seen = [], [], set()
     for k in range(1, int(top.get('Pol_num', len(pols))) + 1):
         rexp = os.path.join(folder, 'rexp%d.dat' % k)
@@ -612,7 +638,12 @@ def load_licorne_session(folder, axis_map=None):
                          'as in Licorne.  Import %s itself (Experimental tab) '
                          'for the measured Q.' % (k, src, src))
         channels.append({'channel': ch, 'path': rexp, 'pol': pol,
-                         'norm': norms[k - 1], 'k': k})
+                         'norm': norms[k - 1], 'k': k, 'q_mult': q_mult,
+                         'r_mult': r_mult[k - 1],
+                         'fit': bool(exp_fit[k - 1])})
+        if not exp_fit[k - 1]:
+            notes.append('Channel %d (R%s) is not fitted (ExpFit = 0).'
+                         % (k, ch))
         th = os.path.join(folder, 'rtheory%d.dat' % k)
         if os.path.isfile(th):
             Rt = _curve(th)[:, 0]
@@ -635,7 +666,12 @@ def load_licorne_session(folder, axis_map=None):
         notes.append('In this Licorne model the polarisation is '
                      'perpendicular to every magnetisation: R+ = R- (no spin '
                      'splitting) in Licorne and here.')
+    lims = top.get('QLims', [0, 5])
+    qrange = (max(float(Q.min()), float(lims[0])),
+              min(float(Q.max()), float(lims[1])))
+    if qrange[0] >= qrange[1]:                # QLims outside the data
+        qrange = (float(Q.min()), float(Q.max()))
     return {'stack': stack, 'name': os.path.basename(folder),
             'q_path': q_path, 'channels': channels, 'theory': theory,
-            'qrange': (float(Q.min()), float(Q.max())), 'axis_map': R,
+            'qrange': qrange, 'axis_map': R,
             'notes': notes}
