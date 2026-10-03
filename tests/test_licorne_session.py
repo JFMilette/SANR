@@ -5,6 +5,7 @@ TOF resolution script.
 Run from the repo root: python -m pytest tests
 """
 import pathlib
+import re
 import shutil
 import sys
 
@@ -190,6 +191,26 @@ def test_axis_map_svd(tmp_path):
         load_licorne_model(p)
     with pytest.warns(UserWarning, match='out of the film plane'):
         load_licorne_model(p, axis_map=np.eye(3))
+
+
+def test_small_tilt_dropped(tmp_path):
+    """A 0.01 deg elevation left by a Licorne angle fit: imported in the
+    film plane, with a note."""
+    p = tmp_path / 'parameters.m'
+    p.write_text((DATA / 'v127_chi3_137' / 'parameters.m').read_text()
+                 .replace('Layers(3).msld=[2.60371e-06,9.83039,90];',
+                          'Layers(3).msld=[2.60371e-06,9.83039,90.01];'))
+    notes = []
+    st = load_licorne_model(p, notes=notes)
+    # the best plane shares the 0.01 deg between the vectors
+    tilt = [float(m.group(1)) for m in
+            (re.search(r'up to ([0-9.e-]+)°', n) for n in notes) if m]
+    assert len(tilt) == 1 and 0.005 < tilt[0] <= 0.01
+    assert all(l.MSLD_phi == 0 for l in st.layers)
+    # the in-plane angles barely move
+    ref = load_licorne_model(DATA / 'v127_chi3_137' / 'parameters.m')
+    assert np.allclose([l.MSLD_theta for l in st.layers],
+                       [l.MSLD_theta for l in ref.layers], atol=1e-4)
 
 
 def test_fixture1_no_splitting():

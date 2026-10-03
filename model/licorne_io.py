@@ -52,9 +52,13 @@ the rank r:
           sign that puts the first magnetisation not along P at +y (an
           in-plane angle between 0 and 180 deg)
   r = 3   the vectors are not coplanar: Licorne lets a component along the
-          film normal act, which specular PNR cannot see.  Refused (ValueError)
-          unless axis_map is given, which then warns that the out-of-plane
-          parts are lost.
+          film normal act, which specular PNR cannot see.  n is still the
+          smallest singular vector (the best plane) when every vector is
+          within AXIS_TILT_MAX (0.5 deg) of it, as a Licorne angle fit
+          leaves (e.g. theta = 90.01): those out-of-plane parts are dropped
+          (every elevation set to 0, a P keeping its length) with a note.
+          Further out: refused (ValueError) unless axis_map is given, which
+          then warns that the out-of-plane parts are lost.
 An explicit axis_map (orthogonal 3x3) replaces R.
 
 NORMALISATION -- Licorne returns (R++ + R+-)/2 for a channel without
@@ -87,6 +91,9 @@ _LINE = re.compile(r'^\s*(Substrate|Layers\((\d+)\))\.(\w+)\s*=\s*(.*?);\s*$')
 # a top-level  Name=value  statement, at the start of a line or after a ';'
 _STATEMENT = re.compile(r"(?:^|(?<=;))[ \t]*([A-Za-z]\w*)[ \t]*=(?!=)[ \t]*"
                         r"(\[[^\]]*\]|\{[^}]*\}|'[^']*'|[^;\n]*)", re.M)
+# largest tilt (degrees) of a vector out of the model's best plane that
+# the import drops (see ANGLES)
+AXIS_TILT_MAX = 0.5
 _FUNCS = {'tanh': 'tanh', 'erf': 'erf', 'erfc': 'erf', 'none': 'none'}
 # Layer attribute -> Licorne field (with _fit, _min, _max) and the index of
 # the value in a vector field
@@ -233,9 +240,10 @@ def model_vectors(par, top, profile=None):
     return p + m, len(p)
 
 
-def licorne_axis_map(par, top, profile=None):
+def licorne_axis_map(par, top, profile=None, notes=None):
     """R with m_sample = R m_Licorne (see ANGLES); ValueError for a model
-    whose vectors are not coplanar."""
+    whose vectors leave their best plane by more than AXIS_TILT_MAX degrees.
+    A smaller tilt, dropped, is noted in `notes` (a list) if given."""
     vecs, n_p = model_vectors(par, top, profile)
     if not vecs:
         return np.eye(3)
@@ -243,19 +251,27 @@ def licorne_axis_map(par, top, profile=None):
     _, sv, Vt = np.linalg.svd(V)
     sv = np.r_[sv, np.zeros(3 - len(sv))]
     rank = int(np.sum(sv > 1e-9 * sv[0]))
-    if rank == 3:
-        raise ValueError('the Licorne model\'s magnetisations and '
-                         'polarisations are not coplanar: Licorne lets a '
-                         'component along the film normal act, which specular '
-                         'reflectivity cannot see; give axis_map to import it '
-                         'anyway (that component is then lost)')
     e1 = V[0]
-    if rank == 2:
+    if rank >= 2:
         n = Vt[2]
     else:                       # any normal: the axis least along e1
         a = np.eye(3)[np.argmin(np.abs(e1))]
         n = np.cross(a, e1)
         n /= np.linalg.norm(n)
+    tilt = float(np.degrees(np.arcsin(min(1.0, np.max(np.abs(V @ n))))))
+    if tilt > AXIS_TILT_MAX:
+        raise ValueError('the Licorne model\'s magnetisations and '
+                         'polarisations are not coplanar (up to %.3g° out of '
+                         'their plane): Licorne lets a component along the '
+                         'film normal act, which specular reflectivity cannot '
+                         'see; give axis_map to import it anyway (that '
+                         'component is then lost)' % tilt)
+    if tilt > 1e-9:
+        e1 = e1 - (e1 @ n) * n                   # the first P in the plane
+        e1 /= np.linalg.norm(e1)
+        if notes is not None:
+            notes.append('Out-of-plane parts up to %.3g° dropped (Licorne '
+                         'used them; specular PNR cannot see them).' % tilt)
     # the normal's sign (either is a rotation, the physics is the same):
     # Licorne's own z when it is the normal (Licorne's angles kept, e.g.
     # v127: R = I), else the first magnetisation not along e1 on the +y side
@@ -303,7 +319,7 @@ def load_licorne_model(parameters_m_path, profile_dat_path=None,
     rho, phi, theta = _msld(par, tab)
 
     if axis_map is None:
-        R = licorne_axis_map(par, top, tab)
+        R = licorne_axis_map(par, top, tab, notes)
     else:
         R = np.asarray(axis_map, dtype=float)
         if R.shape != (3, 3) or not np.allclose(R @ R.T, np.eye(3)):
@@ -314,6 +330,8 @@ def load_licorne_model(parameters_m_path, profile_dat_path=None,
                           'here (HALPERIN), Licorne used it', stacklevel=2)
     angles = [sample_angles(R @ licorne_direction(p, t))
               for p, t in zip(phi, theta)]
+    if axis_map is None:            # a tolerated tilt: in the plane
+        angles = [(a, 0.0) for a, _ in angles]
 
     formalism = top.get('Formalism', 'Supermatrix')
     funs = [str(p.get('roughness_fun', 'none')) for p in lay_p]
@@ -408,15 +426,19 @@ def _read_mono(path, v):
             'dlambda_rel': dlam / lam, 'dtheta': float(dth[0])}
 
 
-def licorne_channel(pol, an, R=np.eye(3)):
+def licorne_channel(pol, an, R=np.eye(3), flat=False):
     """(name, [Pi, Pa]) of a Licorne channel from its Polarization and
     Analysis rows mapped into the sample frame by R (see ANGLES); named by
     the signs along sample x (the first polarisation).  Pa = (0, 0, 0) is
-    no analyser."""
+    no analyser.  flat: a small film-normal part is dropped, the length
+    (efficiency) kept (licorne_axis_map's tolerated tilt)."""
     pol, an = np.asarray(pol, dtype=float), np.asarray(an, dtype=float)
     if not np.any(pol):
         raise ValueError('Polarization %s is zero' % pol.tolist())
     Pi, Pa = R @ pol, R @ an
+    if flat:
+        Pi, Pa = (np.r_[v[:2], 0.0] * np.linalg.norm(v) / np.linalg.norm(v[:2])
+                  if np.any(v[:2]) else v for v in (Pi, Pa))
     Pi, Pa = (np.where(np.abs(v) < 1e-12, 0.0, v) for v in (Pi, Pa))
     if Pi[0] == 0 or (np.any(Pa) and Pa[0] == 0):
         raise ValueError('Polarization %s / Analysis %s have no component '
@@ -515,7 +537,7 @@ def load_licorne_session(folder, axis_map=None):
     else:
         R = np.asarray(axis_map, dtype=float)
     notes = import_notes(top)
-    stack = load_licorne_model(par_path, prof, R, notes)
+    stack = load_licorne_model(par_path, prof, axis_map, notes)
     _set_fit(stack, par)
     if any(any(p.get('msld_fit', [0, 0, 0])[1:]) for p in par['layers']):
         notes.append('Fitted magnetisation angles are not carried over.')
@@ -544,7 +566,8 @@ def load_licorne_session(folder, axis_map=None):
     for k in range(1, int(top.get('Pol_num', len(pols))) + 1):
         rexp = os.path.join(folder, 'rexp%d.dat' % k)
         try:
-            ch, pol = licorne_channel(pols[k - 1], ans[k - 1], R)
+            ch, pol = licorne_channel(pols[k - 1], ans[k - 1], R,
+                                      flat=axis_map is None)
         except (IndexError, ValueError) as exc:
             notes.append('Channel %d left out: %s' % (k, exc))
             continue
