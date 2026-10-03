@@ -24,3 +24,4 @@ tests/data/private/
 
 # benchmark output (benchmarks/bench_fit.py)
 benchmarks/results.jsonl
+benchmarks/multistart_*.txt

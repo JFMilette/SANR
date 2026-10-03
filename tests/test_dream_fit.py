@@ -279,8 +279,8 @@ def test_continue_equals_one_run(tmp_path):
 # -- the new defaults: start options, chains in different minima --------------
 def test_current_start():
     pp = small_problem(sigma_free=True)
-    from fit.dream.dream_fit import _current_start
-    X = _current_start(pp, 8, seed=0)
+    from fit.dream.dream_fit import jittered_start
+    X = jittered_start(pp, 8, seed=0)
     cur = np.r_[[p[2] for p in pp.fit.params], 0.0]
     assert X.shape == (8, 4) and len(np.unique(X, axis=0)) == 8
     assert np.all(np.abs(X - cur) <= 0.01 * (pp.hi - pp.lo))

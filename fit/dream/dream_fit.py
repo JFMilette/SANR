@@ -203,12 +203,13 @@ def _de_start(problem, n_chains, seed, de_options):
     return x0
 
 
-def _current_start(problem, n_chains, seed):
-    """n_chains jittered copies of the problem's current values (physical
-    units): N(0, 0.002 (hi - lo)) each, clipped to the bounds; the sigma
-    parameter, if any, around 0."""
+def jittered_start(problem, n_chains, seed=None, x=None):
+    """n_chains jittered copies (physical units) of x, the fit parameters'
+    values (default: the current ones), e.g. a minimum of fit.multistart:
+    N(0, 0.002 (hi - lo)) each, clipped to the bounds; the sigma parameter,
+    if any, around 0."""
     rng = np.random.default_rng(seed)
-    u = problem.fit.x0()
+    u = problem.fit.x0() if x is None else problem.fit.to_u(x)
     if problem.sigma_free:                    # s = 0: the measured dR
         u = np.r_[u, -problem.lo[-1] / (problem.hi[-1] - problem.lo[-1])]
     U = np.clip(u + rng.normal(0.0, 0.002, (n_chains, len(u))), 0.0, 1.0)
@@ -226,7 +227,7 @@ def sample(problem, *, n_gen=30000, archive=True, n_chains=None, x0=None,
     x0: None (Latin hypercube in the bounds), an (n_chains, d) array,
         'de' to start from the best members of a fit.de.de_fit.run_de final
         population (run with de_options), or 'current' for jittered copies
-        of the current values (_current_start).  The DREAM(ZS) archive is
+        of the current values (jittered_start).  The DREAM(ZS) archive is
         still seeded from the prior, and the adaptation phase is still
         discarded.
     p_snooker: snooker updates (archive only; 0 without it).
@@ -263,7 +264,7 @@ def sample(problem, *, n_gen=30000, archive=True, n_chains=None, x0=None,
         if x0 == 'de':
             x0 = _de_start(problem, n_chains, seed, de_options)
         elif x0 == 'current':
-            x0 = _current_start(problem, n_chains, seed)
+            x0 = jittered_start(problem, n_chains, seed)
         else:
             raise ValueError("x0 must be None, an array, 'de' or 'current'")
     u0 = None if x0 is None else np.clip(problem.to_u(x0), 0.0, 1.0)

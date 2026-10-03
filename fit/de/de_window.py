@@ -22,7 +22,8 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from fit.de.de_fit import run_de
+from fit.de.de_fit import run_de_restarts
+from fit.multistart import merge
 import style
 from tabs.simulation import (ASYM_COLOUR, PARAM_DISPLAY, PROFILE_QUANTITIES,
                              REFL_QUANTITIES, RIGHT, LayerLabels, plot_widget,
@@ -38,10 +39,13 @@ def at_bound(v, lo, hi):
 
 
 class DEThread(QtCore.QThread):
-    """Runs fit.de.de_fit.run_de on a FitProblem off the GUI thread."""
+    """Runs fit.de.de_fit.run_de_restarts on a FitProblem off the GUI
+    thread; with restarts > 1, `minima` gives the distinct ends of the runs
+    (fit.multistart.merge) before finished_fit gives the best."""
 
     progress = QtCore.pyqtSignal(object, float, int)      # x, cost, generation
     finished_fit = QtCore.pyqtSignal(object, float, int, str)
+    minima = QtCore.pyqtSignal(object)
     failed = QtCore.pyqtSignal(str)
 
     def __init__(self, problem, **options):
@@ -54,12 +58,14 @@ class DEThread(QtCore.QThread):
 
     def run(self):
         try:
-            x, cost, gen, msg = run_de(
+            (x, cost, gen, msg), ends = run_de_restarts(
                 self.problem, callback=self.progress.emit,
                 cancelled=lambda: self._stop, **self.options)
         except Exception as exc:                  # report, don't kill the app
             self.failed.emit('%s: %s' % (type(exc).__name__, exc))
             return
+        if len(ends) > 1:
+            self.minima.emit(merge(self.problem, ends))
         self.finished_fit.emit(x, cost, gen, str(msg))
 
 
