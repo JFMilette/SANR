@@ -272,7 +272,8 @@ def save_result(path, result, problem, sources=()):
     data of every channel (ch<k>_Q, ch<k>_R, ch<k>_dR: the points and
     errors the likelihood used), the sampler state (state_<name>, so that
     the run can be continued), and as JSON the names, bounds, each
-    channel's name, polarisation pair and norm, data hash, data `sources`
+    channel's name, polarisation pair and norm, the Licorne Q grid if any,
+    data hash, data `sources`
     (e.g. file names), git hash, stack mode flags and the stack itself, so that
     load_run can rebuild the PosteriorProblem (not its `priors`, which are
     functions)."""
@@ -284,6 +285,7 @@ def save_result(path, result, problem, sources=()):
                 roughness_scheme=st.roughness_scheme,
                 magnetic_smearing=st.magnetic_smearing,
                 resolution=st.resolution, stack=st.to_dict(),
+                grid=problem.fit.grid,
                 channels=[dict(name=name, P0=P0, P=P, norm=norm)
                           for (name, *_), (P0, P), norm
                           in zip(problem.fit.channels, problem.fit.pairs,
@@ -356,7 +358,9 @@ def load_run(path):
                      else np.asarray(c['P'], dtype=float),
                      norm=float(c.get('norm', 1.0)))
                 for k, c in enumerate(meta['channels'])]
+    grid = meta.get('grid')
     problem = posterior_problem(Stack.from_dict(meta['stack']), data,
+                                grid=None if grid is None else np.array(grid),
                                 sigma_free=meta['sigma_free'])
     if problem.names != list(meta['names']):
         raise ValueError('the stored stack gives the parameters %s, the '
@@ -443,9 +447,12 @@ def posterior_warnings(result, bounds=None, discard=0.5, rhat_max=1.2,
     return out
 
 
-def posterior_problem(stack, data, qmin=-np.inf, qmax=np.inf, **kw):
-    """PosteriorProblem of FitProblem(stack, data, 'chi2', qmin, qmax)."""
-    return PosteriorProblem(FitProblem(stack, data, 'chi2', qmin, qmax), **kw)
+def posterior_problem(stack, data, qmin=-np.inf, qmax=np.inf, grid=None,
+                      **kw):
+    """PosteriorProblem of FitProblem(stack, data, 'chi2', qmin, qmax,
+    grid)."""
+    return PosteriorProblem(FitProblem(stack, data, 'chi2', qmin, qmax, grid),
+                            **kw)
 
 
 # -- bands ---------------------------------------------------------------------

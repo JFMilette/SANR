@@ -20,9 +20,14 @@ different axes can be fitted together.  The model is ONE
 Stack.reflectivities call per trial on the union of every channel's Q
 points, with the stack's own resolution, scale and background (added once
 per channel).  With the 'licorne' resolution scheme the convolution depends
-on the grid it runs on (model.stack RESOLUTION), so each distinct grid of
-fitted points is evaluated on its own instead (one call per grid; a warning
-says so when the channels' grids differ).
+on the grid it runs on (model.stack RESOLUTION), as in Licorne, which
+computes every channel on one q.dat.  So either `grid` (e.g. the Q points of
+one chosen channel) is that one grid: the model is computed on it and each
+channel takes it at its own points (exactly on the grid's points, by
+interpolation of log R between them, the end value outside it, with a
+warning); or, without `grid`, each distinct grid of fitted points is
+evaluated on its own (one call per grid; a warning says so when the
+channels' grids differ).
 
 COST -- mean over all points of the squared residual:
   'chi2' : (R_model - R) / dR, i.e. the reduced chi^2 up to the number of
@@ -46,11 +51,21 @@ import numpy as np
 COSTS = ('chi2', 'log')
 
 
+def _interp(q, Q, R):
+    """R (on the increasing grid Q) at the points q: linear in log R when R
+    is positive everywhere (it falls off by decades), else linear; the end
+    value outside the grid."""
+    if np.all(R > 0):
+        return np.exp(np.interp(q, Q, np.log(R)))
+    return np.interp(q, Q, R)
+
+
 class FitProblem:
     """Cost of a copy of `stack` against `data` as a function of the
     normalised free parameters."""
 
-    def __init__(self, stack, data, cost='chi2', qmin=-np.inf, qmax=np.inf):
+    def __init__(self, stack, data, cost='chi2', qmin=-np.inf, qmax=np.inf,
+                 grid=None):
         if cost not in COSTS:
             raise ValueError('unknown cost %r' % cost)
         # the caller's stack may be edited while the fit runs
@@ -110,6 +125,7 @@ class FitProblem:
         self.channels = [(n, idx, R, s) for (n, R, s), idx
                          in zip(self.channels, np.split(inv, splits))]
         self.npoints = sum(len(ch[2]) for ch in self.channels)
+        self.grid = None if grid is None else np.asarray(grid, dtype=float)
         self.groups = self._groups(Qs)
 
         # said once here; the cost function itself never warns
@@ -127,21 +143,42 @@ class FitProblem:
                     'fitted' % ', '.join(lost), stacklevel=2)
 
     def _groups(self, Qs):
-        """[(Q grid, [(channel k, indices of its points in the grid)])]: the
-        union of every channel's Q, or one grid per distinct channel grid
-        with the 'licorne' resolution scheme (see DATA)."""
+        """[(Q grid, [(channel k, indices of its points in the grid or None,
+        its points)])]: the union of every channel's Q, or with the
+        'licorne' resolution scheme the one `grid`, else one grid per
+        distinct channel grid (see DATA).  Indices None: the channel's
+        points are interpolated on the grid."""
         res = self.stack.resolution
         if not (res.get('enabled') and res.get('scheme') == 'licorne'):
-            return [(self.Q, [(k, ch[1]) for k, ch
-                              in enumerate(self.channels)])]
-        grids = {}
-        for k, (q, ch) in enumerate(zip(Qs, self.channels)):
-            g = np.unique(q)
-            if len(g) != len(q):
+            return [(self.Q, [(k, ch[1], q) for k, (ch, q)
+                              in enumerate(zip(self.channels, Qs))])]
+        for q, ch in zip(Qs, self.channels):
+            if len(np.unique(q)) != len(q):
                 raise ValueError('%s has repeated Q points: the Licorne '
                                  'resolution scheme needs distinct Q' % ch[0])
+        if self.grid is not None:
+            g = np.unique(self.grid[np.isfinite(self.grid)])
+            if len(g) != np.isfinite(self.grid).sum():
+                raise ValueError('the Q grid has repeated points')
+            members, out = [], []
+            for k, (q, ch) in enumerate(zip(Qs, self.channels)):
+                i = np.clip(np.searchsorted(g, q), 0, len(g) - 1)
+                members.append((k, i if np.array_equal(g[i], q) else None,
+                                q))
+                n = int(np.sum((q < g[0]) | (q > g[-1])))
+                if n:
+                    out.append('%s (%d)' % (ch[0], n))
+            if out:
+                warnings.warn('Licorne resolution scheme: points outside the '
+                              'chosen Q grid (%.4g - %.4g) take its end '
+                              'value: %s' % (g[0], g[-1], ', '.join(out)),
+                              stacklevel=3)
+            return [(g, members)]
+        grids = {}
+        for k, q in enumerate(Qs):
+            g = np.unique(q)
             grids.setdefault(g.tobytes(), (g, []))[1].append(
-                (k, np.searchsorted(g, q)))
+                (k, np.searchsorted(g, q), q))
         if len(grids) > 1:
             warnings.warn('Licorne resolution scheme: the channels are on '
                           'different Q grids; each grid is convolved on its '
@@ -173,12 +210,13 @@ class FitProblem:
         self.stack.build_sublayers()
         out = [None] * len(self.channels)
         for Q, members in self.groups:
-            norms = [self.norms[k] for k, _ in members]
+            norms = [self.norms[k] for k, *_ in members]
             R = self.stack.reflectivities(
-                Q, [self.pairs[k] for k, _ in members], warn=False,
+                Q, [self.pairs[k] for k, *_ in members], warn=False,
                 norms=None if all(n == 1 for n in norms) else norms)
-            for c, (k, idx) in enumerate(members):
-                out[k] = R[idx, c]
+            for c, (k, idx, q) in enumerate(members):
+                out[k] = R[idx, c] if idx is not None else \
+                    _interp(q, Q, R[:, c])
         return out
 
     def residuals(self, x):

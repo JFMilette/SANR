@@ -169,6 +169,7 @@ class FitPanel:
         self._fit = None               # running DEThread
         self._fit_start = None         # (params, x) before the last fit
         self._fit_warnings = ''        # html, shown above the fit report
+        self._grid_choice = {}         # dataset -> channel of its Licorne Q
         self.fit_window = None         # DEWindow, made by the first fit
         self.fit_tools.addItem(page, 'Fit — differential evolution')
 
@@ -297,10 +298,12 @@ class FitPanel:
         return self._fit is not None or self._dream is not None
 
     def _fit_inputs(self, report):
-        """(dataset, {channel: [Pi, Pa]}, data list, qmin, qmax) of the Fit
-        box's dataset for fit.problem.FitProblem, after pushing the Simulation tab's
-        settings into its stack; None, with the reason in `report`, if
-        there is nothing to fit."""
+        """(dataset, {channel: [Pi, Pa]}, data list, qmin, qmax, grid) of
+        the Fit box's dataset for fit.problem.FitProblem, after pushing the
+        Simulation tab's settings into its stack; None, with the reason in
+        `report`, if there is nothing to fit (or no Q grid was chosen).
+        grid: the Q points the Licorne resolution scheme convolves on
+        (_licorne_grid), None for the quadrature."""
         i = self._set_index(self.fit_set.currentText())
         if i is None:
             report.setText(self._error('Import data to fit first.'))
@@ -312,8 +315,46 @@ class FitPanel:
         data = [dict(zip(('P0', 'P'), vectors_pair(*vec[ch])), name='R' + ch,
                      Q=d['Q'], R=d['R'], dR=d['dR'], norm=d.get('norm', 1.0))
                 for ch, d in s['channels'].items()]
+        grid = None
+        res = sim.stack.resolution
+        if res.get('enabled') and res.get('scheme') == 'licorne':
+            grid = self._licorne_grid(s)
+            if grid is None:
+                report.setText(self._error('No Q grid chosen: nothing was '
+                                           'started.'))
+                return None
         # the Simulation tab's Q range selects the fitted points
-        return s, vec, data, sim.qmin.value(), sim.qmax.value()
+        return s, vec, data, sim.qmin.value(), sim.qmax.value(), grid
+
+    def _licorne_grid(self, s):
+        """The Q points of dataset s that Licorne's convolution runs on, as
+        Licorne computes every channel on one q.dat: the channels' common Q
+        if they share it, else those of the channel chosen in a small
+        dialog (remembered per dataset); None if the dialog is
+        cancelled."""
+        grids = {ch: np.asarray(d['Q'], dtype=float)
+                 for ch, d in s['channels'].items()}
+        grids = {ch: q[np.isfinite(q)] for ch, q in grids.items()}
+        first = next(iter(grids.values()))
+        if all(np.array_equal(np.sort(q), np.sort(first))
+               for q in grids.values()):
+            return first
+        names = list(grids)
+        items = ['R%s — %d points, %.4g – %.4g Å⁻¹'
+                 % (ch, len(q), q.min(), q.max()) for ch, q in grids.items()]
+        last = self._grid_choice.get(s['name'])
+        item, ok = QtWidgets.QInputDialog.getItem(
+            self, 'Q grid for the Licorne resolution',
+            'The channels of %s are not on the same Q points.\n'
+            'Licorne\'s resolution is computed on one Q grid: whose?\n'
+            'The other channels take the model interpolated at their points.'
+            % s['name'], items,
+            names.index(last) if last in names else 0, False)
+        if not ok:
+            return None
+        ch = names[items.index(item)]
+        self._grid_choice[s['name']] = ch
+        return grids[ch]
 
     def start_fit(self):
         sim = self.simulation
@@ -327,13 +368,14 @@ class FitPanel:
         inputs = self._fit_inputs(self.fit_report)
         if inputs is None:
             return
-        s, vec, data, qmin, qmax = inputs
+        s, vec, data, qmin, qmax, grid = inputs
         try:
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter('always')
                 problem = FitProblem(
                     sim.stack, data,
-                    FIT_COSTS[self.fit_cost.currentIndex()][0], qmin, qmax)
+                    FIT_COSTS[self.fit_cost.currentIndex()][0], qmin, qmax,
+                    grid)
         except ValueError as exc:
             self.fit_report.setText(self._error(exc))
             return
@@ -419,12 +461,12 @@ class FitPanel:
         inputs = self._fit_inputs(self.dream_report)
         if inputs is None:
             return
-        s, vec, data, qmin, qmax = inputs
+        s, vec, data, qmin, qmax, grid = inputs
         try:
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter('always')
                 problem = PosteriorProblem(
-                    FitProblem(sim.stack, data, 'chi2', qmin, qmax),
+                    FitProblem(sim.stack, data, 'chi2', qmin, qmax, grid),
                     sigma_free=self.dream_sigma.isChecked())
         except ValueError as exc:
             self.dream_report.setText(self._error(exc))
