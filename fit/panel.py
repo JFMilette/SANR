@@ -44,7 +44,7 @@ DREAM_STARTS = [('Latin hypercube', None), ('DE population', 'de'),
 MS_METHODS = [('L-BFGS-B', 'lbfgs'), ('short DE', 'de')]
 # height (px) a tool-box page keeps however short the window; taller pages
 # scroll
-FIT_PAGE_MIN = 200
+FIT_PAGE_MIN = 160
 # chi^2/N of an optimum above which DREAM's error scale is ticked
 SIGMA_SUGGEST = 2.0
 
@@ -254,6 +254,10 @@ class FitPanel:
         area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         area.setHorizontalScrollBarPolicy(
             QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # its own size must not grow the tool box (the page scrolls instead)
+        area.setMinimumHeight(FIT_PAGE_MIN)
+        area.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
+                           QtWidgets.QSizePolicy.Policy.Ignored)
         self.fit_tools.addItem(area, title)
 
     def _build_multistart_page(self):
