@@ -189,14 +189,8 @@ from model.licorne_resolution import kernel as licorne_kernel
 # Layer attributes a fit may vary.  Layer.fit[attr] = {'vary', 'min', 'max'},
 # bounds in the same units as the attribute (Angstrom, A^-2, turns), and
 # optionally 'prior' (fit.priors SPEC, None for none).
-# 'MSLD_moment' is the sheet moment rho t (A^-1): varied instead of
-# MSLD_rho when its entry is ticked (the data often fix rho t, not rho and
-# t apart); setting it sets rho = moment / t with the layer's thickness
-# (clipped at MOMENT_T_MIN), so Stack.set_values sets it after every
-# thickness.
 FIT_PARAMS = ('thickness', 'NSLD_real', 'NSLD_img', 'MSLD_rho', 'MSLD_theta',
-              'MSLD_phi', 'roughness_sigma', 'MSLD_moment')
-MOMENT_T_MIN = 1e-6       # Angstrom
+              'MSLD_phi', 'roughness_sigma')
 # Stack attributes a fit may vary, in Stack.fit the same way; their
 # free_parameters() entries have layer index None.
 STACK_FIT_PARAMS = ('scale', 'background')
@@ -217,8 +211,7 @@ DEFAULT_BOUNDS = {
 
 
 def default_fit(attr):
-    """Fixed, with the layer-independent DEFAULT_BOUNDS (not for the sheet
-    moment: Layer.fit_entry)."""
+    """Fixed, with the layer-independent DEFAULT_BOUNDS."""
     lo, hi = DEFAULT_BOUNDS[attr]
     return {'vary': False, 'min': float(lo), 'max': float(hi)}
 
@@ -438,31 +431,10 @@ class Layer:
         self.fit = copy.deepcopy(fit or {})
 
     def fit_entry(self, attr):
-        """{'vary', 'min', 'max'} of `attr`, created from default_fit if
-        unset; the sheet moment's from the MSLD_rho and thickness bounds
-        (moment_bounds)."""
+        """{'vary', 'min', 'max'} of `attr`, created from default_fit if unset."""
         if attr not in self.fit:
-            if attr == 'MSLD_moment':
-                lo, hi = self.moment_bounds()
-                self.fit[attr] = {'vary': False, 'min': lo, 'max': hi}
-            else:
-                self.fit[attr] = default_fit(attr)
+            self.fit[attr] = default_fit(attr)
         return self.fit[attr]
-
-    def moment_bounds(self):
-        """[rho_min t_min, rho_max t_max] of the current entries."""
-        r, t = self.fit_entry('MSLD_rho'), self.fit_entry('thickness')
-        return (float(r['min'] * max(t['min'], 0.0)),
-                float(r['max'] * t['max']))
-
-    @property
-    def MSLD_moment(self):
-        """Sheet moment rho t (A^-1); setting it sets MSLD_rho."""
-        return self.MSLD_rho * self.thickness
-
-    @MSLD_moment.setter
-    def MSLD_moment(self, v):
-        self.MSLD_rho = v / max(self.thickness, MOMENT_T_MIN)
 
     def __repr__(self):
         return ("Layer(%r, t=%.3g, nsld=%.4g%+.4gj, msld=%.4g @ %.4g, %+.4g "
@@ -664,7 +636,7 @@ class Stack:
         """Semi-infinite media have no thickness; the fronting has no
         interface above it, so no roughness."""
         n = len(self.layers)
-        if attr in ('thickness', 'MSLD_moment'):
+        if attr == 'thickness':
             return 0 < i < n - 1
         if attr == 'roughness_sigma':
             return i > 0
@@ -777,8 +749,7 @@ class Stack:
             for attr in FIT_PARAMS:
                 e = l.fit.get(attr)
                 if e and e['vary'] and self.fit_allowed(i, attr) and \
-                        (i, attr) not in tied and \
-                        not (attr == 'MSLD_rho' and self.moment_mode(i)):
+                        (i, attr) not in tied:
                     out.append((i, attr, getattr(l, attr), e['min'], e['max']))
         for k, t in enumerate(self.ties):
             attr = t['members'][0][1]
@@ -792,23 +763,6 @@ class Stack:
                 out.append((None, attr, getattr(self, attr), e['min'],
                             e['max']))
         return out
-
-    def moment_mode(self, i):
-        """Layer i fits its sheet moment rho t instead of rho."""
-        e = self.layers[i].fit.get('MSLD_moment')
-        return bool(e and e['vary'] and self.fit_allowed(i, 'MSLD_moment'))
-
-    def set_values(self, params, x):
-        """Write values x of free_parameters() entries `params`: sheet
-        moments last, so that rho = moment / t uses the new thickness."""
-        later = []
-        for p, v in zip(params, x):
-            if p[1] == 'MSLD_moment':
-                later.append((p, v))
-            else:
-                setattr(self.owner(p[0]), p[1], float(v))
-        for p, v in later:
-            setattr(self.owner(p[0]), p[1], float(v))
 
     def owner(self, i):
         """The object a free_parameters() entry with layer index i sets:

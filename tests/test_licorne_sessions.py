@@ -74,9 +74,7 @@ def problem(name, vary=None, untie=False, **kw):
                          name='R' + c['channel'], norm=c['norm']))
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
-        p = FitProblem(st, data, cost='chi2', **kw)
-    p.data_in = data                    # to build other problems on them
-    return p, s
+        return FitProblem(st, data, cost='chi2', **kw), s
 
 
 @pytest.mark.parametrize('name', ['session_A', 'session_B'])
@@ -137,41 +135,3 @@ def test_session_A_coupled_nsld():
     r = minimize(p, p.x0(), method='L-BFGS-B',
                  bounds=[(0, 1)] * len(p.params), options={'maxiter': 3000})
     assert r.fun == pytest.approx(5.63, abs=0.05)
-
-
-@pytest.mark.slow
-def test_session_A_sheet_moment():
-    """A's data fix layer 4's rho t better than rho (1.47-1.54e-6 A^-1
-    across every minimum found): sampled in moment mode from the 4.93
-    minimum, the moment's relative 95 % width is the smaller.  Only by
-    2-7 % (seeds 1-3: 0.44 / 0.45, 0.46 / 0.49, 0.44 / 0.48; rho and t
-    correlate at -0.35, t itself spreads 6 %), and the chains are not
-    converged in 3000 generations (R-hat ~ 2)."""
-    from scipy.optimize import minimize
-    from fit.dream.dream_fit import PosteriorProblem, sample
-    p, _ = problem('session_A', untie=True)
-    r = minimize(p, p.x0(), method='L-BFGS-B',
-                 bounds=[(0, 1)] * len(p.params), options={'maxiter': 3000})
-    assert r.fun <= 4.93
-    p.apply(p.to_x(r.x))
-    st = p.stack
-    st.layers[4].fit_entry('MSLD_moment')['vary'] = True
-    m = FitProblem(st, p.data_in, cost='chi2')
-    names = [a for i, a, *_ in m.params if i == 4]
-    assert 'MSLD_moment' in names and 'MSLD_rho' not in names
-    pp = PosteriorProblem(m)
-    res = sample(pp, n_gen=3000, seed=1, x0='current',
-                 stop_when_converged=False)
-    s = res.samples(0.5)
-    jm = [k for k, (i, a, *_) in enumerate(m.params)
-          if (i, a) == (4, 'MSLD_moment')][0]
-    jt = [k for k, (i, a, *_) in enumerate(m.params)
-          if (i, a) == (4, 'thickness')][0]
-    moment, rho = s[:, jm], s[:, jm] / s[:, jt]
-
-    def width(v):
-        lo, med, hi = np.percentile(v, [2.5, 50, 97.5])
-        return (hi - lo) / abs(med)
-    print('relative 95 %% widths: moment %.3g, rho %.3g'
-          % (width(moment), width(rho)))
-    assert width(moment) < width(rho)
