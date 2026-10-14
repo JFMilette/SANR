@@ -670,7 +670,8 @@ def test_outer_pseudo_layer(case):
         err = rel(R[outer], ref)
         if outer == 'licorne' or case == 'control':
             assert max(oracle_slabs(st, layers, sub)) <= 1e-10
-            assert err <= 1e-10
+            # 1e-9: rounding at the deepest minimum (R ~ 2e-11) of 'cap'
+            assert err <= 1e-9
         else:
             assert err > 1e-2
     # the fronting and backing are never renormalised, only the thinner

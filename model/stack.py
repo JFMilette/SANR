@@ -240,6 +240,11 @@ from scipy.special import erf
 from model import roughness as rough
 from model.licorne_resolution import kernel as licorne_kernel
 
+try:                       # compiled product (setup.py), else numpy's
+    from model import _transfer
+except ImportError:
+    _transfer = None
+
 
 # Layer attributes a fit may vary.  Layer.fit[attr] = {'vary', 'min', 'max'},
 # bounds in the same units as the attribute (Angstrom, A^-2, turns), and
@@ -294,6 +299,9 @@ RES_EDGE_WIDTH = 8
 # Q points per block of the transfer-matrix product (see
 # Stack.build_transfer_matrix); set from a benchmark
 TM_BLOCK = 256
+# the compiled product (model/_transfer.pyx) when it is built; False forces
+# the numpy one (the tests compare them)
+USE_COMPILED = True
 
 
 def wrap_turns(t, decimals=9):
@@ -504,7 +512,9 @@ class Layer:
         # Angstrom, the magnetic profile's own sigma; None: roughness_sigma
         # (see MAGNETIC ROUGHNESS)
         self.MSLD_sigma = MSLD_sigma
-        self.fit = copy.deepcopy(fit or {})
+        # (the deepcopy only when there is something to copy: the slabs of
+        # build_sublayers are made by the thousand during a fit)
+        self.fit = copy.deepcopy(fit) if fit else {}
 
     def fit_entry(self, attr):
         """{'vary', 'min', 'max'} of `attr`, created from default_fit if unset."""
@@ -661,6 +671,9 @@ class Stack:
         # 'infinite' or 'licorne' (Licorne scheme only, see ROUGHNESS SCHEME)
         self.licorne_outer = 'infinite'
         self.sublayers = None
+        # (sublayers, their arrays) from _set_sublayers, for
+        # build_transfer_matrix
+        self._slab_arrays = None
         self.scale = 1.0                     # factor on every channel
         self.background = 0.0                # constant added to every channel
         self.fit = {}                        # STACK_FIT_PARAMS, as Layer.fit
@@ -1036,6 +1049,13 @@ class Stack:
                   MSLD_theta=float(v_theta[i]), MSLD_phi=float(v_phi[i]),
                   roughness_sigma=0.0, roughness_sublayer=1)
             for i in range(len(th))]
+        # the same slabs as the arrays build_transfer_matrix multiplies (the
+        # in-plane rho of inplane_rho), so that it need not read them back
+        # one Layer at a time; valid while self.sublayers is this list
+        self._slab_arrays = (self.sublayers, (
+            np.asarray(v_n, dtype=complex),
+            np.asarray(v_rho, dtype=float) * cos_turns(v_phi),
+            np.asarray(v_theta, dtype=float), np.asarray(th, dtype=float)))
         return self.sublayers
 
     def profile(self, z):
@@ -1126,6 +1146,19 @@ class Stack:
                          r * cos_turns(ph) * sin_turns(th),
                          r * sin_turns(ph)], dtype=float)
 
+    @staticmethod
+    def _licorne_values_all(layers):
+        """_licorne_values of every layer at once, one row each (the same
+        numbers: numpy's cos and sin give an array the bits they give each
+        of its elements)."""
+        a = np.array([[l.NSLD_real, l.NSLD_img, l.MSLD_rho, l.MSLD_theta,
+                       l.MSLD_phi] for l in layers], dtype=float).T
+        r, th, ph = a[2], a[3], a[4]
+        return np.column_stack([a[0], a[1], r,
+                                r * cos_turns(ph) * cos_turns(th),
+                                r * cos_turns(ph) * sin_turns(th),
+                                r * sin_turns(ph)])
+
     def _licorne_interfaces(self):
         """Per interface j (the top of layer j+1, which owns sigma_L, the
         function and N): its depth Z, window la / lb, renormalised values
@@ -1136,7 +1169,7 @@ class Stack:
         t = self._thicknesses()
         if self.licorne_outer == 'licorne' and len(t) > 2:
             t[0], t[-1] = 1.5 * t[1], 1.5 * t[-2]
-        vals = [self._licorne_values(l) for l in self.layers]
+        vals = self._licorne_values_all(self.layers)
         out = []
         for j, Zj in enumerate(self._interfaces()):
             own = self.layers[j + 1]
@@ -1147,7 +1180,8 @@ class Stack:
                 self.licorne_renorm)
             w = {'Z': float(Zj), 'la': la, 'lb': lb, 'sigma': sL,
                  'kind': kind, 'N': max(int(own.roughness_sublayer), 1),
-                 'Fa': Fa, 'Fb': Fb, 'a': j, 'b': j + 1, 'mag': None}
+                 'Fa': Fa, 'Fb': Fb, 'a': j, 'b': j + 1, 'mag': None,
+                 'va': vals[j], 'vb': vals[j + 1]}
             if own.MSLD_sigma is not None:
                 # the magnetic profile's own Licorne window (MAGNETIC
                 # ROUGHNESS); la / lb become the extent of both
@@ -1175,8 +1209,8 @@ class Stack:
             sm = rough.profile_fraction(x, m['sigma'], w['kind'])
             v[2:] = (m['Fa'][2:, None]
                      + (m['Fb'] - m['Fa'])[2:, None] * sm[None, :])
-            va = self._licorne_values(A)[:, None]
-            vb = self._licorne_values(B)[:, None]
+            va = w['va'][:, None]
+            vb = w['vb'][:, None]
             for rows, la, lb in ((slice(0, 2), m['la_n'], m['lb_n']),
                                  (slice(2, 6), m['la'], m['lb'])):
                 v[rows] = np.where(x < -la, va[rows],
@@ -1449,6 +1483,8 @@ class Stack:
 
         All slab matrices are built in one vectorised call, then multiplied
         pairwise (tree reduction): ~log2(N) batched matmuls instead of N.
+        With model/_transfer built (setup.py) the compiled loop computes the
+        same product instead, 1.5-3x faster.
         """
         Q = np.atleast_1d(np.asarray(Q))     # may be complex: only Q**2 is used
         if self.sublayers is None:
@@ -1458,10 +1494,17 @@ class Stack:
             M = np.broadcast_to(np.eye(4, dtype=np.complex128),
                                 Q.shape + (4, 4)).copy()
         else:
-            slabs = ([complex(l.NSLD_real, l.NSLD_img) for l in seq],
-                     [self.inplane_rho(l) for l in seq],
-                     [l.MSLD_theta for l in seq],
-                     [l.thickness for l in seq])       # top -> bottom
+            cached = getattr(self, '_slab_arrays', None)
+            if cached is not None and cached[0] is seq:
+                slabs = cached[1]
+            else:
+                slabs = ([complex(l.NSLD_real, l.NSLD_img) for l in seq],
+                         [self.inplane_rho(l) for l in seq],
+                         [l.MSLD_theta for l in seq],
+                         [l.thickness for l in seq])   # top -> bottom
+            if _transfer is not None and USE_COMPILED:
+                return _transfer.product(*slabs, Q.ravel()).reshape(
+                    Q.shape + (4, 4))
             M = np.empty(Q.shape + (4, 4), dtype=np.complex128)
             # blocks of Q small enough for the slab matrices to stay in cache
             for j in range(0, len(Q), TM_BLOCK):

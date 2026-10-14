@@ -10,7 +10,12 @@ fit it to measured channels.
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+python setup.py build_ext --inplace   # compiled transfer matrix, 1.5-2x faster fits
 ```
+
+The last step needs a C compiler (on macOS: `xcode-select --install`). Without
+it everything works with the numpy version of the same product, only slower.
+Build again after editing `model/_transfer.pyx`.
 
 ## Run
 
@@ -28,6 +33,7 @@ python -m pytest tests         # the tests (pip install pytest first)
 | `style.py`, `icons/` | The dark theme and its icons; `icons/app.png` is the app icon |
 | **`model/`** | **The physics, no GUI** |
 | `model/stack.py` | `Layer`, `Stack`: roughness profile (additive, ordered or independent interfaces, `Stack.interface_crossing`), slicing, transfer matrix, `Stack.reflectivities(Q, pairs)`; fittable `scale` and `background`. The module docstring explains the physics and its conventions. |
+| `model/_transfer.pyx`, `setup.py` | The transfer-matrix product compiled with Cython (a loop per Q, two 2×2 products when M is collinear); `Stack.build_transfer_matrix` uses it when built, numpy otherwise |
 | `model/roughness.py` | Licorne's interface kernel (manual App. 10.1): window, closed-form J, renormalisation, sigma conversions |
 | `model/polarisation.py` | Named channels (`++`, `+-`, `-+`, `--`, `+`, `-`) as (P0, P) pairs, and the Pi / Pa form the GUI uses |
 | `model/licorne_io.py` | `load_licorne_model`: a Licorne export (`parameters.m`, `profile.dat`) as a Licorne-exact Stack (`Stack.set_licorne_exact`), its axes rotated so that M and P lie in the film plane (`licorne_axis_map`); `load_licorne_session`: a whole saved Licorne session folder (model, fit bounds, background, `Norm_factor`, TOF resolution, `rexp*.dat` channels, `rtheory*.dat` curves) and notes on what is not reproduced |
@@ -37,6 +43,7 @@ python -m pytest tests         # the tests (pip install pytest first)
 | `fit/joint.py` | `JointProblem`: several datasets fitted together with one model, each parameter shared, own to a dataset or not fitted in it (the `FitProblem` interface, for DE, multistart and DREAM) |
 | `fit/datasets_dialog.py` | "Datasets to fit" dialog (Select… on the Fit tool box's general page): the datasets of a joint fit and each parameter's mode in each |
 | `fit/panel.py` | The Fit tool box of the Experimental tab (general / DE / local L-BFGS-B / multistart / DREAM pages and their actions) |
+| `fit/workers.py` | Process pools for DE (and its L-BFGS-B) and DREAM that receive the fit problem once, as each worker starts, instead of with every task |
 | `fit/de/de_fit.py` | `run_de`: differential-evolution fit (scipy), optionally over worker processes; `run_lbfgs`: L-BFGS-B alone from the current values (the local page) |
 | `fit/de/de_window.py` | DE window (also for a local fit): best cost per generation (or iteration), profile and reflectivity of the selected one (one tab per dataset), send to the Simulation tab |
 | `fit/dream/dream.py` | DREAM / DREAM(ZS) sampler (Vrugt 2016), NumPy only: resumable state, `ess` |

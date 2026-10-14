@@ -48,7 +48,6 @@ import copy
 import hashlib
 import json
 import math
-import multiprocessing
 import os
 import subprocess
 import warnings
@@ -60,6 +59,7 @@ from fit.priors import tension
 from fit.dream.dream import DreamResult, dream, ess, make_gaussian_loglike
 from fit.joint import JointProblem, part_x, parts
 from fit.problem import FitProblem, parameter_names  # noqa: F401 (API)
+from fit.workers import Wrapper, start as start_pool, stop as stop_pool
 from model.stack import Stack
 
 BAND_PERCENTILES = (2.5, 16, 50, 84, 97.5)
@@ -211,8 +211,9 @@ class PosteriorProblem:
         return (np.asarray(x) - self.lo) / (self.hi - self.lo)
 
 
-class _Unit:
-    """problem as a function of normalised u, for dream (picklable)."""
+class _Unit(Wrapper):
+    """problem as a function of normalised u, for dream (picklable; without
+    the problem once a pool holds it, fit.workers)."""
 
     def __init__(self, problem):
         self.problem = problem
@@ -274,7 +275,8 @@ def sample(problem, *, n_gen=30000, archive=True, n_chains=None, x0=None,
     beta_start, temper_until: the tempered burn-in of fit.dream.dream
         (beta_start 1: none).
     n_workers > 1 evaluates the chains of each generation in that many
-        'spawn' processes.
+        'spawn' processes, each given the problem once as it starts
+        (fit.workers) and one chunk of the chains per generation.
     callback(generation, X, logp, rhat or None) is called after every
         generation, X in physical units; returning True stops the run and
         returns the generations done so far.
@@ -313,13 +315,20 @@ def sample(problem, *, n_gen=30000, archive=True, n_chains=None, x0=None,
         return callback(t, problem.to_x(U), logp, rhat) is True
 
     pool = None
+    unit = _Unit(problem)
     try:
+        map_func = map
         if n_workers > 1:
-            pool = multiprocessing.get_context('spawn').Pool(n_workers)
-        unit = _Unit(problem)
+            # each process gets the problem once, then one chunk of the
+            # generation's states per process
+            pool, unit.token = start_pool(n_workers, problem)
+
+            def map_func(func, items):
+                return pool.map(func, items,
+                                chunksize=-(-len(items) // n_workers))
         res = dream(unit, [(0.0, 1.0)] * problem.ndim, n_gen,
                     n_chains, names=list(problem.names), archive=archive,
-                    x0=u0, map_func=pool.map if pool else map, seed=seed,
+                    x0=u0, map_func=map_func, seed=seed,
                     stop_when_converged=stop_when_converged,
                     min_gen_after_converged=min_gen_after_converged,
                     callback=cb if callback is not None else None,
@@ -328,8 +337,8 @@ def sample(problem, *, n_gen=30000, archive=True, n_chains=None, x0=None,
                     temper_until=temper_until, logpdf_split=unit.split)
     finally:
         if pool is not None:
-            pool.terminate()
-            pool.join()
+            stop_pool(pool, unit.token)
+        unit.token = None
     res.chains = problem.to_x(res.chains)
     return res
 

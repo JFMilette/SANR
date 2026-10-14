@@ -30,6 +30,10 @@ sys.path.insert(0, ROOT)
 
 from model.polarisation import CHANNEL_NAMES, channel_pair   # noqa: E402
 from model.stack import Layer, Stack                         # noqa: E402
+import model.stack                                           # noqa: E402
+
+# bit-for-bit reference: the numpy transfer matrix, as the test uses
+model.stack.USE_COMPILED = False
 
 OUT = os.path.join(ROOT, 'tests', 'data', 'rms_additive_reference.npz')
 SESSIONS = {'session_Cr2Te3': os.path.join(ROOT, 'sessions',

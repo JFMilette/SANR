@@ -5,6 +5,11 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+
+# compiled kernel (python setup.py build_ext --inplace)
+build/
+model/_transfer.c
+*.so
 .pytest_cache/
 .ipynb_checkpoints/
 

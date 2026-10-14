@@ -73,7 +73,10 @@ def occupancies(F):
 
 # -- T1, T10: 'additive' is the code from before the setting ------------------
 @pytest.mark.parametrize('case', CASES)
-def test_additive_matches_reference(case):
+def test_additive_matches_reference(case, monkeypatch):
+    # R frozen bit for bit with the numpy transfer matrix; the compiled one
+    # equals it to rounding (tests/test_transfer.py)
+    monkeypatch.setattr(S, 'USE_COMPILED', False)
     g = lambda k: REF['%s/%s' % (case, k)]                     # noqa: E731
     st = S.Stack.from_dict(json.loads(str(g('stack'))))
     assert st.interface_order == 'additive'                    # no key: old
