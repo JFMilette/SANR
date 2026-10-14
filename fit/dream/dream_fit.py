@@ -32,6 +32,11 @@ R-hat ~ 1 (tests/test_dream_sampler.py TWO_MODES); chains in different
 minima are reported by posterior_warnings, chains all in the wrong one
 cannot be told from R-hat or log p.
 
+JOINT -- the FitProblem may be a fit.joint.JointProblem (several datasets,
+one stack): the same likelihood over every dataset's points; save_result
+keeps its datasets, modes and fixed values, and the bands are drawn for one
+dataset at a time (`part`).
+
 RESULTS -- save_result / load_result (.npz), summary_table, derived, and
 the bands the plots draw: predictive_bands (model R and spin asymmetry of
 posterior draws over the data) and profile_bands (SLD profile of the draws,
@@ -46,13 +51,15 @@ import math
 import multiprocessing
 import os
 import subprocess
+import warnings
 
 import numpy as np
 
 from fit.de.de_fit import run_de
 from fit.priors import tension
 from fit.dream.dream import DreamResult, dream, ess, make_gaussian_loglike
-from fit.problem import FitProblem
+from fit.joint import JointProblem, part_x, parts
+from fit.problem import FitProblem, parameter_names  # noqa: F401 (API)
 from model.stack import Stack
 
 BAND_PERCENTILES = (2.5, 16, 50, 84, 97.5)
@@ -63,24 +70,6 @@ FLOOR_BOUNDS = (-4.0, -0.5)
 # where the extra parameters start (jittered_start, the DE start): the
 # measured dR, a 1 % floor
 EXTRA_START = {SIGMA_NAME: 0.0, FLOOR_NAME: -2.0}
-
-
-def parameter_names(stack, params):
-    """'layer.attr' of each free_parameters() entry ('stack.attr' for the
-    stack's own, 'tie(Fe.thickness, Co.thickness)' for a tie); layers
-    sharing a name get their index: '#2 Fe.thickness'."""
-    names = [l.name for l in stack.layers]
-    out = []
-    for i, attr, *_ in params:
-        if i is None:
-            out.append('stack.%s' % attr)
-        elif isinstance(i, tuple):
-            out.append(stack.tie_name(i[1]))
-        elif names.count(names[i]) > 1:
-            out.append('#%d %s.%s' % (i, names[i], attr))
-        else:
-            out.append('%s.%s' % (names[i], attr))
-    return out
 
 
 class PosteriorProblem:
@@ -95,7 +84,7 @@ class PosteriorProblem:
         self.fit = fit_problem
         self.sigma_free = bool(sigma_free)
         self.floor_free = bool(floor_free)
-        self.names = parameter_names(fit_problem.stack, fit_problem.params)
+        self.names = list(fit_problem.names)
         self.bounds = [(float(a), float(b))
                        for a, b in zip(fit_problem.lo, fit_problem.hi)]
         if self.sigma_free:
@@ -375,7 +364,7 @@ _STATE_ARRAYS = ('X', 'logp_X', 'Z', 'pCR', 'J', 'n_id', 'hist_logp', 'acc',
                  'chains', 'logps', 'gens', 'lp_X', 'll_X')
 
 
-def save_result(path, result, problem, sources=()):
+def save_result(path, result, problem, sources=(), datasets=()):
     """Write result and what it was computed from to `path` (.npz):
     chains, logp, generations, acceptance, R-hat history, pCR, the fitted
     data of every channel (ch<k>_Q, ch<k>_R, ch<k>_dR: the points and
@@ -385,8 +374,11 @@ def save_result(path, result, problem, sources=()):
     data hash, data `sources`
     (e.g. file names), git hash, stack mode flags and the stack itself, so that
     load_run can rebuild the PosteriorProblem (not its `priors`, which are
-    functions)."""
-    st = problem.fit.stack
+    functions).  `datasets`: the name of the dataset fitted (a joint fit
+    stores its own, with its modes, fixed values and each dataset's Q grid,
+    and each channel's dataset)."""
+    fit = problem.fit
+    st = fit.stack
     meta = dict(names=list(problem.names), bounds=problem.bounds,
                 sigma_free=problem.sigma_free, floor_free=problem.floor_free,
                 error_floor=problem.fit.error_floor,
@@ -399,8 +391,14 @@ def save_result(path, result, problem, sources=()):
                 grid=problem.fit.grid,
                 channels=[dict(name=name, P0=P0, P=P, norm=norm)
                           for (name, *_), (P0, P), norm
-                          in zip(problem.fit.channels, problem.fit.pairs,
-                                 problem.fit.norms)])
+                          in zip(fit.channels, fit.pairs, fit.norms)],
+                datasets=list(datasets))
+    if isinstance(fit, JointProblem):
+        meta.update(datasets=fit.part_names,
+                    joint=dict(modes=fit.modes, fixed=fit.fixed,
+                               grids=[p.grid for p in fit.parts]))
+        for c, k in zip(meta['channels'], fit.channel_part):
+            c['part'] = k
     data = {}
     # the measured dR, before any floor (meta error_floor)
     for k, ((_, idx, R, _), dR) in enumerate(zip(problem.fit.channels,
@@ -472,11 +470,24 @@ def load_run(path):
                      norm=float(c.get('norm', 1.0)))
                 for k, c in enumerate(meta['channels'])]
     grid = meta.get('grid')
-    problem = posterior_problem(Stack.from_dict(meta['stack']), data,
-                                grid=None if grid is None else np.array(grid),
-                                error_floor=meta.get('error_floor', 0.0),
-                                sigma_free=meta['sigma_free'],
-                                floor_free=meta.get('floor_free', False))
+    stack = Stack.from_dict(meta['stack'])
+    options = dict(sigma_free=meta['sigma_free'],
+                   floor_free=meta.get('floor_free', False))
+    floor = meta.get('error_floor', 0.0)
+    joint = meta.get('joint')
+    if joint is None:
+        problem = posterior_problem(
+            stack, data, grid=None if grid is None else np.array(grid),
+            error_floor=floor, **options)
+    else:
+        fits = [(name, FitProblem(
+            stack, [d for d, c in zip(data, meta['channels'])
+                    if c['part'] == k], 'chi2',
+            grid=None if g is None else np.array(g), error_floor=floor))
+            for k, (name, g) in enumerate(zip(meta['datasets'],
+                                              joint['grids']))]
+        problem = PosteriorProblem(JointProblem(fits, joint['modes'],
+                                                joint['fixed']), **options)
     if problem.names != list(meta['names']):
         raise ValueError('the stored stack gives the parameters %s, the '
                          'chains have %s' % (problem.names, meta['names']))
@@ -602,7 +613,7 @@ def posterior_warnings(result, bounds=None, discard=0.5, rhat_max=1.1,
 def prior_tension(fit_problem, x, names=None):
     """'Prior–data tension' texts of the values x (physical) of
     fit_problem's parameters that pull against their priors."""
-    names = names or parameter_names(fit_problem.stack, fit_problem.params)
+    names = names or fit_problem.names
     out = []
     for n, p, v in zip(names, fit_problem.priors, x):
         t = None if p is None else tension(p.spec, v)
@@ -638,7 +649,7 @@ def _asymmetry_pair(names):
 
 
 def predictive_bands(result, problem, n=200, discard=0.5, seed=0,
-                     replicates=20):
+                     replicates=20, part=0):
     """Model R of n posterior draws at the fitted points:
     {'channels': [{'name', 'Q', 'R', 'dR', 'bands', 'predictive'}],
      'asymmetry': {'Q', 'A', 'dA', 'bands', 'predictive'} or None},
@@ -648,40 +659,63 @@ def predictive_bands(result, problem, n=200, discard=0.5, seed=0,
     floor of that draw when they are sampled), `replicates` times per draw so its percentiles are
     smooth: where replicated data would fall, about as wide as the error
     bars.  The spin asymmetry (a - b) / (a + b) is given for R+ /
-    R- (or R++ / R--) fitted on the same Q points."""
+    R- (or R++ / R--) on a's Q points, b interpolated onto them where
+    the grids differ (NaN outside b's range).  The channels of
+    dataset `part` of a joint fit (fit.joint)."""
     fit = problem.fit
     nfit = len(fit.params)
+    sub = parts(fit)[part]
+    # the part's channels among the likelihood's
+    ks = [k for k, p in enumerate(getattr(fit, 'channel_part',
+                                          [0] * len(fit.channels)))
+          if p == part]
     X = draws(result, n, discard, seed)
-    models = [problem.model(x[:nfit]) for x in X]
+    models = [sub.model(part_x(fit, x[:nfit], part)) for x in X]
     errs = [problem.errors(x) for x in X]
     rng = np.random.default_rng(seed + 1)
     channels, reps = [], []
-    for k, (name, idx, R, dR) in enumerate(fit.channels):
+    for k, (name, idx, R, dR) in enumerate(sub.channels):
         M = np.array([m[k] for m in models])
-        E = np.array([e[k] for e in errs])
+        E = np.array([e[ks[k]] for e in errs])
         rep = (M[:, None] + rng.normal(size=(len(M), replicates, M.shape[1]))
                * E[:, None]).reshape(-1, M.shape[1])
         reps.append(rep)
         channels.append(dict(
-            name=name, Q=fit.Q[idx], R=R, dR=dR,
+            name=name, Q=sub.Q[idx], R=R, dR=dR,
             bands=np.percentile(M, BAND_PERCENTILES, axis=0),
             predictive=np.percentile(rep, BAND_PERCENTILES, axis=0)))
     asym = None
     pair = _asymmetry_pair([c['name'] for c in channels])
     if pair is not None:
-        a, b = (channels[k] for k in pair)
-        if np.array_equal(a['Q'], b['Q']):
-            i, j = pair
-            with np.errstate(divide='ignore', invalid='ignore'):
-                tot = a['R'] + b['R']
-                A = np.array([(m[i] - m[j]) / (m[i] + m[j]) for m in models])
-                Arep = (reps[i] - reps[j]) / (reps[i] + reps[j])
-                asym = dict(Q=a['Q'], A=(a['R'] - b['R']) / tot,
-                            dA=2 * np.hypot(b['R'] * a['dR'],
-                                            a['R'] * b['dR']) / tot**2,
-                            bands=np.percentile(A, BAND_PERCENTILES, axis=0),
-                            predictive=np.nanpercentile(
-                                Arep, BAND_PERCENTILES, axis=0))
+        i, j = pair
+        a, b = channels[i], channels[j]
+        Q = a['Q']
+
+        def on_a(y):
+            # b's rows (data, model draws, replicates) at a's Q points,
+            # linear, NaN outside b's range (as the Experimental tab)
+            y = np.atleast_2d(y)
+            if np.array_equal(Q, b['Q']):
+                return y
+            o = np.argsort(b['Q'])
+            return np.array([np.interp(Q, b['Q'][o], r[o], left=np.nan,
+                                       right=np.nan) for r in y])
+
+        Ma = np.array([m[i] for m in models])
+        Mb = on_a(np.array([m[j] for m in models]))
+        Rb, dRb = on_a(b['R'])[0], on_a(b['dR'])[0]
+        # all-NaN columns (outside b's range) give NaN percentiles
+        with np.errstate(divide='ignore', invalid='ignore'), \
+                warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            tot = a['R'] + Rb
+            A = (Ma - Mb) / (Ma + Mb)
+            Arep = (reps[i] - on_a(reps[j])) / (reps[i] + on_a(reps[j]))
+            asym = dict(Q=Q, A=(a['R'] - Rb) / tot,
+                        dA=2 * np.hypot(Rb * a['dR'], a['R'] * dRb) / tot**2,
+                        bands=np.nanpercentile(A, BAND_PERCENTILES, axis=0),
+                        predictive=np.nanpercentile(
+                            Arep, BAND_PERCENTILES, axis=0))
     return dict(channels=channels, asymmetry=asym)
 
 
@@ -698,14 +732,16 @@ def slab_profile(st, z):
             np.array([Stack.inplane_rho(s) for s in slabs])[k])
 
 
-def profile_bands(result, problem, n=200, discard=0.5, seed=0, npts=1500):
+def profile_bands(result, problem, n=200, discard=0.5, seed=0, npts=1500,
+                  part=0):
     """(z, nuclear bands, magnetic bands): the slab NSLD and in-plane MSLD
     of n posterior draws on a common depth grid around the MAP stack, bands
-    (5, npts) in A^-2."""
+    (5, npts) in A^-2; the stack of dataset `part` of a joint fit."""
     fit = problem.fit
     nfit = len(fit.params)
-    st = copy.deepcopy(fit.stack)
-    fit.apply(result.best()[0][:nfit], st)
+    sub = parts(fit)[part]
+    st = copy.deepcopy(sub.stack)
+    sub.apply(part_x(fit, result.best()[0][:nfit], part), st)
     st.build_sublayers()
     lo = st.windows()[0][0]
     hi = lo + sum(s.thickness for s in st.sublayers)
@@ -713,7 +749,7 @@ def profile_bands(result, problem, n=200, discard=0.5, seed=0, npts=1500):
     z = np.linspace(lo - pad, hi + pad, npts)
     nuc, mag = [], []
     for x in draws(result, n, discard, seed):
-        fit.apply(x[:nfit], st)
+        sub.apply(part_x(fit, x[:nfit], part), st)
         st.build_sublayers()
         a, b = slab_profile(st, z)
         nuc.append(a)

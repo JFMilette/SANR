@@ -384,14 +384,11 @@ def read_resolution(path):
             Lambda=4*pi*sin(Theta)./Q and
             Sigma=Q.*sqrt((DTheta/Theta)^2+(DLambda./Lambda).^2)
             -> mode 'tof' with that one angle
-      MONO  Lambda, DLambda (A), DTheta (rad, as DTheta=... or
-            DTheta(Q > 0)=...), Theta = asin(Q Lambda / 4 pi) and
-            Sigma=Q.*sqrt((DTheta./Theta).^2+(DLambda/Lambda)^2)
-            -> mode 'mono'"""
+    (Licorne's MONO template, fixed wavelength, is not read.)"""
     v = read_assignments(path)
     idx = sorted(int(k[5:]) for k in v if re.fullmatch(r'Theta\d+', k))
     if not idx:
-        return _read_tof1(path, v) or _read_mono(path, v)
+        return _read_tof1(path, v)
     if idx != list(range(1, len(idx) + 1)) or \
             not isinstance(v.get('DLambda'), float):
         return None
@@ -405,13 +402,6 @@ def read_resolution(path):
                        'dtheta': v['DTheta%d' % i], 'qmax': qmax})
     return {'enabled': True, 'mode': 'tof', 'tof_dlambda': v['DLambda'],
             'tof_angles': angles}
-
-
-_MONO_SIGMA = 'sigma=q.*sqrt((dtheta./theta).^2+(dlambda/lambda)^2);'
-_MONO_THETA = re.compile(r'theta=asin\((q\.?\*lambda|lambda\.?\*q)'
-                         r'(/4/pi|/\(4\*pi\)|\./4\./pi)\);')
-_DTHETA = re.compile(r'(?:^|;)\s*DTheta\s*(?:\(\s*Q\s*>\s*0\s*\))?\s*=\s*'
-                     r'([-+0-9.eE]+)\s*;', re.M)
 
 
 _TOF1_LAMBDA = 'lambda=4*pi*sin(theta)./q;'
@@ -429,21 +419,6 @@ def _read_tof1(path, v):
     return {'enabled': True, 'mode': 'tof', 'tof_dlambda': v['DLambda'],
             'tof_angles': [{'theta': v['Theta'], 'dtheta': v['DTheta'],
                             'qmax': None}]}
-
-
-def _read_mono(path, v):
-    """MONO template of read_resolution, None if the script is not it."""
-    with open(path) as fh:
-        text = re.sub(r'%.*', '', fh.read())
-    flat = re.sub(r'\s+', '', text).lower()
-    dth = _DTHETA.findall(text)
-    lam, dlam = v.get('Lambda'), v.get('DLambda')
-    if _MONO_SIGMA not in flat or not _MONO_THETA.search(flat) or \
-            len(dth) != 1 or not isinstance(lam, float) or \
-            not isinstance(dlam, float) or lam <= 0:
-        return None
-    return {'enabled': True, 'mode': 'mono', 'wavelength': lam,
-            'dlambda_rel': dlam / lam, 'dtheta': float(dth[0])}
 
 
 def licorne_channel(pol, an, R=np.eye(3), flat=False):
@@ -598,8 +573,8 @@ def load_licorne_session(folder, axis_map=None):
                          'session with ResolutionFun 3 (read_param.m).')
     else:
         stack.resolution['enabled'] = False
-        notes.append('resolution.m is not one of Licorne\'s templates (TOF, '
-                     'one-angle TOF, MONO): the resolution is off.')
+        notes.append('resolution.m is not one of Licorne\'s TOF templates '
+                     '(several angles or one): the resolution is off.')
 
     q_path = os.path.join(folder, 'q.dat')
     q_mult = float(top.get('Q_mult', 1.0))

@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import model.stack as S                                 # noqa: E402
-from fit.de.de_fit import run_de                       # noqa: E402
+from fit.de.de_fit import run_de, run_lbfgs            # noqa: E402
 from fit.problem import FitProblem                      # noqa: E402
 from model.polarisation import channel_pair, in_plane   # noqa: E402
 
@@ -181,3 +181,96 @@ def test_fit_recovers_scale_and_background():
                                                'background']
     assert x == pytest.approx([80.0, 0.97, 2e-6], rel=1e-3)
     assert cost < 1e-6
+
+
+def test_status_reports_generations_and_polish():
+    Q = np.linspace(0.004, 0.12, 200)
+    data = measure(film(), Q, in_plane(0.0))
+    st = film()
+    st.layers[1].thickness = 70.0
+    vary(st, 'thickness', 50, 110)
+    vary(st, 'NSLD_real', 6e-6, 10e-6)
+    prob = FitProblem(st, data)
+    seen = []
+    x, cost, gen, msg = run_de(prob, maxiter=5, popsize=5, seed=0,
+                               status=seen.append)
+    de = [i for i in seen if i['phase'] == 'de']
+    pol = [i for i in seen if i['phase'] == 'polish']
+    assert [i['generation'] for i in de] == list(range(1, gen + 1))
+    assert all(i['spread'] >= 0 and i['median'] >= i['best'] for i in de)
+    assert pol and pol[0]['iteration'] == 0          # announced first
+    assert cost <= de[-1]['best'] + 1e-12            # never worse
+    # with workers, the polish's gradients go to the pool
+    seen.clear()
+    x2, c2, *_ = run_de(prob, maxiter=5, popsize=5, seed=0, workers=2,
+                        status=seen.append)
+    assert any(i['phase'] == 'polish' and i['iteration'] > 0 for i in seen)
+
+
+def test_stop_and_continue():
+    """A fit stopped mid-way goes on from its last population (fit.de.de_fit
+    CONTINUE): the generations count on, the cost never goes back up, and
+    it reaches the same optimum; with restarts, the stopped run resumes and
+    the runs left follow."""
+    from fit.de.de_fit import run_de_restarts
+    Q = np.linspace(0.004, 0.12, 200)
+    prob = FitProblem(_varied(), measure(film(), Q, in_plane(0.0)))
+    calls = [0]
+
+    def after(n):
+        def cancelled():
+            calls[0] += 1
+            return calls[0] > n
+        return cancelled
+    state = {}
+    x, cost, gen, msg = run_de(prob, seed=0, tol=1e-8, polish=False,
+                               cancelled=after(300), state=state)
+    assert msg == 'stopped' and gen == state['generation'] > 0
+    assert state['energies'][0] == cost
+    assert np.allclose(prob.to_x(state['population'][0]), x)
+    gens = []
+    x2, c2, g2, msg2 = run_de(prob, seed=1, tol=1e-8, resume=state,
+                              callback=lambda x, c, g: gens.append((g, c)))
+    assert gens[0][0] == gen + 1 and gens[0][1] <= cost
+    assert np.all(np.diff([c for _, c in gens]) <= 0)
+    assert np.allclose(x2, [80.0], rtol=1e-4) and c2 < 1e-6
+    # restarts: stopped in run 1 of 2, continued with one run left
+    calls[0] = 0
+    state = {}
+    (x, cost, gen, msg), ends = run_de_restarts(
+        prob, restarts=2, seed=0, tol=1e-8, polish=False,
+        cancelled=after(300), state=state)
+    assert msg == 'stopped' and state['run'] == 0 and ends[0][0] == 0
+    info = []
+    (x2, c2, g2, msg2), ends2 = run_de_restarts(
+        prob, restarts=2, seed=5, tol=1e-8, polish=False, resume=state,
+        status=info.append)
+    assert info[0]['run'] == 1 and info[0]['generation'] == gen + 1
+    assert [k for k, *_ in ends2] == [0, 1] and c2 < 1e-6
+
+
+def test_lbfgs_alone_from_the_current_values():
+    """run_lbfgs: from a start near the truth it reaches it, reporting the
+    start as iteration 0 then every iteration; with workers the same; a
+    stop request ends it at once with the start's cost."""
+    Q = np.linspace(0.004, 0.12, 200)
+    data = measure(film(), Q, in_plane(0.0))
+    st = film()
+    st.layers[1].thickness = 78.0
+    st.layers[1].roughness_sigma = 4.5
+    vary(st, 'thickness', 60.0, 100.0)
+    vary(st, 'roughness_sigma', 1.0, 8.0)
+    prob = FitProblem(st, data)
+    seen, info = [], []
+    x, cost, it, msg = run_lbfgs(prob, callback=lambda *a: seen.append(a),
+                                 status=info.append)
+    assert np.allclose(x, [80.0, 4.0], rtol=1e-3) and cost < 1e-4
+    assert [s[2] for s in seen] == list(range(it + 1)) and it > 0
+    assert np.allclose(seen[0][0], [78.0, 4.5]) and seen[0][1] > cost
+    assert info[-1] == {'phase': 'lbfgs', 'iteration': it, 'maxiter': 1000,
+                        'best': seen[-1][1]}
+    x2, c2, *_ = run_lbfgs(prob, workers=2)
+    assert np.allclose(x2, x, rtol=1e-4)
+    x, c, it, msg = run_lbfgs(prob, cancelled=lambda: True)
+    assert msg == 'stopped' and it == 0 and np.allclose(x, [78.0, 4.5])
+    assert np.isclose(c, seen[0][1])

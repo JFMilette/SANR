@@ -60,10 +60,12 @@ def test_de_window_draws_the_fitted_model(app):
     fp = FitProblem(sim.stack, data, 'chi2', qmin, qmax, grid)
     win = DEWindow(exp)
     grids = model_grid(sim.stack, sim.last_Q, s['channels'], grid)
-    win.start(fp, {}, dict(exp.sim_vectors(), **vec), grids, 'd', 'χ²')
+    win.start(fp, [dict(name='d', data={},
+                        vectors=dict(exp.sim_vectors(), **vec),
+                        grids=grids)], 'd', 'χ²')
     x = fp.to_x(fp.x0())
     for (name, *_), m in zip(fp.channels, fp.model(x)):
-        drawn = win._model[name[1:]]
+        drawn = win.views[0]._model[name[1:]]
         assert np.array_equal(drawn['Q'], Q1)
         assert np.max(np.abs(drawn['R'][Q1 <= qmax] / m - 1)) <= 1e-12
     win.close()
@@ -91,3 +93,27 @@ def test_live_curves_take_the_norms(app):
     bare = st.reflectivities(Q, [pair])[:, 0] - st.background
     assert np.allclose(live['+']['R'], 0.5 * bare + st.background,
                        rtol=1e-12, atol=0)
+
+
+def test_frozen_copy_sends_its_model_back(app, monkeypatch):
+    sim, exp = tab()
+    exp.add_simulation()
+    t0 = sim.stack.layers[2].thickness
+    exp.freeze_simulation(len(exp.sets) - 1)
+    frozen = exp.sets[-1]
+    assert frozen['model']['layers'][2]['thickness'] == t0
+    # kept through a session
+    exp.restore_state(exp.session_state('.'), '.')
+    frozen = exp.sets[-1]
+    assert frozen['model']['layers'][2]['thickness'] == t0
+    sim.stack.layers[2].thickness = t0 + 25.0
+    sim.refresh_list(select=2)
+    sim.recompute()
+    monkeypatch.setattr(QtWidgets.QMessageBox, 'question', lambda *a: (
+        QtWidgets.QMessageBox.StandardButton.Yes))
+    exp.send_model(len(exp.sets) - 1)
+    assert sim.stack.layers[2].thickness == t0
+    # the live copy follows the Simulation tab again
+    live = next(s for s in exp.sets if s.get('live'))
+    assert np.allclose(live['channels']['+']['R'],
+                       frozen['channels']['+']['R'])

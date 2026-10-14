@@ -1,23 +1,72 @@
 """
 Layer / Stack model for spin-dependent neutron reflectometry.
 
-PROFILE -- additive interface steps.  For any quantity v,
+PROFILE -- interface steps.  For any quantity v,
 
-    v(z) = v_0 + SUM_j ( v_{j+1} - v_j ) * f_j( z - Z_j )
+    v(z) = v_0 + SUM_j ( v_{j+1} - v_j ) * F_j(z)
+
+built from the step of each interface j at depth Z_j,
 
     f_j(u) = [1 + erf( u/(sigma_j*sqrt(2)) )]/2          'erf'
            = [1 + tanh( u*2/(sigma_j*sqrt(2*pi)) )]/2    'tanh', slope-matched
 
-Interfaces superpose, so sigma may exceed a layer thickness: the layer then
-smoothly fails to reach its nominal value.  No truncation, no renormalisation.
+combined as Stack.interface_order says (INTERFACE_ORDERS; 'rms' scheme only):
+  'ordered' (a new stack's default): F_j(z) = max_{i >= j} f_i(z - Z_i), the
+      running max from the backing up.  The interfaces keep their order in
+      the growth direction (the backing is the substrate, grown on first):
+      the height of interface j is h'_j = min(h_j, h'_{j+1}), comonotone
+      fluctuations, so where it would dip below the interface under it, it
+      sits on it.  The occupancy of layer k, F_{k-1} - F_k (F_{-1} = 1,
+      F_last = 0), is >= 0 and the occupancies sum to 1: every quantity is a
+      weighted average of the layer values.  Where no interfaces cross
+      (f_j >= f_{j+1} everywhere, e.g. equal sigmas and models) F_j = f_j and
+      the profile is bit-identical to 'additive'.  Where they cross, the
+      profile stays continuous with a slope kink at the crossing (for erf
+      at z* = (sigma_{j+1} Z_j - sigma_j Z_{j+1}) / (sigma_{j+1} - sigma_j)),
+      and a layer's integrated amount is no longer exactly t v: it gains
+      the negative area 'additive' would give it.
+  'independent': F_j(z) = 1 - PROD_{i >= j} (1 - f_i(z - Z_i)).  Each
+      interface's height h_i fluctuates independently of the others, and
+      interface j again sits at h'_j = min_{i >= j} h_i, so the occupancy
+      of layer k, f_{k-1} PROD_{i >= k} (1 - f_i), is >= 0 and the
+      occupancies sum to 1.  The profile is smooth everywhere (no kink),
+      but unlike 'ordered' it differs from 'additive' even where nothing
+      crosses: a layer only a few sigma thick gains material (equal
+      sigmas: +2.5 % erf / +4.3 % tanh for t = 2 sigma, +20 / +25 % for
+      t = sigma).
+  'additive' (files saved before the setting existed): F_j = f_j, the
+      interfaces superpose and every layer keeps its integrated amount.
+      Where a wider interface reaches past a sharper neighbour the
+      occupancy f_{k-1} - f_k goes negative: the NSLD or rho overshoots
+      (rho < 0 in 'step' and 'angle' smearing), and in 'vector' smearing M
+      points backwards (theta flips half a turn, |M| has a cusp at 0).
+      Stack.interface_crossing() says where and how far.
+In both, sigma may exceed a layer thickness: the layer then smoothly fails
+to reach its nominal value.  No truncation, no renormalisation.
 
 OWNERSHIP -- layer k's roughness_sigma and roughness_sublayer both describe the
 interface at the TOP of layer k.  The fronting has no interface above it, so
 its values are unused; the backing's describe the last interface.
 
+MAGNETIC ROUGHNESS -- layer k's MSLD_sigma, when not None, is the width of
+the magnetic profile (rho, theta, phi, however magnetic_smearing smears
+them) at the interface at the top of layer k, the NSLD keeping
+roughness_sigma; None (the default) uses roughness_sigma for both.  Same
+function (roughness_model); in the 'rms' scheme the same interface_order.
+In the Licorne scheme the magnetic values get a Licorne window of their own
+(Stack._licorne_interfaces 'mag'): truncated at gamma(MSLD_sigma), clipped
+at the half thicknesses and renormalised like the NSLD's.  Inside the wider
+of the two windows each quantity follows its own window and keeps its
+layer's core value outside it; the window is cut into both windows' N equal
+slabs together, so every jump sits on a slab edge.  Licorne itself has no
+magnetic roughness: with any MSLD_sigma set the result is no longer a
+Licorne model.
+
 SLICING -- interface j owns the window
 
     [ Z_j - min(tail*sigma_j, T_above/2) ,  Z_j + min(tail*sigma_j, T_below/2) ]
+
+(sigma_j the larger of the interface's roughness_sigma and MSLD_sigma)
 
 cut into roughness_sublayer slabs.  Clipping at the half-thicknesses means the
 interface above a layer claims at most T/2 of it and the one below claims the
@@ -113,11 +162,8 @@ Gaussian in Q of standard deviation
 
     sigma_Q = Q * sqrt( (dtheta/theta)^2 + (dlambda/lambda)^2 ),
 
-where resolution['mode'] says which of theta, lambda is fixed
-(RESOLUTION_MODES, one sigma function per mode):
-  'mono' -- fixed wavelength, angle scan (Licorne resolution.m, MONO mode):
-            theta = asin(Q lambda / 4 pi); 'wavelength' (A), 'dlambda_rel'
-            (dlambda / lambda), 'dtheta' (rad).
+where resolution['mode'] says where sigma_Q comes from (RESOLUTION_MODES,
+one sigma function per mode):
   'tof'  -- time of flight at a few fixed angles, each covering a Q band:
             lambda = 4 pi sin(theta) / Q; 'tof_dlambda' (A, absolute) and
             'tof_angles' = [{'theta', 'dtheta' (rad), 'qmax' (A^-1)}, ...]
@@ -126,6 +172,15 @@ where resolution['mode'] says which of theta, lambda is fixed
             two or more limits, Q equal to the last one stays with the
             angle below it, as in Licorne's TOF template
             (QP2=(Q>=Q1)&(Q<=Q2)).
+  'data' -- the measured dQ: 'data_q', 'data_dq' (A^-1, already a
+            standard deviation) are a table of sigma_Q against Q, linearly
+            interpolated (end values outside it), taken from a dataset
+            ('data_set' its name, 'data_overlap' how the table treats two
+            overlapping stitched angles: 'mean', 'first' or 'last', see
+            tabs.resolution.dq_table).  It gives sigma_Q at any Q (the Simulation tab, model
+            curves); a fit uses each data point's own dQ instead
+            (Stack.data_sigma, fit.problem RESOLUTION), so stitched angles
+            whose dQ do not join up are each taken as measured.
 resolution['scheme'] says how the average is taken:
   'quadrature' (default) -- the Gaussian average below, independent of the
             Q points asked for.
@@ -190,7 +245,7 @@ from model.licorne_resolution import kernel as licorne_kernel
 # bounds in the same units as the attribute (Angstrom, A^-2, turns), and
 # optionally 'prior' (fit.priors SPEC, None for none).
 FIT_PARAMS = ('thickness', 'NSLD_real', 'NSLD_img', 'MSLD_rho', 'MSLD_theta',
-              'MSLD_phi', 'roughness_sigma')
+              'MSLD_phi', 'roughness_sigma', 'MSLD_sigma')
 # Stack attributes a fit may vary, in Stack.fit the same way; their
 # free_parameters() entries have layer index None.
 STACK_FIT_PARAMS = ('scale', 'background')
@@ -205,6 +260,7 @@ DEFAULT_BOUNDS = {
     'MSLD_theta':      (0.0, 1.0),         # turns
     'MSLD_phi':        (-0.25, 0.25),      # turns, out of plane
     'roughness_sigma': (0.0, 10.0),        # Angstrom
+    'MSLD_sigma':      (0.0, 10.0),        # Angstrom
     'scale':           (0.5, 1.5),
     'background':      (0.0, 1e-5),
 }
@@ -253,11 +309,23 @@ LICORNE_DECIMALS = 15
 
 # |M| below M_TINY of the largest layer rho has no meaningful direction: its
 # angle is round-off noise, or the direction of a leftover interface tail far
-# from any magnetic layer (e.g. a rough interface's tail outliving a sharper
-# one below it points along M_above - M_below).  See Stack.angle_defined.
+# from any magnetic layer (with interface_order 'additive', a rough
+# interface's tail outliving a sharper one below it points along M_above -
+# M_below; 'ordered' and 'independent' have none).  See Stack.angle_defined.
 M_TINY = 1e-3
 
 ROUGHNESS_SCHEMES = ('rms', 'licorne')
+# Stack.interface_order: how the 'rms' scheme's interfaces combine (see
+# PROFILE)
+INTERFACE_ORDERS = ('additive', 'ordered', 'independent')
+# Stack.interface_crossing: a layer is listed when its additive occupancy
+# goes below -CROSSING_TINY (round-off in far tails stays above); the
+# default depth grid has steps of CROSSING_STEP (A), at most
+# CROSSING_POINTS points, out to CROSSING_PAD sigma beyond the interfaces
+CROSSING_TINY = 1e-9
+CROSSING_STEP = 0.05
+CROSSING_POINTS = 20000
+CROSSING_PAD = 8.0
 # Stack.licorne_outer: thickness of the fronting / backing for the Licorne
 # windows (see ROUGHNESS SCHEME)
 LICORNE_OUTER = ('infinite', 'licorne')
@@ -317,27 +385,21 @@ def _weigh(Rab, w):
 
 
 
-# default resolution: mono is Licorne's resolution.m (lambda = 5 A,
-# dlambda = 0.01 A, dtheta = 0.7 mrad), tof its three-angle TOF setup
+# default resolution: Licorne's three-angle TOF resolution.m
 DEFAULT_RESOLUTION = {
-    'enabled': False, 'mode': 'mono',
-    'wavelength': 5.0, 'dlambda_rel': 0.002, 'dtheta': 7e-4,
+    'enabled': False, 'mode': 'tof',
     'tof_dlambda': 0.005,
     'tof_angles': [{'theta': 0.006, 'dtheta': 3e-4, 'qmax': 0.04},
                    {'theta': 0.010, 'dtheta': 5e-4, 'qmax': 0.12},
                    {'theta': 0.017, 'dtheta': 5e-4, 'qmax': None}],
     'scheme': 'quadrature', 'licorne_fun': 3,
+    'data_q': [], 'data_dq': [], 'data_set': '',
+    'data_overlap': 'mean',
 }
 # resolution['scheme'] (see RESOLUTION)
 RES_SCHEMES = ('quadrature', 'licorne')
 # Licorne weight matrices kept per stack (one per Q grid, sigma and mode)
 LICORNE_W_CACHE = 4
-
-
-def _sigma_mono(Q, res):
-    """Fixed wavelength (see RESOLUTION); Q > 0."""
-    s = np.clip(Q * res['wavelength'] / (4*np.pi), 1e-12, 1.0)
-    return Q * np.hypot(res['dtheta'] / np.arcsin(s), res['dlambda_rel'])
 
 
 def _sigma_tof(Q, res):
@@ -359,8 +421,19 @@ def _sigma_tof(Q, res):
     return Q * np.hypot(dtheta[k] / theta[k], res['tof_dlambda'] / lam)
 
 
+def _sigma_data(Q, res):
+    """The measured dQ table (see RESOLUTION); Q > 0."""
+    q = np.asarray(res.get('data_q', ()), dtype=float)
+    if q.size == 0:
+        raise ValueError('resolution from data dQ: no dQ table yet (choose '
+                         'a dataset with Show…)')
+    return np.interp(Q, q, np.asarray(res['data_dq'], dtype=float))
+
+
 # resolution['mode'] -> sigma_Q(Q > 0, resolution dict)
-RESOLUTION_MODES = {'mono': _sigma_mono, 'tof': _sigma_tof}
+RESOLUTION_MODES = {'tof': _sigma_tof, 'data': _sigma_data}
+# keys of resolution modes that no longer exist (fixed wavelength, FWHM dQ)
+OLD_RESOLUTION_KEYS = ('wavelength', 'dlambda_rel', 'dtheta', 'data_fwhm')
 
 
 def _res_grid(Qn, sigma, bins=2048, edges_q=(), step=None):
@@ -407,8 +480,8 @@ def _res_grid(Qn, sigma, bins=2048, edges_q=(), step=None):
 class Layer:
     """A single homogeneous medium.
 
-    roughness_sigma / roughness_model / roughness_sublayer describe the
-    interface at the TOP of this layer.  `fit` holds the fit settings of the
+    roughness_sigma / roughness_model / roughness_sublayer / MSLD_sigma
+    describe the interface at the TOP of this layer.  `fit` holds the fit settings of the
     FIT_PARAMS (see fit_entry).
     """
 
@@ -417,7 +490,7 @@ class Layer:
                  MSLD_rho: float = 0.0, MSLD_theta: float = 0.0,
                  roughness_sigma: float = 0.0, roughness_model: str = "tanh",
                  roughness_sublayer: int = 5, fit: dict = None,
-                 MSLD_phi: float = 0.0):
+                 MSLD_phi: float = 0.0, MSLD_sigma: float = None):
         self.name = name
         self.thickness = thickness              # Angstrom
         self.NSLD_real = NSLD_real              # A^-2
@@ -428,6 +501,9 @@ class Layer:
         self.roughness_sigma = roughness_sigma  # Angstrom, Gaussian sigma
         self.roughness_model = roughness_model  # 'erf', 'tanh' or 'none'
         self.roughness_sublayer = roughness_sublayer
+        # Angstrom, the magnetic profile's own sigma; None: roughness_sigma
+        # (see MAGNETIC ROUGHNESS)
+        self.MSLD_sigma = MSLD_sigma
         self.fit = copy.deepcopy(fit or {})
 
     def fit_entry(self, attr):
@@ -455,19 +531,36 @@ def _step(u, sigma, model):
     return 0.5 * (1.0 + erf(u / (sigma * np.sqrt(2.0))))
 
 
-def _profile(z, Z, sigmas, models, vals):
-    """vals: asymptotic value of each medium, len(Z)+1 entries."""
+def _steps(z, Z, sigmas, models, order):
+    """F_j(z) of every interface (see PROFILE), shape (len(Z),) + z.shape:
+    the steps f_j themselves for 'additive', their running max from the
+    backing up for 'ordered', 1 - their running product of (1 - f) from the
+    backing up for 'independent' (as sums of log1p, so that a far tail
+    keeps its digits)."""
     z = np.asarray(z, dtype=float)
+    f = np.stack([_step(z - Zj, s, m) for Zj, s, m in zip(Z, sigmas, models)])
+    if order == 'ordered':
+        f = np.maximum.accumulate(f[::-1], axis=0)[::-1]
+    elif order == 'independent':
+        with np.errstate(divide='ignore'):
+            f = -np.expm1(np.cumsum(np.log1p(-f)[::-1], axis=0)[::-1])
+    return f
+
+
+def _combine(F, vals):
+    """The profile v_0 + SUM_j (v_{j+1} - v_j) F_j of the medium values
+    vals (len(F) + 1 entries) from the steps F of _steps."""
     vals = np.asarray(vals)
-    out = np.full(z.shape, vals[0], dtype=vals.dtype)
-    for j in range(len(Z)):
-        out = out + (vals[j + 1] - vals[j]) * _step(z - Z[j], sigmas[j], models[j])
+    out = np.full(F.shape[1:], vals[0], dtype=vals.dtype)
+    for j in range(len(F)):
+        out = out + (vals[j + 1] - vals[j]) * F[j]
     return out
 
 
 # ----------------------------------------------------------------- ties ----
-# A tie fits several layers' values of one attribute as ONE parameter.
-# Stack.ties = [{'members': [[i, attr], ...], 'mode': 'equal' | 'licorne',
+# A tie fits several layers' values of one attribute together.
+# Stack.ties = [{'members': [[i, attr], ...],
+#                'mode': 'equal' | 'licorne' | 'total',
 #                'v0': [...], 'lo': [...], 'hi': [...]}]
 # (v0, lo, hi: each member's value and bounds when the tie was made).
 #   'equal'    every member takes the fitted value S; S starts at the first
@@ -480,11 +573,22 @@ def _profile(z, Z, sigmas, models, vals):
 #              its v0 towards its hi in proportion, below towards its lo:
 #              m_j = v0_j + (S - S0) (hi_j - v0_j) / (sum hi - S0), S >= S0
 #              m_j = v0_j + (S - S0) (lo_j - v0_j) / (sum lo - S0), S < S0
-# Stack.free_parameters() lists a tie once, as (('tie', k), attr, S, lo,
+#   'total'    thickness only: the members' total thickness T (their sum
+#              when the fit starts) stays fixed while each varies.  Every
+#              member but the last is fitted on its own, the last takes the
+#              rest, t_last = T - (the others).  A fitted member's bounds
+#              are its own, narrowed so that the last stays within its own
+#              whatever the others do: the room the last has when the fit
+#              starts is shared equally among them (Stack.total_bounds; all
+#              of it with two members).
+# Stack.free_parameters() lists an 'equal' or 'licorne' tie once, as
+# (('tie', k), attr, S, lo, hi), and a 'total' tie as one entry per fitted
+# member m (its place in the tie), (('tie', k, m), 'thickness', t_m, lo,
 # hi), when any member is ticked Fit; the members are not listed
 # themselves.  Stack.owner(('tie', k)) is a TieOwner, so setattr(owner,
-# attr, S) sets every member.
-TIE_MODES = ('equal', 'licorne')
+# attr, S) sets every member; Stack.owner(('tie', k, m)) a TotalOwner,
+# whose setattr sets member m and gives the difference to the last.
+TIE_MODES = ('equal', 'licorne', 'total')
 
 
 class TieOwner:
@@ -508,13 +612,38 @@ class TieOwner:
         return {'vary': True, 'min': lo, 'max': hi}
 
 
+class TotalOwner:
+    """What Stack.owner returns for member m of 'total' tie k: that layer
+    (its value, `fit` and bounds, so a prior on its thickness applies),
+    except that writing its thickness gives the difference to the tie's
+    last member, keeping the total (see ties)."""
+
+    def __init__(self, stack, k, m):
+        i = stack.ties[k]['members'][m][0]
+        object.__setattr__(self, '_stack', stack)
+        object.__setattr__(self, '_k', k)
+        object.__setattr__(self, '_layer', stack.layers[i])
+
+    def __getattr__(self, name):
+        return getattr(self._layer, name)
+
+    def __setattr__(self, name, value):
+        last = self._stack.layers[self._stack.ties[self._k]['members'][-1][0]]
+        rest = self._layer.thickness + last.thickness
+        self._layer.thickness = float(value)
+        last.thickness = float(rest - value)
+
+    def fit_entry(self, attr):
+        return self._layer.fit_entry(attr)
+
+
 # ---------------------------------------------------------------- Stack ----
 class Stack:
     """[fronting, L1, ..., LN, backing].  Fronting and backing are
     semi-infinite; their thickness is ignored."""
 
     def __init__(self, layers, tail: float = 3.0, roughness_scheme='rms',
-                 magnetic_smearing=None):
+                 magnetic_smearing=None, interface_order='ordered'):
         if len(layers) < 2:
             raise ValueError('need at least a fronting and a backing')
         if roughness_scheme not in ROUGHNESS_SCHEMES:
@@ -523,6 +652,9 @@ class Stack:
         self.tail = tail                 # unclipped window half-width = tail*sigma
         # 'rms' or 'licorne' (see ROUGHNESS SCHEME)
         self.roughness_scheme = roughness_scheme
+        # 'ordered', 'additive' or 'independent' ('rms' scheme only, see
+        # PROFILE)
+        self.interface_order = interface_order
         # 'manual', 'licorne' or 'none' (Licorne scheme only, see
         # model.roughness RENORMALISATION)
         self.licorne_renorm = 'manual'
@@ -606,6 +738,7 @@ class Stack:
                 'resolution': copy.deepcopy(self.resolution),
                 'magnetic_smearing': self.magnetic_smearing,
                 'roughness_scheme': self.roughness_scheme,
+                'interface_order': self.interface_order,
                 'licorne_renorm': self.licorne_renorm,
                 'licorne_outer': self.licorne_outer,
                 'step_fallback': self.step_fallback,
@@ -616,15 +749,23 @@ class Stack:
     @classmethod
     def from_dict(cls, d):
         """Inverse of to_dict.  Files written before the Licorne scheme
-        existed load as 'rms'."""
+        existed load as 'rms', before interface_order existed as
+        'additive' (so old fits reproduce); a resolution in the removed fixed-wavelength
+        ('mono') mode loads as 'tof', off."""
         s = cls([Layer(**l) for l in d['layers']], tail=d['tail'],
                 roughness_scheme=d.get('roughness_scheme', 'rms'),
-                magnetic_smearing=d.get('magnetic_smearing'))
+                magnetic_smearing=d.get('magnetic_smearing'),
+                interface_order=d.get('interface_order', 'additive'))
         s.background = d['background']
         s.scale = float(d.get('scale', 1.0))
         s.fit = copy.deepcopy(d.get('fit', {}))
         s.q_in_fronting = bool(d['q_in_fronting'])
-        s.resolution.update(copy.deepcopy(d['resolution']))
+        res = copy.deepcopy(d['resolution'])
+        if res.get('mode', 'tof') not in RESOLUTION_MODES:
+            res.update(mode='tof', enabled=False)
+        for k in OLD_RESOLUTION_KEYS:
+            res.pop(k, None)
+        s.resolution.update(res)
         s.licorne_renorm = d.get('licorne_renorm', 'manual')
         s.licorne_outer = d.get('licorne_outer', 'infinite')
         s.step_fallback = bool(d.get('step_fallback', True))
@@ -640,6 +781,8 @@ class Stack:
             return 0 < i < n - 1
         if attr == 'roughness_sigma':
             return i > 0
+        if attr == 'MSLD_sigma':
+            return i > 0 and self.layers[i].MSLD_sigma is not None
         return True
 
     def fit_entry(self, attr):
@@ -656,6 +799,12 @@ class Stack:
         members = [[int(i), str(a)] for i, a in members]
         if mode not in TIE_MODES:
             raise ValueError('tie mode must be one of %s' % ', '.join(TIE_MODES))
+        if mode == 'total':
+            if any(a != 'thickness' for _, a in members):
+                raise ValueError('a total can only be kept for thicknesses')
+            if not all(self.fit_allowed(i, a) for i, a in members):
+                raise ValueError('the fronting and backing have no '
+                                 'thickness')
         if len(members) < 2 or len({a for _, a in members}) != 1:
             raise ValueError('a tie needs two or more layers and one '
                              'attribute')
@@ -688,9 +837,37 @@ class Stack:
         return None
 
     def tie_name(self, k):
-        """'tie(Layer 2.NSLD_real, Layer 3.NSLD_real)'."""
-        return 'tie(%s)' % ', '.join('%s.%s' % (self.layers[i].name, a)
-                                     for i, a in self.ties[k]['members'])
+        """'tie(Layer 2.NSLD_real, Layer 3.NSLD_real)', or
+        'total(A.thickness, B.thickness)' for a 'total' tie."""
+        t = self.ties[k]
+        return '%s(%s)' % ('total' if t['mode'] == 'total' else 'tie',
+                           ', '.join('%s.%s' % (self.layers[i].name, a)
+                                     for i, a in t['members']))
+
+    def entry_name(self, i):
+        """Name of the free_parameters() entry of a tie: tie_name for
+        ('tie', k), 'A.thickness in total(A.thickness, B.thickness)' for
+        member m of a 'total' tie, ('tie', k, m)."""
+        if len(i) == 2:
+            return self.tie_name(i[1])
+        j, a = self.ties[i[1]]['members'][i[2]]
+        return '%s.%s in %s' % (self.layers[j].name, a, self.tie_name(i[1]))
+
+    def total_bounds(self, k):
+        """(T, [(lo, hi)] of every member of 'total' tie k but the last):
+        each member's own bounds, narrowed so that whatever the others
+        take the last stays within its own (see ties).  The room the last
+        has, down to its min and up to its max, is shared equally among
+        the others: with two members, the one fitted can take all of it."""
+        mem = self.ties[k]['members']
+        t = [float(self.layers[i].thickness) for i, _ in mem]
+        es = [self.layers[i].fit_entry(a) for i, a in mem]
+        T, n = sum(t), len(mem) - 1
+        grow = (t[-1] - max(float(es[-1]['min']), 0.0)) / n
+        shrink = (float(es[-1]['max']) - t[-1]) / n
+        return T, [(max(float(e['min']), 0.0, tm - shrink),
+                    min(float(e['max']), tm + grow))
+                   for tm, e in zip(t[:-1], es[:-1])]
 
     def tie_bounds(self, k):
         t = self.ties[k]
@@ -740,9 +917,9 @@ class Stack:
 
     def free_parameters(self):
         """[(layer index, attr, value, min, max)] of every varied parameter:
-        the layers' in order, then the ties (layer index ('tie', k), when
-        any member is ticked Fit), then the stack's own (layer index
-        None)."""
+        the layers' in order, then the ties (layer index ('tie', k), or
+        ('tie', k, m) for the members of a 'total' tie, when any member is
+        ticked Fit), then the stack's own (layer index None)."""
         out = []
         tied = self.tied()
         for i, l in enumerate(self.layers):
@@ -753,8 +930,15 @@ class Stack:
                     out.append((i, attr, getattr(l, attr), e['min'], e['max']))
         for k, t in enumerate(self.ties):
             attr = t['members'][0][1]
-            if any(self.layers[i].fit.get(a, {}).get('vary')
-                   and self.fit_allowed(i, a) for i, a in t['members']):
+            if not any(self.layers[i].fit.get(a, {}).get('vary')
+                       and self.fit_allowed(i, a) for i, a in t['members']):
+                continue
+            if t['mode'] == 'total':
+                for m, (lo, hi) in enumerate(self.total_bounds(k)[1]):
+                    i = t['members'][m][0]
+                    out.append((('tie', k, m), attr,
+                                self.layers[i].thickness, lo, hi))
+            else:
                 out.append((('tie', k), attr, self.tie_value(k),
                             *self.tie_bounds(k)))
         for attr in STACK_FIT_PARAMS:
@@ -766,11 +950,13 @@ class Stack:
 
     def owner(self, i):
         """The object a free_parameters() entry with layer index i sets:
-        layer i, the stack itself for None, a TieOwner for ('tie', k)."""
+        layer i, the stack itself for None, a TieOwner for ('tie', k), a
+        TotalOwner for ('tie', k, m)."""
         if i is None:
             return self
         if isinstance(i, tuple):
-            return TieOwner(self, i[1])
+            return TieOwner(self, i[1]) if len(i) == 2 else \
+                TotalOwner(self, i[1], i[2])
         return self.layers[i]
 
     # -- geometry -----------------------------------------------------------
@@ -803,7 +989,8 @@ class Stack:
         for j, Zj in enumerate(Z):
             lay = self.layers[j + 1]
             w = 0.0 if lay.roughness_model == 'none' else \
-                self.tail * max(lay.roughness_sigma, 0.0)
+                self.tail * max(lay.roughness_sigma, 0.0,
+                                lay.MSLD_sigma or 0.0)
             out.append((Zj - min(w, t[j] / 2.0), Zj + min(w, t[j + 1] / 2.0)))
         return out
 
@@ -814,6 +1001,9 @@ class Stack:
         if self.magnetic_smearing not in SMEARING_MODES:
             raise ValueError('unknown magnetic smearing %r'
                              % (self.magnetic_smearing,))
+        if self.interface_order not in INTERFACE_ORDERS:
+            raise ValueError('unknown interface order %r'
+                             % (self.interface_order,))
 
     # -- slicing ------------------------------------------------------------
     def build_sublayers(self):
@@ -824,15 +1014,7 @@ class Stack:
         self._check_modes()
         if self.roughness_scheme == 'licorne':
             return self._build_licorne()
-        Z = self._interfaces()
-        n_if = len(Z)
-        sig = [max(self.layers[j + 1].roughness_sigma, 0.0) for j in range(n_if)]
-        mod = [self.layers[j + 1].roughness_model for j in range(n_if)]
-        nsub = [max(int(self.layers[j + 1].roughness_sublayer), 1)
-                for j in range(n_if)]
-
-        nsld = np.array([complex(l.NSLD_real, l.NSLD_img) for l in self.layers])
-
+        nsub = [max(int(l.roughness_sublayer), 1) for l in self.layers[1:]]
         pts = []
         for (lo, hi), m in zip(self.windows(), nsub):
             pts.append(np.array([lo]) if hi - lo < 1e-9
@@ -841,9 +1023,10 @@ class Stack:
         e = e[np.concatenate([[True], np.diff(e) > 1e-4])]
 
         c = 0.5 * (e[:-1] + e[1:])
-        v_n = _profile(c, Z, sig, mod, nsld)
-        v_rho, v_theta, v_phi = self._magnetic_profile(c, Z, sig, mod)
-        return self._set_sublayers(np.diff(e), v_n, v_rho, v_theta, v_phi)
+        F = self._rms_steps(c)
+        return self._set_sublayers(np.diff(e), _combine(F, self._nsld()),
+                                   *self._magnetic_profile(
+                                       self._magnetic_steps(c, F)))
 
     def _set_sublayers(self, th, v_n, v_rho, v_theta, v_phi):
         self.sublayers = [
@@ -863,47 +1046,61 @@ class Stack:
         self._check_modes()
         if self.roughness_scheme == 'licorne':
             return self._licorne_profile(z)
-        Z = self._interfaces()
-        n_if = len(Z)
-        sig = [max(self.layers[j + 1].roughness_sigma, 0.0) for j in range(n_if)]
-        mod = [self.layers[j + 1].roughness_model for j in range(n_if)]
-        nsld = np.array([complex(l.NSLD_real, l.NSLD_img) for l in self.layers])
-        return (_profile(z, Z, sig, mod, nsld),) + \
-            self._magnetic_profile(z, Z, sig, mod)
+        F = self._rms_steps(z)
+        return (_combine(F, self._nsld()),) + \
+            self._magnetic_profile(self._magnetic_steps(z, F))
 
-    def _magnetic_profile(self, z, Z, sig, mod):
-        """(|M|, theta, phi in turns) at depths z, smeared as
-        magnetic_smearing says (see MAGNETISATION)."""
+    def _nsld(self):
+        return np.array([complex(l.NSLD_real, l.NSLD_img) for l in self.layers])
+
+    def _rms_steps(self, z, order=None, magnetic=False):
+        """F_j at depths z of every interface in the 'rms' scheme (_steps),
+        combined as `order` says (default interface_order); with the
+        magnetic sigmas (see MAGNETIC ROUGHNESS) if `magnetic`."""
+        lay = self.layers[1:]
+        sig = [l.MSLD_sigma if magnetic and l.MSLD_sigma is not None
+               else l.roughness_sigma for l in lay]
+        return _steps(z, self._interfaces(), [max(s, 0.0) for s in sig],
+                      [l.roughness_model for l in lay],
+                      self.interface_order if order is None else order)
+
+    def _magnetic_steps(self, z, F, order=None):
+        """The magnetic profile's steps: F itself (the NSLD's) unless a
+        layer has its own MSLD_sigma."""
+        if all(l.MSLD_sigma is None for l in self.layers[1:]):
+            return F
+        return self._rms_steps(z, order, magnetic=True)
+
+    def _magnetic_profile(self, F):
+        """(|M|, theta, phi in turns) from the steps F (_rms_steps), smeared
+        as magnetic_smearing says (see MAGNETISATION)."""
         rho = np.array([l.MSLD_rho for l in self.layers])
         theta = np.array([l.MSLD_theta for l in self.layers])
         phi = np.array([l.MSLD_phi for l in self.layers])
         if self.magnetic_smearing == 'angle':
             # the interpolated angles are kept as is (the physics depends on
             # the path they take); only the reported theta is folded
-            return (_profile(z, Z, sig, mod, rho),
-                    wrap_turns(_profile(z, Z, sig, mod, theta)),
-                    _profile(z, Z, sig, mod, phi))
-        z = np.asarray(z, dtype=float)
+            return (_combine(F, rho), wrap_turns(_combine(F, theta)),
+                    _combine(F, phi))
+        shape = F.shape[1:]
         if self.magnetic_smearing == 'step':
-            # occupancy of layer k: f_{k-1} - f_k (f_{-1} = 1, f_last = 0);
+            # occupancy of layer k: F_{k-1} - F_k (F_{-1} = 1, F_last = 0);
             # each depth takes the angle of the layer that occupies it most
             # among those that have an angle (argmax: ties go to the upper)
-            f = np.stack([np.ones(z.shape)]
-                         + [_step(z - Z[j], sig[j], mod[j])
-                            for j in range(len(Z))] + [np.zeros(z.shape)])
+            f = np.concatenate([np.ones((1,) + shape), F,
+                                np.zeros((1,) + shape)])
             has = self._has_angle()
-            occ = np.where(has.reshape((-1,) + (1,)*z.ndim), f[:-1] - f[1:],
-                           -np.inf)
-            k = np.argmax(occ.reshape(len(self.layers), -1), 0).reshape(z.shape)
+            occ = np.where(has.reshape((-1,) + (1,)*len(shape)),
+                           f[:-1] - f[1:], -np.inf)
+            k = np.argmax(occ.reshape(len(self.layers), -1), 0).reshape(shape)
             some = np.any(has)
-            return (_profile(z, Z, sig, mod, rho),
+            return (_combine(F, rho),
                     wrap_turns(np.where(some, theta[k], 0.0)),
                     np.where(some, phi[k], 0.0))
         # in-plane part as one complex number, M_z separately; with phi = 0
         # everywhere mz is exactly 0 and this is the previous 2D smearing
-        mp = _profile(z, Z, sig, mod,
-                      rho * cos_turns(phi) * np.exp(2j*np.pi*theta))
-        mz = _profile(z, Z, sig, mod, rho * sin_turns(phi))
+        mp = _combine(F, rho * cos_turns(phi) * np.exp(2j*np.pi*theta))
+        mz = _combine(F, rho * sin_turns(phi))
         a = np.abs(mp)
         return (np.hypot(a, mz), wrap_turns(np.angle(mp) / (2*np.pi)),
                 np.arctan2(mz, a) / (2*np.pi))
@@ -948,10 +1145,20 @@ class Stack:
             Fa, Fb, la, lb, _ = rough.renormalised(
                 vals[j], vals[j + 1], t[j], t[j + 1], sL, kind,
                 self.licorne_renorm)
-            out.append({'Z': float(Zj), 'la': la, 'lb': lb, 'sigma': sL,
-                        'kind': kind,
-                        'N': max(int(own.roughness_sublayer), 1),
-                        'Fa': Fa, 'Fb': Fb, 'a': j, 'b': j + 1})
+            w = {'Z': float(Zj), 'la': la, 'lb': lb, 'sigma': sL,
+                 'kind': kind, 'N': max(int(own.roughness_sublayer), 1),
+                 'Fa': Fa, 'Fb': Fb, 'a': j, 'b': j + 1, 'mag': None}
+            if own.MSLD_sigma is not None:
+                # the magnetic profile's own Licorne window (MAGNETIC
+                # ROUGHNESS); la / lb become the extent of both
+                sM = max(own.MSLD_sigma, 0.0)
+                FaM, FbM, laM, lbM, _ = rough.renormalised(
+                    vals[j], vals[j + 1], t[j], t[j + 1], sM, kind,
+                    self.licorne_renorm)
+                w['mag'] = {'sigma': sM, 'la': laM, 'lb': lbM,
+                            'Fa': FaM, 'Fb': FbM, 'la_n': la, 'lb_n': lb}
+                w['la'], w['lb'] = max(la, laM), max(lb, lbM)
+            out.append(w)
         return out
 
     def _licorne_window(self, w, x):
@@ -960,8 +1167,22 @@ class Stack:
         x = np.asarray(x, dtype=float)
         s = rough.profile_fraction(x, w['sigma'], w['kind'])
         v = w['Fa'][:, None] + (w['Fb'] - w['Fa'])[:, None] * s[None, :]
-        nsld = v[0] + 1j * v[1]
         A, B = self.layers[w['a']], self.layers[w['b']]
+        m = w['mag']
+        if m is not None:
+            # the NSLD (rows 0, 1) and the magnetic values (rows 2-5) each
+            # follow their own window, their layer's core value outside it
+            sm = rough.profile_fraction(x, m['sigma'], w['kind'])
+            v[2:] = (m['Fa'][2:, None]
+                     + (m['Fb'] - m['Fa'])[2:, None] * sm[None, :])
+            va = self._licorne_values(A)[:, None]
+            vb = self._licorne_values(B)[:, None]
+            for rows, la, lb in ((slice(0, 2), m['la_n'], m['lb_n']),
+                                 (slice(2, 6), m['la'], m['lb'])):
+                v[rows] = np.where(x < -la, va[rows],
+                                   np.where(x >= lb, vb[rows], v[rows]))
+            s = np.where(x < -m['la'], 0.0, np.where(x >= m['lb'], 1.0, sm))
+        nsld = v[0] + 1j * v[1]
         mode = self.magnetic_smearing
         if mode == 'vector':
             mp = v[3] + 1j * v[4]
@@ -1025,9 +1246,20 @@ class Stack:
                              self._nominal(self.layers[w])])
                 continue
             N = w['N']
-            h = (w['la'] + w['lb']) / N
-            x = -w['la'] + h * (np.arange(N) + 0.5)
-            th.extend([h] * N)
+            if w['mag'] is None:
+                h = (w['la'] + w['lb']) / N
+                x = -w['la'] + h * (np.arange(N) + 0.5)
+                th.extend([h] * N)
+            else:
+                # both windows' N equal slabs, so that every jump of either
+                # profile sits on a slab edge
+                m = w['mag']
+                e = np.unique(np.concatenate(
+                    [np.linspace(-m['la_n'], m['lb_n'], N + 1),
+                     np.linspace(-m['la'], m['lb'], N + 1)]))
+                e = e[np.concatenate([[True], np.diff(e) > 1e-9])]
+                x = 0.5 * (e[:-1] + e[1:])
+                th.extend(np.diff(e))
             cols.append(list(self._licorne_window(w, x)))
         if not th:
             return self._set_sublayers([], [], [], [], [])
@@ -1074,6 +1306,93 @@ class Stack:
         ref = max((abs(l.MSLD_rho) for l in self.layers), default=0.0)
         return np.asarray(rho) > M_TINY * ref if ref > 0 else \
             np.zeros(np.shape(rho), dtype=bool)
+
+    # -- crossing interfaces (see PROFILE) ------------------------------------
+    def _linear_quantities(self):
+        """{name: value of every layer} of the quantities the 'rms' scheme
+        smears as v_0 + SUM (v_{j+1} - v_j) F_j under magnetic_smearing
+        (see MAGNETISATION); M_x, M_y, M_z are rho's Cartesian parts."""
+        L = self.layers
+        rho = np.array([l.MSLD_rho for l in L])
+        th = np.array([l.MSLD_theta for l in L])
+        ph = np.array([l.MSLD_phi for l in L])
+        q = {'NSLD_real': np.array([l.NSLD_real for l in L]),
+             'NSLD_img': np.array([l.NSLD_img for l in L])}
+        if self.magnetic_smearing == 'vector':
+            q.update(M_x=rho * cos_turns(ph) * cos_turns(th),
+                     M_y=rho * cos_turns(ph) * sin_turns(th),
+                     M_z=rho * sin_turns(ph))
+        elif self.magnetic_smearing == 'angle':
+            q.update(MSLD_rho=rho, MSLD_theta=th, MSLD_phi=ph)
+        else:
+            q['MSLD_rho'] = rho
+        return q
+
+    def interface_crossing(self, z=None):
+        """Where the 'rms' interfaces cross and what interface_order
+        'additive' does there, whatever the stack's own order (see PROFILE);
+        [] in the Licorne scheme.  One entry per layer k whose additive
+        occupancy f_{k-1} - f_k goes below -CROSSING_TINY at the depths z
+        (default: a grid of step CROSSING_STEP over every interface):
+            'layer'      k
+            'occupancy'  its most negative occupancy
+            'z'          the depth of that minimum
+            'host'       the layer whose nominal depth range holds 'z'
+            'zrange'     (lo, hi): where the occupancy is below 1 % of its
+                         minimum
+            'excursion'  {quantity (_linear_quantities): signed %}: how far
+                         the additive profile leaves the range of the layer
+                         values over zrange, where this layer's occupancy is
+                         the most negative one (< 0 below the smallest
+                         value, > 0 above the largest), in % of the host
+                         layer's value (of the largest |value| when that
+                         one is 0)."""
+        if self.roughness_scheme != 'rms':
+            return []
+        Z = self._interfaces()
+        if z is None:
+            sig = max(max(l.roughness_sigma, l.MSLD_sigma or 0.0, 0.0)
+                      for l in self.layers[1:])
+            pad = CROSSING_PAD * sig + 10.0
+            n = min(CROSSING_POINTS,
+                    int((Z[-1] - Z[0] + 2 * pad) / CROSSING_STEP) + 1)
+            z = np.linspace(Z[0] - pad, Z[-1] + pad, n)
+        z = np.asarray(z, dtype=float).ravel()
+        f = self._rms_steps(z, 'additive')
+        fm = self._magnetic_steps(z, f, 'additive')
+        one = np.ones((1, z.size))
+        # a layer's occupancy in the NSLD or in the magnetic profile
+        occ = np.minimum(*(np.concatenate([one, g]) - np.concatenate([g, 0 * one])
+                           for g in (f, fm)))
+        quant = self._linear_quantities()
+        prof = {q: _combine(f if q.startswith('NSLD') else fm, v)
+                for q, v in quant.items()}
+        host = np.searchsorted(Z, z, side='right')
+        worst_layer = np.argmin(occ, axis=0)
+        out = []
+        for k, o in enumerate(occ):
+            i = int(np.argmin(o))
+            if o[i] >= -CROSSING_TINY:
+                continue
+            sel = o < 0.01 * o[i]
+            own = sel & (worst_layer == k)
+            h = int(host[i])
+            exc = {}
+            for q, v in quant.items():
+                if not own.any():
+                    exc[q] = 0.0
+                    continue
+                p = prof[q][own]
+                below = min(p.min() - v.min(), 0.0)
+                above = max(p.max() - v.max(), 0.0)
+                ref = abs(v[h]) or np.max(np.abs(v))
+                worst = below if -below >= above else above
+                exc[q] = float(100.0 * worst / ref) if ref > 0 else 0.0
+            out.append({'layer': k, 'occupancy': float(o[i]),
+                        'z': float(z[i]), 'host': h,
+                        'zrange': (float(z[sel].min()), float(z[sel].max())),
+                        'excursion': exc})
+        return out
 
     # -- transfer matrix ----------------------------------------------------
     @staticmethod
@@ -1212,32 +1531,45 @@ class Stack:
         res = self.resolution
         if not res['enabled']:
             return np.zeros_like(Q)
-        mode = res.get('mode', 'mono')
+        mode = res.get('mode', 'tof')
         if mode not in RESOLUTION_MODES:
             raise ValueError('unknown resolution mode %r' % (mode,))
         with np.errstate(divide='ignore', invalid='ignore'):
             sigma = RESOLUTION_MODES[mode](np.abs(Q), res)
         return np.where(Q != 0, sigma, 0.0)
 
+    def data_sigma(self, Q, dQ):
+        """sigma_Q of measured points (Q, dQ) in the 'data' mode: their dQ
+        (a standard deviation), the dQ table where a dQ is missing or
+        <= 0."""
+        Q = np.atleast_1d(np.asarray(Q, dtype=float))
+        dQ = np.atleast_1d(np.asarray(dQ, dtype=float))
+        ok = np.isfinite(dQ) & (dQ > 0)
+        if ok.all():
+            return dQ
+        return np.where(ok, dQ, self.resolution_sigma(Q))
+
     # -- reflectivity -------------------------------------------------------
     def reflectivity(self, Q, P0, P=None):
         """reflectivities for the single pair (P0, P), shape (nQ,)."""
         return self.reflectivities(Q, [(P0, P)])[:, 0]
 
-    def reflectivities(self, Q, pairs, warn=True, norms=None):
+    def reflectivities(self, Q, pairs, warn=True, norms=None, sigma=None):
         """norm x scale x reflectivity + background of each (P0, P) in
         pairs (see POLARISATION), averaged over the Q resolution when it is
         enabled.  Shape (nQ, len(pairs)).  norms: a fixed factor per pair
         (default 1; Licorne's per-channel Norm_factor, model.licorne_io
-        NORMALISATION).  warn=False silences the warning about a
-        polarisation transverse to a magnetic fronting's M."""
+        NORMALISATION).  sigma: sigma_Q at each Q instead of the
+        resolution's (e.g. Stack.data_sigma); Q may then repeat.
+        warn=False silences the warning about a polarisation transverse to
+        a magnetic fronting's M."""
         pairs = _check_pairs(pairs)
         m = self.fronting_direction()
         if m is None:
-            R = self._resolve(Q, lambda q: self._trace(q, pairs))
+            R = self._resolve(Q, lambda q: self._trace(q, pairs), sigma)
         else:
             w = self._lab_weights(pairs, m, warn)
-            R = _weigh(self._resolve(Q, self._lab_channels), w)
+            R = _weigh(self._resolve(Q, self._lab_channels, sigma), w)
         if norms is not None:
             norms = np.asarray(norms, dtype=float)
             if norms.shape != (len(pairs),):
@@ -1259,10 +1591,12 @@ class Stack:
              for sb in (1, -1) for sf in (1, -1)]
         return sorted({float(np.sqrt(16 * np.pi * x)) for x in v if x > 0})
 
-    def _resolve(self, Q, ideal):
-        """Average ideal(Q) -> (nQ, k) over the Q resolution (see RESOLUTION)."""
+    def _resolve(self, Q, ideal, sigma=None):
+        """Average ideal(Q) -> (nQ, k) over the Q resolution (see
+        RESOLUTION), or over Gaussians of the given sigma_Q."""
         Q = np.atleast_1d(np.asarray(Q, dtype=float))
-        sigma = self.resolution_sigma(Q)
+        sigma = self.resolution_sigma(Q) if sigma is None else \
+            np.broadcast_to(np.asarray(sigma, dtype=float), Q.shape)
         if not np.any(sigma > 0):
             return ideal(Q)
         scheme = self.resolution.get('scheme', 'quadrature')

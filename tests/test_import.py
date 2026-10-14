@@ -67,3 +67,30 @@ def test_session_keeps_shift(app, data_file, monkeypatch):
     assert again.restore_state(state, str(data_file.parent)) == []
     d = next(iter(again.sets[0]['channels'].values()))
     assert np.allclose(d['Q'], Q + 0.0007) and d['q_shift'] == 0.0007
+
+
+def test_points_and_line(app, data_file, monkeypatch):
+    """The Display box's 'points' and 'line' boxes: markers by default, a
+    line through the points when ticked, either alone; kept in the
+    session."""
+    exp = ExperimentalTab(simulation=SimulationTab())
+    monkeypatch.setattr(QtWidgets.QFileDialog, 'getOpenFileName',
+                        lambda *a, **k: (str(data_file), ''))
+    monkeypatch.setattr(ImportDialog, 'exec',
+                        lambda dlg: QtWidgets.QDialog.DialogCode.Accepted)
+    exp.import_data()
+
+    def drawn():
+        (curve, _), = exp._items
+        return curve.opts['symbol'] is not None, curve.opts['pen'] is not None
+    assert drawn() == (True, False)
+    exp.show_line.setChecked(True)
+    assert drawn() == (True, True)
+    exp.show_points.setChecked(False)
+    assert drawn() == (False, True)
+    title, rows = exp._readout(0.05)                 # cursor: the line colour
+    assert rows and rows[0][2].startswith('#')
+    state = exp.session_state(str(data_file.parent))
+    again = ExperimentalTab(simulation=SimulationTab())
+    again.restore_state(state, str(data_file.parent))
+    assert not again.show_points.isChecked() and again.show_line.isChecked()

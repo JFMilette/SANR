@@ -96,8 +96,9 @@ package and no `calc_reflectance`.
 - In `Stack._resolve`, applied **inside the model to every pair**, before
   the background. It is a fixed Gaussian quadrature (101 nodes over ±RES_SPAN
   σ) of an ideal R computed on an adaptive Q grid and interpolated.
-- Modes: `'mono'` (fixed λ, dλ/λ, dθ) and `'tof'` (per-angle bands, Licorne's
-  `resolution.m` template; `test_tof_resolution_matches_licorne_script`).
+- Modes: `'tof'` (per-angle bands, Licorne's `resolution.m` template;
+  `test_tof_resolution_matches_licorne_script`) and `'data'` (the measured
+  dQ, a σ). The fixed-λ `'mono'` mode and FWHM dQ were removed.
 - **No Licorne-style discrete convolution / MaxwellWidth** exists.
 - The DE cost and any likelihood built on `FitProblem.model` see only
   convolved curves.
@@ -155,6 +156,8 @@ sampler. For scale: 30 000 generations × 3 chains ≈ 50 min serial, or about
 2. **Polarisation:** the channels' pairs as set in the GUI (Simulation tab
    or the channel's own), fixed; efficiencies are not fitted.
 3. **Joint fits** of several fields or temperatures: later, not now.
+   (Done 2026-10-09: `fit.joint`, Select… on the Fit tool box's general
+   page; each parameter shared, own to a dataset or not fitted in it.)
 4. **Thin-layer J_eff:** nothing to do.
 5. **Scale and background** are fittable for both DE and DREAM.
 

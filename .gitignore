@@ -25,3 +25,8 @@ tests/data/private/
 # benchmark output (benchmarks/bench_fit.py)
 benchmarks/results.jsonl
 benchmarks/multistart_*.txt
+
+# personal sessions and DREAM chains; only the examples are in git
+sessions/*
+!sessions/session_Cr2Te3.json
+!sessions/session_Cr2Te3_2.json

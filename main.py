@@ -9,7 +9,12 @@ settings under 'simulation' and the Experimental tab's under 'experimental'
 file only replaces the model.
 
 Settings -> Dark mode switches between the dark and light themes (style.py);
-the choice is remembered for the next launch.
+the choice is remembered for the next launch.  Settings -> Line colours (or
+"Colours…" beside a reflectivity plot) sets the channels' colours in every
+reflectivity plot (line_colours.py), remembered the same way.
+
+The mouse wheel never changes a spin box (NoWheelOnSpinBoxes): it scrolls
+the panel under the pointer, so a value cannot be changed by accident.
 
 File -> Import Licorne session reads a saved Licorne session folder
 (model.licorne_io.load_licorne_session) into the same form: its rexp<k>.dat
@@ -25,6 +30,7 @@ import sys
 import numpy as np
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+import line_colours
 import style
 from model.licorne_io import load_licorne_session
 from model.polarisation import default_vectors
@@ -34,6 +40,9 @@ from tabs.geometry import GeometryTab
 
 APP_ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icons',
                         'app.png')
+# where the session dialogs open (sessions/ of the repo)
+SESSIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'sessions')
 MODEL_FILTER = 'Session / model files (*.json);;All files (*)'
 # The native macOS dialog greys out *.json files with this filter; use Qt's own.
 DIALOG_OPTIONS = QtWidgets.QFileDialog.Option.DontUseNativeDialog
@@ -71,6 +80,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # keep it in this menu (macOS moves "settings"-like actions)
         self.dark_mode.setMenuRole(QtGui.QAction.MenuRole.NoRole)
         self.dark_mode.toggled.connect(self.set_dark_mode)
+        act = menu.addAction('&Line colours…',
+                             lambda: line_colours.show_dialog(self))
+        act.setMenuRole(QtGui.QAction.MenuRole.NoRole)
 
         self.resize(1600, 950)
 
@@ -90,7 +102,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 'Stop the running fit or sampling first.')
             return
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, 'Open session', '', MODEL_FILTER,
+            self, 'Open session', SESSIONS_DIR, MODEL_FILTER,
             options=DIALOG_OPTIONS)
         if not path:
             return
@@ -187,7 +199,7 @@ class MainWindow(QtWidgets.QMainWindow):
                              channels=theory))
         exp = self.experimental.session_state(folder)
         exp['sets'] = sets
-        exp['fit']['dataset'] = lic['name']
+        exp['fit'].update(dataset=lic['name'], joint=None)
         d['experimental'] = exp
         return d
 
@@ -197,7 +209,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def save_session(self):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, 'Save session', 'session.json', MODEL_FILTER,
+            self, 'Save session', os.path.join(SESSIONS_DIR, 'session.json'),
+            MODEL_FILTER,
             options=DIALOG_OPTIONS)
         if not path:
             return
@@ -225,8 +238,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 def settings():
-    """Preferences kept between launches (the theme)."""
+    """Preferences kept between launches (the theme, the line colours)."""
     return QtCore.QSettings('SANR', 'SANR')
+
+
+class NoWheelOnSpinBoxes(QtCore.QObject):
+    """Application event filter: the wheel never changes a spin box value.
+    The event is ignored instead, so Qt hands it to the parent and the
+    panel under the pointer scrolls as if the box were not there."""
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QtCore.QEvent.Type.Wheel and \
+                isinstance(obj, QtWidgets.QAbstractSpinBox):
+            ev.ignore()
+            return True
+        return False
 
 
 def _plain(obj):
@@ -284,7 +310,17 @@ def main():
     app.setApplicationName('SANR')
     # every window's icon, and the Dock / task-bar icon
     app.setWindowIcon(QtGui.QIcon(APP_ICON))
+    no_wheel = NoWheelOnSpinBoxes(app)
+    app.installEventFilter(no_wheel)
     style.apply(app, settings().value('theme', style.DEFAULT))
+    try:
+        line_colours.set_colours(json.loads(
+            settings().value('line_colours', '{}')))
+    except (TypeError, ValueError, AttributeError):
+        pass                            # unreadable: the defaults
+    line_colours.notifier().changed.connect(
+        lambda: settings().setValue('line_colours',
+                                    json.dumps(line_colours.colours())))
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

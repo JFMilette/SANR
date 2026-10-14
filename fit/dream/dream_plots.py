@@ -82,7 +82,7 @@ def predictive(fig, result, problem, n=200, discard=0.5, seed=0):
     """Data with the median and the 68 / 95 % bands of the model R of n
     posterior draws, and (lighter, dashed edges) the 95 % band of
     replicated data (model + noise dR); below, the spin asymmetry if R+ /
-    R- (or R++ / R--) were fitted on the same Q points."""
+    R- (or R++ / R--) were both fitted."""
     b = predictive_bands(result, problem, n, discard, seed)
     asym = b['asymmetry']
     axes = fig.subplots(2 if asym else 1, 1, sharex=True,

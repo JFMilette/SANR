@@ -5,7 +5,7 @@ sublayer slabs that the transfer matrix actually sees.
 Three panels, sharing a depth axis:
     NSLD real   /   MSLD rho   /   MSLD theta
 
-The solid line is Stack.profile(z), the exact additive-interface profile.
+The solid line is Stack.profile(z), the exact interface profile.
 The shaded rectangles are Stack.build_sublayers(), each drawn across its own
 thickness at its own value -- literally the slab stack fed to the matrices.
 Dashed verticals mark the nominal interface depths.

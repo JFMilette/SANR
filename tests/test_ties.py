@@ -123,3 +123,83 @@ def test_simulation_tab_keeps_ties(monkeypatch):
     sim.list.setCurrentRow(1)
     sim.editor._untie('NSLD_real')
     assert sim.stack.ties == []
+
+
+# -- 'total': the members' total thickness kept --------------------------------
+def trilayer():
+    """vacuum / A 30 / B 15 / C 10 / Si."""
+    return S.Stack([S.Layer('v', 0), S.Layer('A', 30, 4e-6, 0, 2e-6, 0, 3.0),
+                    S.Layer('B', 15, 2e-6, 0, 0, 0, 3.0),
+                    S.Layer('C', 10, 6e-6, 0, 0, 0, 3.0),
+                    S.Layer('Si', 0, 2.07e-6, 0, 0, 0, 3.0)])
+
+
+def test_total_tie_in_a_fit():
+    """A and B split 45 A: the fit finds the split, the total never moves."""
+    truth = trilayer()
+    truth.layers[1].thickness, truth.layers[2].thickness = 33.0, 12.0
+    R = truth.reflectivities(Q, [(X, X)])[:, 0]
+    st = trilayer()
+    st.layers[1].fit['thickness'] = {'vary': True, 'min': 0, 'max': 500}
+    st.tie([(1, 'thickness'), (2, 'thickness')], 'total')
+    params = st.free_parameters()
+    assert params == [(('tie', 0, 0), 'thickness', 30, 0.0, 45.0)]
+    assert parameter_names(st, params) == \
+        ['A.thickness in total(A.thickness, B.thickness)']
+    p = FitProblem(st, [dict(Q=Q, R=R, dR=0.01 * R, P0=X, P=X)])
+    x, cost, *_ = run_de(p, maxiter=40, seed=0)
+    p.apply(x)
+    a, b = p.stack.layers[1].thickness, p.stack.layers[2].thickness
+    assert abs(a - 33.0) < 1e-3 and a + b == pytest.approx(45.0, abs=1e-12)
+    assert cost < 1e-6
+
+
+def test_total_bounds_and_owner():
+    st = trilayer()
+    st.layers[3].fit['thickness'] = {'vary': True, 'min': 2.0, 'max': 14.0}
+    st.tie([(1, 'thickness'), (2, 'thickness'), (3, 'thickness')], 'total')
+    # C (the last) has 8 A to give and 4 A to take: shared by A and B
+    assert st.total_bounds(0) == (55.0, [(28.0, 34.0), (13.0, 19.0)])
+    rng = np.random.default_rng(0)
+    for _ in range(50):
+        for m, (lo, hi) in enumerate(st.total_bounds(0)[1]):
+            setattr(st.owner(('tie', 0, m)), 'thickness', rng.uniform(lo, hi))
+        c = st.layers[3].thickness
+        assert 2.0 - 1e-9 <= c <= 14.0 + 1e-9
+        assert sum(l.thickness for l in st.layers[1:4]) == \
+            pytest.approx(55.0, abs=1e-9)
+    # the member's own fit settings: a prior on its thickness applies
+    st.layers[1].fit['thickness'] = {'vary': True, 'min': 0, 'max': 500,
+                                     'prior': None}
+    assert st.owner(('tie', 0, 0)).fit is st.layers[1].fit
+    back = S.Stack.from_dict(st.to_dict())
+    assert back.ties == st.ties and back.free_parameters() == \
+        st.free_parameters()
+    with pytest.raises(ValueError, match='thicknesses'):
+        trilayer().tie([(1, 'NSLD_real'), (2, 'NSLD_real')], 'total')
+    with pytest.raises(ValueError, match='no thickness'):
+        trilayer().tie([(3, 'thickness'), (4, 'thickness')], 'total')
+
+
+def test_simulation_tab_total_tie(monkeypatch):
+    """Tie with… on a thickness offers the fixed total; the members are
+    ordered top to bottom, so the deepest takes the rest."""
+    from PyQt6 import QtWidgets
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    from tabs import SimulationTab
+    sim = SimulationTab()
+    sim.restore_state(trilayer().to_dict())
+    sim.list.setCurrentRow(2)                                 # B
+
+    def accept(dlg):
+        for b in dlg.findChildren(QtWidgets.QCheckBox):
+            b.setChecked(b.text() == 'A')
+        [r for r in dlg.findChildren(QtWidgets.QRadioButton)
+         if r.text().startswith('Fixed total')][0].setChecked(True)
+        return 1
+    monkeypatch.setattr(QtWidgets.QDialog, 'exec', accept)
+    sim.editor._tie_with('thickness')
+    assert sim.stack.ties[0]['mode'] == 'total'
+    assert sim.stack.ties[0]['members'] == [[1, 'thickness'], [2, 'thickness']]
+    lab = sim.editor.rows['thickness'][4]
+    assert lab.text().endswith('⛓') and '45 Å' in lab.toolTip()

@@ -92,3 +92,96 @@ def test_no_dialog_when_shared_or_quadrature(app, monkeypatch):
     exp = tab(QA, QB, licorne=False)
     *_, grid = exp._fit_inputs(exp.fit_report)
     assert grid is None and not calls
+
+
+def test_stop_and_continue(app):
+    """Stop the DE fit, Continue in the fit window: the history goes on
+    from the generation it stopped at."""
+    import time
+    exp = tab(QA, QA, licorne=False)
+    exp.fit_maxiter.setValue(10000)
+    exp.fit_tol.setValue(exp.fit_tol.minimum())
+    exp.fit_polish.setChecked(False)
+    exp.fit_restarts.setValue(1)
+
+    def run_until(n):
+        t0 = time.monotonic()
+        while exp._fit is not None and time.monotonic() - t0 < 60:
+            app.processEvents()
+            if len(exp.fit_window.entries) >= n and \
+                    exp.fit_window.btn_stop.isEnabled():
+                exp.stop_fit()
+        assert exp._fit is None
+    exp.start_fit()
+    win = exp.fit_window
+    assert not win.btn_continue.isEnabled()
+    run_until(3)
+    gen = int(win.entries[-1][0]) if win.entries[-1][0].isdigit() else \
+        int(win.entries[-2][0])
+    assert win.btn_continue.isEnabled() and exp._de_state['generation'] == gen
+    kept = len(win.entries)
+    win.btn_continue.click()
+    assert exp._fit is not None and not win.btn_continue.isEnabled()
+    run_until(kept + 3)
+    labels = [e[0] for e in win.entries]
+    assert labels[:kept] == [e[0] for e in win.entries[:kept]]
+    later = [int(l) for l in labels[kept:] if l.isdigit()]
+    assert later and later[0] == gen + 1
+    assert win.btn_continue.isEnabled()
+
+
+def test_local_lbfgs_fit(app):
+    """The local page: L-BFGS-B alone in the fit window, counted in
+    iterations from the start (0), its report on its own page; nothing to
+    continue; its Max iter kept in the session."""
+    import time
+    exp = tab(QA, QA, licorne=False)
+    exp.fit_workers.setValue(1)
+    exp.lb_maxiter.setValue(50)
+    exp.fit_report.setText('untouched')
+    exp.start_lbfgs()
+    win = exp.fit_window
+    assert win.unit == 'iteration' and not win.polish
+    assert win.history.headerItem().text(0) == 'Iteration'
+    t0 = time.monotonic()
+    while exp._fit is not None and time.monotonic() - t0 < 60:
+        app.processEvents()
+    assert exp._fit is None and not win.running
+    labels = [e[0] for e in win.entries]
+    assert labels[0] == '0' and all(l.isdigit() for l in labels)
+    assert 'Done</b> after' in exp.lb_report.text() and \
+        'iteration(s)' in exp.lb_report.text()
+    assert exp.fit_report.text() == 'untouched'
+    assert not win.btn_continue.isEnabled()
+    assert exp.btn_lbfgs.isEnabled() and exp.btn_lbfgs_window.isEnabled()
+    assert exp.session_state('.')['fit']['lbfgs_maxiter'] == 50
+
+
+def test_multistart_in_fit_window(app):
+    """The multistart page's Run follows the starts in the fit window and
+    lists the minima there, as in its table; one is sent to the Simulation
+    tab from the window."""
+    import time
+    exp = tab(QA, QA, licorne=False)
+    exp.fit_workers.setValue(1)
+    exp.ms_starts.setValue(4)
+    exp.start_multistart()
+    win = exp.fit_window
+    assert win.isVisible() and win.running and win.unit == 'minimum'
+    assert exp.btn_ms_window.isEnabled() and win.btn_stop.isEnabled()
+    t0 = time.monotonic()
+    while exp._ms is not None and time.monotonic() - t0 < 60:
+        app.processEvents()
+    assert exp._ms is None and not win.running
+    m = exp._ms_minima
+    assert len(win.entries) == len(m) == exp.ms_table.rowCount()
+    assert [e[1] for e in win.entries] == [r['chi2'] for r in m]
+    assert win.entries[0][0].startswith('1 — ')
+    assert win.history.currentItem() is win.history.topLevelItem(0)
+    assert 'Done</b>' in win.status.text()
+    assert not win.btn_continue.isEnabled() and win.btn_send.isEnabled()
+    win.history.setCurrentItem(win.history.topLevelItem(len(m) - 1))
+    win.btn_send.click()
+    assert exp.simulation.stack.layers[1].thickness == \
+        pytest.approx(m[-1]['x'][0])
+    assert 'Sent <b>minimum %d' % len(m) in exp.ms_report.text()

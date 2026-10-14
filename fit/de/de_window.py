@@ -1,31 +1,41 @@
 """
 DE window: follows a running differential-evolution fit (fit.de.de_fit, run
-in a DEThread) of the Experimental tab generation by generation.
+in a DEThread) of the Experimental tab generation by generation, or a local
+L-BFGS-B fit (fit.de.de_fit.run_lbfgs) iteration by iteration, or a
+multistart (fit.multistart, run in a fit.panel.MultistartThread) start by
+start.
 
 The history lists the best cost of every generation (and the polished
-result at the end).  Selecting an entry draws its depth profile (with its
-sublayers) and its model against the fitted data, as any quantity of the
-Simulation tab (reflectivities, half-polarized, asymmetries; the model's
-channels outside the fit use the Simulation tab's pairs); once the fit is
-done or
-stopped, "Send to Simulation" writes that entry's parameters into the
+result at the end); for a multistart, the distinct minima once the starts
+have ended, best first, with how many starts reached each (✓: the current
+values' start among them).  Selecting an entry draws, in one tab per fitted
+dataset (several in a joint fit, fit.joint), its depth profile (with its
+sublayers) and its model against that dataset's fitted data, as any
+quantity of the Simulation tab (reflectivities, half-polarized,
+asymmetries; the model's channels outside the fit use the Simulation tab's
+pairs); once the fit is done or stopped, "Send to Simulation" writes that
+entry's parameters, as the dataset of the tab shown sees them, into the
 Simulation tab.  Nothing reaches the Simulation tab otherwise.
 
-The window keeps its own copy of the model, taken before the fit thread
-starts, so drawing never touches the stack the fit is evaluating.
+Each tab keeps its own copy of the model, taken before the fit thread
+starts, so drawing never touches the stack the fit is evaluating; only the
+tab shown is drawn, the others when they are shown.
 """
 
 import copy
+import time
 from html import escape as html_escape
 
 import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from fit.de.de_fit import run_de_restarts
+from fit.de.de_fit import run_de_restarts, run_lbfgs
+from fit.joint import JointProblem, part_x, parts
 from fit.multistart import merge
+import line_colours
 import style
-from tabs.simulation import (ASYM_COLOUR, PARAM_DISPLAY, PROFILE_QUANTITIES,
+from tabs.simulation import (PARAM_DISPLAY, PROFILE_QUANTITIES,
                              REFL_QUANTITIES, RIGHT, LayerLabels, plot_widget,
                              profile_data)
 
@@ -41,26 +51,44 @@ def at_bound(v, lo, hi):
 class DEThread(QtCore.QThread):
     """Runs fit.de.de_fit.run_de_restarts on a FitProblem off the GUI
     thread; with restarts > 1, `minima` gives the distinct ends of the runs
-    (fit.multistart.merge) before finished_fit gives the best."""
+    (fit.multistart.merge) before finished_fit gives the best.  With
+    method='lbfgs', fit.de.de_fit.run_lbfgs instead (progress then counts
+    iterations; nothing to continue)."""
 
     progress = QtCore.pyqtSignal(object, float, int)      # x, cost, generation
+    status = QtCore.pyqtSignal(object)        # fit.de.de_fit STATUS info
     finished_fit = QtCore.pyqtSignal(object, float, int, str)
     minima = QtCore.pyqtSignal(object)
     failed = QtCore.pyqtSignal(str)
 
-    def __init__(self, problem, **options):
+    def __init__(self, problem, method='de', **options):
         super().__init__()
         self.problem, self.options = problem, options
+        self.method = method
         self._stop = False
+        # where the run is (fit.de.de_fit CONTINUE): resume=state goes on
+        self.state = {}
 
     def stop(self):
         self._stop = True
 
     def run(self):
+        if self.method == 'lbfgs':
+            try:
+                x, cost, it, msg = run_lbfgs(
+                    self.problem, callback=self.progress.emit,
+                    status=self.status.emit, cancelled=lambda: self._stop,
+                    **self.options)
+            except Exception as exc:              # report, don't kill the app
+                self.failed.emit('%s: %s' % (type(exc).__name__, exc))
+                return
+            self.finished_fit.emit(x, cost, it, msg)
+            return
         try:
             (x, cost, gen, msg), ends = run_de_restarts(
                 self.problem, callback=self.progress.emit,
-                cancelled=lambda: self._stop, **self.options)
+                status=self.status.emit, cancelled=lambda: self._stop,
+                state=self.state, **self.options)
         except Exception as exc:                  # report, don't kill the app
             self.failed.emit('%s: %s' % (type(exc).__name__, exc))
             return
@@ -70,30 +98,31 @@ class DEThread(QtCore.QThread):
 
 
 class DEWindow(QtWidgets.QWidget):
-    """History of one fit with its profile and reflectivity plots."""
+    """History of one fit with, for each dataset, its profile and
+    reflectivity plots."""
 
     stopRequested = QtCore.pyqtSignal()
-    sendRequested = QtCore.pyqtSignal(object, str)   # x, entry label
+    continueRequested = QtCore.pyqtSignal()
+    # x, entry label, dataset (tab) whose values are sent
+    sendRequested = QtCore.pyqtSignal(object, str, int)
 
     def __init__(self, parent=None):
         super().__init__(parent, QtCore.Qt.WindowType.Window)
         self.setWindowTitle('Fit')
         self.resize(1400, 850)
         self.problem = None
-        self.stack = None              # the window's own copy of the model
-        self.data = {}                 # fitted points {channel: dict(Q, R, ...)}
-        self.vectors = {}              # {channel: [Pi, Pa]} of the model
+        self.views = []                # DatasetView of each dataset
         self.entries = []              # [(label, cost, x)]
         self.running = False
+        self.method, self.unit = 'de', 'generation'     # set by start()
         self._x = None                 # parameters currently drawn
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_side())
-        plots = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
-        plots.addWidget(self._build_profile_plot())
-        plots.addWidget(self._build_reflectance_plot())
-        plots.setSizes([380, 470])
-        splitter.addWidget(plots)
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.currentChanged.connect(self._draw_view)
+        splitter.addWidget(self.tabs)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([360, 1040])
@@ -109,6 +138,12 @@ class DEWindow(QtWidgets.QWidget):
         self.status = QtWidgets.QLabel()
         self.status.setWordWrap(True)
         v.addWidget(self.status)
+        # what the running fit is doing (set_progress): changes every
+        # generation even when the best cost does not
+        self.progress = QtWidgets.QLabel()
+        self.progress.setWordWrap(True)
+        self.progress.setProperty('role', 'muted')
+        v.addWidget(self.progress)
 
         self.history = QtWidgets.QTreeWidget()
         self.history.setColumnCount(2)
@@ -128,10 +163,20 @@ class DEWindow(QtWidgets.QWidget):
                                  'kept')
         self.btn_send = QtWidgets.QPushButton('Send to Simulation')
         self.btn_send.setToolTip('Write the parameters of the selected entry '
-                                 'into the Simulation tab')
+                                 'into the Simulation tab (in a joint fit, '
+                                 'as the dataset of the tab shown sees '
+                                 'them)')
+        self.btn_continue = QtWidgets.QPushButton('Continue')
+        self.btn_continue.setToolTip(
+            'Go on from where the fit ended: its last population, with the '
+            'same parameters, bounds and data,\nfor up to Max iter more '
+            'generations (the DE page\'s other settings as they are now)')
+        self.btn_continue.setEnabled(False)
         self.btn_stop.clicked.connect(self._stop)
+        self.btn_continue.clicked.connect(self._continue)
         self.btn_send.clicked.connect(self._send)
         row.addWidget(self.btn_stop)
+        row.addWidget(self.btn_continue)
         row.addWidget(self.btn_send)
         v.addLayout(row)
 
@@ -143,6 +188,357 @@ class DEWindow(QtWidgets.QWidget):
         self.params.setToolTip('Red: at a fit bound (widen it?)')
         v.addWidget(self.params, 2)
         return panel
+
+    # -- fit lifecycle (called by the Experimental tab) ---------------------
+    def start(self, problem, views, title, cost_label, polish=True,
+              method='de'):
+        """A new fit: problem is the FitProblem or fit.joint.JointProblem
+        the thread will run (its datasets' stacks are copied now, before
+        the thread starts); views one dict per dataset, in the problem's
+        order: name, data (the fitted points {channel: dict(Q, R, dR,
+        dQ)}), vectors (the {channel: [Pi, Pa]} of every model channel),
+        grids (the {channel: Q} of the model curves,
+        tabs.experimental.model_grid); polish whether the fit ends with a
+        polish; method 'de', 'lbfgs' (a local fit: iterations, no
+        polish) or 'multistart' (the minima, given by show_minima)."""
+        self.problem = problem
+        self.method = method
+        self.unit = {'lbfgs': 'iteration',
+                     'multistart': 'minimum'}.get(method, 'generation')
+        self.polish = polish and method == 'de'
+        self.cost_label = cost_label
+        self.tabs.blockSignals(True)
+        while self.tabs.count():
+            w = self.tabs.widget(0)
+            self.tabs.removeTab(0)
+            w.deleteLater()
+        self.views = []
+        for v, sub in zip(views, parts(problem)):
+            # the fitted channels' fixed norms (Licorne's Norm_factor)
+            view = DatasetView(copy.deepcopy(sub.stack), v['data'],
+                               v['vectors'], v['grids'],
+                               {name[1:]: n for (name, *_), n
+                                in zip(sub.channels, sub.norms)})
+            self.views.append(view)
+            self.tabs.addTab(view, v['name'])
+        self.tabs.blockSignals(False)
+        self.entries = []
+        self.running = True
+        self.setWindowTitle('Fit — %s' % title)
+        self.history.blockSignals(True)
+        self.history.clear()
+        self.history.setHeaderLabels([self.unit.capitalize(), cost_label])
+        self.history.setToolTip(
+            'Distinct minima, best first, and how many starts ended in each '
+            '(✓: the current values\' start did); select one to draw it'
+            if method == 'multistart' else
+            'Best cost of every %s; select one to draw it' % self.unit)
+        self.history.blockSignals(False)
+        joint = isinstance(problem, JointProblem)
+        self.params.setColumnCount(5 if joint else 4)
+        self.params.setHeaderLabels(['Layer', 'Parameter', 'Value', 'Unit']
+                                    + (['Dataset'] if joint else []))
+        self.status.setText('Fitting %d parameter(s) to %d points%s%s…'
+                            % (len(problem.params), problem.npoints,
+                               ' of %d datasets' % len(views) if joint
+                               else '', {
+                                   'lbfgs': ' (L-BFGS-B from the current '
+                                            'values)',
+                                   'multistart': ' from many starts'
+                               }.get(method, '')))
+        self.status.setStyleSheet('')
+        self.progress.setText({
+            'lbfgs': 'Cost at the current values…',
+            'multistart': 'First start…'}.get(
+                method, 'First generation (the starting population and one '
+                        'generation)…'))
+        self.progress.show()
+        self._gen_times = []                  # time of each 'de' report
+        # a multistart: (done, total), the running starts' last reports
+        # and the ended ones' costs (set_starts, set_start_status)
+        self._ms_count, self._ms_run, self._ms_ended = (0, 0), {}, {}
+        self.btn_stop.setEnabled(True)
+        self.btn_continue.setEnabled(False)
+        self.btn_send.setEnabled(False)
+        # the starting model until the first generation arrives: the
+        # current values clipped into the bounds, as the fit starts from
+        self._draw(problem.to_x(problem.x0()))
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def resume(self):
+        """The fit goes on (Continue): same problem, history kept."""
+        self.running = True
+        self.status.setText('Continuing the fit…')
+        self.status.setStyleSheet('')
+        self.progress.setText('Evaluating the population again…')
+        self.progress.show()
+        self._gen_times = []
+        self.btn_stop.setEnabled(True)
+        self.btn_continue.setEnabled(False)
+        self.btn_send.setEnabled(False)
+
+    def add_generation(self, x, cost, gen):
+        self._append('%d' % gen, cost, x)
+
+    def set_progress(self, info):
+        """A fit.de.de_fit STATUS report of the running fit."""
+        if not self.running:
+            return
+        run = ('Run %d / %d — ' % (info['run'], info['runs'])
+               if info.get('runs', 1) > 1 else '')
+        c = self.cost_label
+        if info['phase'] == 'lbfgs':
+            self.progress.setText('L-BFGS-B iteration %d / %d — %s %.6g' % (
+                info['iteration'], info['maxiter'], c, info['best']))
+            return
+        if info['phase'] == 'polish':
+            self.progress.setText(
+                '%sPolishing (L-BFGS-B)%s — %s %.6g' % (
+                    run, ', iteration %d' % info['iteration']
+                    if info['iteration'] else '…', c, info['best']))
+            return
+        t = self._gen_times
+        t.append(time.monotonic())
+        del t[:-11]
+        rate = ' — %.2g s per generation' % ((t[-1] - t[0]) / (len(t) - 1)) \
+            if len(t) > 1 else ''
+        self.progress.setText(
+            '%sGeneration %d / %d — best %s %.6g, population median %.6g<br>'
+            'Spread of the population\'s %s %.2g (stops at ≤ tol %.2g)%s'
+            % (run, info['generation'], info['maxiter'], c, info['best'],
+               info['median'], c, info['spread'], info['tol'], rate))
+
+    def finish(self, x, cost, gen, msg):
+        self.running = False
+        self.progress.hide()
+        stopped = msg == 'stopped'
+        # the polish (or a stop before the first generation) gives a result
+        # that is not in the history yet.  Compared exactly: any tolerance
+        # in physical units would hide small SLD moves (~1e-6 A^-2)
+        new = not self.entries or cost != self.entries[-1][1] or \
+            not np.array_equal(x, self.entries[-1][2])
+        if new:
+            self._append('stopped' if stopped else 'polished'
+                         if self.method == 'de' else 'final', cost, x)
+        note = ''
+        if self.polish and not stopped:
+            note = '<br>Polish: %s' % (
+                '%s %.6g → %.6g' % (self.cost_label, self.entries[-2][1], cost)
+                if new and len(self.entries) > 1 else
+                'no improvement on the last generation')
+        self.status.setText(
+            '<b>%s</b> after %d %s(s) — best %.6g<br><i>%s</i>%s<br>'
+            'Select an entry and send it to the Simulation tab.'
+            % ('Stopped' if stopped else 'Done', gen, self.unit, cost,
+               html_escape(msg), note))
+        self.btn_stop.setEnabled(False)
+        self.btn_send.setEnabled(self.history.currentItem() is not None)
+
+    def set_starts(self, done, total):
+        """How many starts of a running multistart have ended."""
+        self._ms_count = (done, total)
+        self._show_starts()
+
+    def set_start_status(self, info):
+        """A fit.multistart PROGRESS report of a running multistart."""
+        k = info['start']
+        if info['phase'] == 'done':
+            self._ms_ended[k] = info['best']
+            self._ms_run.pop(k, None)
+        elif k not in self._ms_ended:         # not a late report
+            self._ms_run[k] = info
+        self._show_starts()
+
+    def _show_starts(self):
+        """The ended starts and best cost, then where each running start
+        is."""
+        if not self.running:
+            return
+        c = self.cost_label
+        lines = ['%d / %d starts done%s' % (self._ms_count + (
+            ' — best %s %.6g' % (c, min(self._ms_ended.values()))
+            if self._ms_ended else '',))]
+        for k, i in sorted(self._ms_run.items()):
+            what = {
+                'begin': lambda: 'starting…',
+                'de': lambda: '%s, %d / %d evaluated%s' % (
+                    'generation %d / %d' % (min(i['step'], i['maxiter']),
+                                            i['maxiter'])
+                    if i['step'] else 'first population',
+                    min(i['evals'], i['size']), i['size'],
+                    ' — best %s %.6g' % (c, i['best'])
+                    if i['best'] is not None else ''),
+                'polish': lambda: 'polish (L-BFGS-B)%s — %s %.6g' % (
+                    ', iteration %d' % i['step'] if i['step'] else '', c,
+                    i['best']),
+                'lbfgs': lambda: 'iteration %d — %s %.6g' % (
+                    i['step'], c, i['best'])}[i['phase']]()
+            lines.append('%s: %s' % ('Current values' if k == 0 else
+                                     'Start %d' % k, what))
+        self.progress.setText('<br>'.join(lines))
+
+    def show_minima(self, minima, stopped=False):
+        """The end of a multistart: its minima (fit.multistart rows, best
+        first) as the entries, the best one drawn."""
+        self.running = False
+        self.progress.hide()
+        # filled without drawing each, then the best drawn once
+        self.history.blockSignals(True)
+        self.history.clear()
+        self.entries = []
+        for k, m in enumerate(minima):
+            self._append('%d — %d start%s%s' % (
+                k + 1, m['hits'], '' if m['hits'] == 1 else 's',
+                ' ✓' if m['from_current'] else ''), m['chi2'], m['x'])
+        self.history.setCurrentItem(None)
+        self.history.blockSignals(False)
+        if minima:
+            self.history.setCurrentItem(self.history.topLevelItem(0))
+        hits = sum(m['hits'] for m in minima)
+        self.status.setText(
+            '<b>%s</b> — %d start(s) ended in %d distinct minim%s, best %s '
+            '%.6g<br>Select a minimum and send it to the Simulation tab.' % (
+                'Stopped' if stopped else 'Done', hits, len(minima),
+                'um' if len(minima) == 1 else 'a', self.cost_label,
+                minima[0]['chi2']) if minima else
+            '<b>Stopped</b> before any start ended.')
+        self.btn_stop.setEnabled(False)
+        self.btn_send.setEnabled(self.history.currentItem() is not None)
+
+    def fail(self, msg):
+        self.running = False
+        self.progress.hide()
+        self.status.setText('Fit failed: %s' % html_escape(msg))
+        self.status.setStyleSheet('color: %s' % style.ERROR)
+        self.btn_stop.setEnabled(False)
+        self.btn_send.setEnabled(self.history.currentItem() is not None)
+
+    def _append(self, label, cost, x):
+        h = self.history
+        # follow the newest entry unless the user picked an older one
+        cur = h.currentItem()
+        follow = cur is None or h.indexOfTopLevelItem(cur) == len(self.entries) - 1
+        self.entries.append((label, float(cost), np.array(x, dtype=float)))
+        it = QtWidgets.QTreeWidgetItem([label, '%.6g' % cost])
+        it.setTextAlignment(1, QtCore.Qt.AlignmentFlag.AlignRight
+                            | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        h.addTopLevelItem(it)
+        # mark the best entry so far
+        best = int(np.argmin([e[1] for e in self.entries]))
+        for i in range(h.topLevelItemCount()):
+            font = h.topLevelItem(i).font(0)
+            font.setBold(i == best)
+            for c in range(2):
+                h.topLevelItem(i).setFont(c, font)
+        if follow:
+            h.setCurrentItem(it)
+            h.scrollToItem(it)
+
+    # -- user actions -------------------------------------------------------
+    def _stop(self):
+        self.btn_stop.setEnabled(False)
+        self.stopRequested.emit()
+
+    def _continue(self):
+        self.btn_continue.setEnabled(False)
+        self.continueRequested.emit()
+
+    def _selected(self):
+        it = self.history.currentItem()
+        return None if it is None else \
+            self.entries[self.history.indexOfTopLevelItem(it)]
+
+    def _on_select(self, *_):
+        e = self._selected()
+        self.btn_send.setEnabled(e is not None and not self.running)
+        if e is not None:
+            self._draw(e[2])
+
+    def _send(self):
+        e = self._selected()
+        if e is not None and not self.running:
+            self.sendRequested.emit(e[2], e[0], max(self.tabs.currentIndex(),
+                                                    0))
+
+    def closeEvent(self, ev):
+        # closing only hides: the fit and its history carry on
+        self.hide()
+        ev.ignore()
+
+    # -- drawing ------------------------------------------------------------
+    def _draw(self, x):
+        self._x = np.asarray(x, dtype=float)
+        self._fill_params()
+        self._draw_view()
+
+    def _draw_view(self, *_):
+        """Draw the tab shown, unless it already shows these parameters."""
+        k = self.tabs.currentIndex()
+        if self._x is None or not 0 <= k < len(self.views) or \
+                self.views[k].drawn is self._x:
+            return
+        try:
+            self.views[k].draw(self._x, lambda x, st: parts(
+                self.problem)[k].apply(part_x(self.problem, x, k), st))
+        except Exception as exc:                      # keep the window alive
+            self.status.setText('Cannot draw this entry: %s' % exc)
+            self.status.setStyleSheet('color: %s' % style.ERROR)
+
+    def _fill_params(self):
+        t = self.params
+        t.clear()
+        layers = self.problem.stack.layers
+        scopes = getattr(self.problem, 'scopes', None)
+        for j, ((i, attr, _, lo, hi), v) in enumerate(
+                zip(self.problem.params, self._x)):
+            label, scale, unit = PARAM_DISPLAY[attr]
+            row = ['(stack)' if i is None else self.problem.stack.entry_name(
+                i) if isinstance(i, tuple) else layers[i].name, label,
+                '%.6g' % (v * scale), unit]
+            if scopes is not None:
+                row.append(scopes[j] or 'shared')
+            it = QtWidgets.QTreeWidgetItem(row)
+            it.setTextAlignment(2, QtCore.Qt.AlignmentFlag.AlignRight
+                                | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            if at_bound(v, lo, hi):
+                it.setForeground(2, AT_BOUND)
+                it.setToolTip(2, 'At its fit bound [%.6g, %.6g]'
+                              % (lo * scale, hi * scale))
+            t.addTopLevelItem(it)
+        for c in range(t.columnCount()):
+            t.resizeColumnToContents(c)
+
+
+class DatasetView(QtWidgets.QSplitter):
+    """The depth profile and the model against the fitted data of one
+    dataset, in a tab of the DE window."""
+
+    def __init__(self, stack, data, vectors, grids, norms):
+        """stack: the view's own copy of the model; data, vectors, grids,
+        norms: see DEWindow.start."""
+        super().__init__(QtCore.Qt.Orientation.Vertical)
+        self.stack = stack
+        self.data, self.vectors, self.model_Q = data, vectors, grids
+        self.norms = norms
+        self.drawn = None              # parameters drawn last
+        self.addWidget(self._build_profile_plot())
+        self.addWidget(self._build_reflectance_plot())
+        self.setSizes([380, 470])
+
+    def draw(self, values, apply):
+        """The model with the stack's parameter values `values`, written
+        into the view's stack by apply(values, stack)."""
+        self.drawn = values
+        apply(values, self.stack)
+        self.stack.build_sublayers()
+        self._draw_profile()
+        # imported here: the Experimental tab imports this module
+        from tabs.experimental import model_channels
+        self._model = model_channels(self.stack, self.model_Q, self.vectors,
+                                     self.norms)
+        self._redraw_reflectance()
 
     def _build_profile_plot(self):
         box = QtWidgets.QWidget()
@@ -229,7 +625,9 @@ class DEWindow(QtWidgets.QWidget):
         for cb in (self.logy, self.rq4, self.show_err):
             cb.toggled.connect(self._redraw_reflectance)
             bar.addWidget(cb)
+        bar.addWidget(line_colours.button())
         v.addLayout(bar)
+        line_colours.notifier().changed.connect(self._redraw_reflectance)
         w, self.refl_plot = plot_widget('Q (Å⁻¹)', 'Reflectivity')
         self.refl_plot.addLegend(offset=(-10, 10))
         self.zero = pg.InfiniteLine(pos=0, angle=0,
@@ -242,159 +640,6 @@ class DEWindow(QtWidgets.QWidget):
         self.refl_note.setStyleSheet('color: %s' % style.ERROR)
         v.addWidget(self.refl_note)
         return box
-
-    # -- fit lifecycle (called by the Experimental tab) ---------------------
-    def start(self, problem, data, vectors, grids, title, cost_label,
-              polish=True):
-        """A new fit: problem is the FitProblem the thread will run (copy its
-        stack now, before the thread starts), data the fitted points
-        {channel: dict(Q, R, dR, dQ)}, vectors the {channel: [Pi, Pa]} of
-        every model channel, grids the {channel: Q} of the model curves
-        (tabs.experimental.model_grid), polish whether the fit ends with a
-        polish."""
-        self.problem = problem
-        self.polish, self.cost_label = polish, cost_label
-        self.stack = copy.deepcopy(problem.stack)
-        self.data, self.vectors, self.model_Q = data, vectors, grids
-        # the fitted channels' fixed norms (Licorne's Norm_factor)
-        self.norms = {name[1:]: n for (name, *_), n
-                      in zip(problem.channels, problem.norms)}
-        self.entries = []
-        self.running = True
-        self.setWindowTitle('Fit — %s' % title)
-        self.history.blockSignals(True)
-        self.history.clear()
-        self.history.setHeaderLabels(['Generation', cost_label])
-        self.history.blockSignals(False)
-        self.status.setText('Fitting %d parameter(s) to %d points…'
-                            % (len(problem.params), problem.npoints))
-        self.status.setStyleSheet('')
-        self.btn_stop.setEnabled(True)
-        self.btn_send.setEnabled(False)
-        # the starting model until the first generation arrives: the
-        # current values clipped into the bounds, as the fit starts from
-        self._draw(problem.to_x(problem.x0()))
-        self.show()
-        self.raise_()
-        self.activateWindow()
-
-    def add_generation(self, x, cost, gen):
-        self._append('%d' % gen, cost, x)
-
-    def finish(self, x, cost, gen, msg):
-        self.running = False
-        stopped = msg == 'stopped'
-        # the polish (or a stop before the first generation) gives a result
-        # that is not in the history yet.  Compared exactly: any tolerance
-        # in physical units would hide small SLD moves (~1e-6 A^-2)
-        new = not self.entries or cost != self.entries[-1][1] or \
-            not np.array_equal(x, self.entries[-1][2])
-        if new:
-            self._append('stopped' if stopped else 'polished', cost, x)
-        note = ''
-        if self.polish and not stopped:
-            note = '<br>Polish: %s' % (
-                '%s %.6g → %.6g' % (self.cost_label, self.entries[-2][1], cost)
-                if new and len(self.entries) > 1 else
-                'no improvement on the last generation')
-        self.status.setText(
-            '<b>%s</b> after %d generation(s) — best %.6g<br><i>%s</i>%s<br>'
-            'Select an entry and send it to the Simulation tab.'
-            % ('Stopped' if stopped else 'Done', gen, cost, html_escape(msg),
-               note))
-        self.btn_stop.setEnabled(False)
-        self.btn_send.setEnabled(self.history.currentItem() is not None)
-
-    def fail(self, msg):
-        self.running = False
-        self.status.setText('Fit failed: %s' % html_escape(msg))
-        self.status.setStyleSheet('color: %s' % style.ERROR)
-        self.btn_stop.setEnabled(False)
-        self.btn_send.setEnabled(self.history.currentItem() is not None)
-
-    def _append(self, label, cost, x):
-        h = self.history
-        # follow the newest entry unless the user picked an older one
-        cur = h.currentItem()
-        follow = cur is None or h.indexOfTopLevelItem(cur) == len(self.entries) - 1
-        self.entries.append((label, float(cost), np.array(x, dtype=float)))
-        it = QtWidgets.QTreeWidgetItem([label, '%.6g' % cost])
-        it.setTextAlignment(1, QtCore.Qt.AlignmentFlag.AlignRight
-                            | QtCore.Qt.AlignmentFlag.AlignVCenter)
-        h.addTopLevelItem(it)
-        # mark the best entry so far
-        best = int(np.argmin([e[1] for e in self.entries]))
-        for i in range(h.topLevelItemCount()):
-            font = h.topLevelItem(i).font(0)
-            font.setBold(i == best)
-            for c in range(2):
-                h.topLevelItem(i).setFont(c, font)
-        if follow:
-            h.setCurrentItem(it)
-            h.scrollToItem(it)
-
-    # -- user actions -------------------------------------------------------
-    def _stop(self):
-        self.btn_stop.setEnabled(False)
-        self.stopRequested.emit()
-
-    def _selected(self):
-        it = self.history.currentItem()
-        return None if it is None else \
-            self.entries[self.history.indexOfTopLevelItem(it)]
-
-    def _on_select(self, *_):
-        e = self._selected()
-        self.btn_send.setEnabled(e is not None and not self.running)
-        if e is not None:
-            self._draw(e[2])
-
-    def _send(self):
-        e = self._selected()
-        if e is not None and not self.running:
-            self.sendRequested.emit(e[2], e[0])
-
-    def closeEvent(self, ev):
-        # closing only hides: the fit and its history carry on
-        self.hide()
-        ev.ignore()
-
-    # -- drawing ------------------------------------------------------------
-    def _draw(self, x):
-        self._x = np.asarray(x, dtype=float)
-        try:
-            self.problem.apply(self._x, self.stack)
-            self.stack.build_sublayers()
-            self._fill_params()
-            self._draw_profile()
-            # imported here: the Experimental tab imports this module
-            from tabs.experimental import model_channels
-            self._model = model_channels(self.stack, self.model_Q,
-                                         self.vectors, self.norms)
-            self._redraw_reflectance()
-        except Exception as exc:                      # keep the window alive
-            self.status.setText('Cannot draw this entry: %s' % exc)
-            self.status.setStyleSheet('color: %s' % style.ERROR)
-
-    def _fill_params(self):
-        t = self.params
-        t.clear()
-        layers = self.stack.layers
-        for (i, attr, _, lo, hi), v in zip(self.problem.params, self._x):
-            label, scale, unit = PARAM_DISPLAY[attr]
-            it = QtWidgets.QTreeWidgetItem(
-                ['(stack)' if i is None else self.stack.tie_name(i[1])
-                 if isinstance(i, tuple) else layers[i].name, label,
-                 '%.6g' % (v * scale), unit])
-            it.setTextAlignment(2, QtCore.Qt.AlignmentFlag.AlignRight
-                                | QtCore.Qt.AlignmentFlag.AlignVCenter)
-            if at_bound(v, lo, hi):
-                it.setForeground(2, AT_BOUND)
-                it.setToolTip(2, 'At its fit bound [%.6g, %.6g]'
-                              % (lo * scale, hi * scale))
-            t.addTopLevelItem(it)
-        for c in range(4):
-            t.resizeColumnToContents(c)
 
     def _draw_profile(self):
         self._profile, self._on_bars = profile_data(self.stack)
@@ -417,7 +662,7 @@ class DEWindow(QtWidgets.QWidget):
 
     def _show_profile_curves(self, *_):
         """As the Simulation tab's _show_profile, without the layer bands."""
-        if self.stack is None:
+        if self.drawn is None:
             return
         z, _, e, curves, slabs = self._profile
         show_bars = self.prof_show_bars.isChecked()
@@ -468,15 +713,16 @@ class DEWindow(QtWidgets.QWidget):
             y = y * Q**4 if rq4 else y
             if log:
                 y = np.where(y > 0, y, np.nan)
-            curve = pg.PlotDataItem(Q, y, pen=pg.mkPen(col or ASYM_COLOUR,
-                                                       width=1.8),
+            col = col or line_colours.get('asym')
+            curve = pg.PlotDataItem(Q, y, pen=pg.mkPen(col, width=1.8),
                                     connect='finite')
             p.addItem(curve)
             self._refl_items.append(curve)
         for lab, col, Q, y, dy, _ in data:
             if rq4:
                 y, dy = y * Q**4, dy * Q**4
-            self._add_data(lab, col or ASYM_COLOUR, Q, y, dy, log)
+            self._add_data(lab, col or line_colours.get('asym'), Q, y, dy,
+                           log)
         self.refl_note.setText('Fitted data: %s' % note if note else '')
         self.refl_note.setVisible(bool(note))
         p.enableAutoRange()

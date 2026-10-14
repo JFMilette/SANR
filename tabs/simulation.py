@@ -21,6 +21,7 @@ every dataset that does not set its own use these pairs.
 Every edit triggers a debounced recompute.
 """
 
+import copy
 import html
 import re
 import warnings
@@ -31,8 +32,10 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 
 from model.polarisation import (CHANNEL_NAMES, default_vectors, in_plane,
                                 vectors_pair)
-from model.stack import (DEFAULT_SMEARING, ROUGHNESS_SCHEMES,
-                         SMEARING_MODES, Layer, Stack, cos_turns, wrap_turns)
+from model.stack import (DEFAULT_SMEARING, INTERFACE_ORDERS,
+                         ROUGHNESS_SCHEMES, SMEARING_MODES, Layer, Stack,
+                         cos_turns, wrap_turns)
+import line_colours
 import style
 from fit.priors import complete as complete_prior
 
@@ -40,8 +43,6 @@ from fit.priors import complete as complete_prior
 SLD_SCALE = 1e-6                      # SLDs are edited / plotted in 1e-6 A^-2
 CHANNELS = ['++', '+-', '-+', '--']
 AUTO_NAME = re.compile(r'L\d+')        # default layer names, renumbered
-CH_COLOURS = ['#1f77b4', '#d62728', '#2ca02c', '#ff7f0e']
-HP_COLOURS = ['#1f77b4', '#ff7f0e']    # half-polarized R↑, R↓
 # combo label, axis label, colour
 PROFILE_QUANTITIES = [
     ('NSLD', 'NSLD real (10⁻⁶ Å⁻²)', '#5b9bd5'),
@@ -60,9 +61,30 @@ REFL_QUANTITIES = [
     ('SA SF', 'SA_SF', '(R+− − R−+) / (R+− + R−+)'),
     ('SA half-polarized', 'SA', '(R+ − R−) / (R+ + R−)'),
 ]
-ASYM_COLOUR = '#b392f0'
 # smallest font for the layer names in the depth profile
 LABEL_MIN_PT = 6
+# an additive profile whose crossing interfaces push a quantity this far
+# (% of the layer's value, Stack.interface_crossing) past the layer values
+# is flagged next to the Interfaces combo and shaded on the profile
+CROSSING_WARN = 1.0
+# Stack.interface_crossing quantities as the profile names them
+CROSSING_NAMES = {'NSLD_real': 'NSLD', 'NSLD_img': 'Im NSLD', 'M_x': 'Mx',
+                  'M_y': 'My', 'M_z': 'Mz', 'MSLD_rho': 'ρ',
+                  'MSLD_theta': 'φ', 'MSLD_phi': 'θ'}
+
+
+def crossing_warnings(st):
+    """The crossings of Stack.interface_crossing that matter when st's
+    profile is additive (CROSSING_WARN), each with the quantity it pushes
+    furthest and by how much: [(entry, quantity, %)]; [] otherwise."""
+    if st.roughness_scheme != 'rms' or st.interface_order != 'additive':
+        return []
+    out = []
+    for c in st.interface_crossing():
+        q, v = max(c['excursion'].items(), key=lambda kv: abs(kv[1]))
+        if abs(v) > CROSSING_WARN:
+            out.append((c, q, v))
+    return out
 
 
 def ratio(a, b):
@@ -471,6 +493,7 @@ EDITOR_PARAMS = [
     ('MSLD_theta', 'MSLD φ', -360, 360, 4, 5.0, ' °', 360.0),
     ('MSLD_phi', 'MSLD θ', -90, 90, 4, 5.0, ' °', 360.0),
     ('roughness_sigma', 'Roughness σ', 0.0, 1e4, 4, 0.5, ' Å', 1.0),
+    ('MSLD_sigma', 'Magnetic σ', 0.0, 1e4, 4, 0.5, ' Å', 1.0),
 ]
 # attr -> (label, display scale, unit) for the parameter tables
 # the GUI writes the magnetisation angles with Licorne's letters: the
@@ -492,7 +515,7 @@ PARAM_DISPLAY = {attr: (label.split(' (')[0], scale,
                  for attr, label, *_, suffix, scale in EDITOR_PARAMS}
 PARAM_DISPLAY.update(scale=('Scale', 1.0, ''),
                      background=('Background', 1.0, ''))
-RES_MODES = ('mono', 'tof')     # res_mode combo order
+RES_MODES = ('tof', 'data')     # res_mode combo order
 # res_conv combo: label, resolution['scheme'], resolution['licorne_fun']
 RES_CONVOLUTIONS = [('quadrature', 'quadrature', None),
                     ('Licorne 1: simple mean', 'licorne', 1),
@@ -507,7 +530,7 @@ def res_convolution(res):
     return [c[2] for c in RES_CONVOLUTIONS].index(res.get('licorne_fun', 3))
 # instrument setups of the fixed-angle mode: name -> (dlambda (A), angles)
 RES_PRESETS = {
-    'Mono (3 angles)': (0.005, [{'theta': 0.006, 'dtheta': 3e-4, 'qmax': 0.04},
+    'ToF (3 angles)': (0.005, [{'theta': 0.006, 'dtheta': 3e-4, 'qmax': 0.04},
                                 {'theta': 0.010, 'dtheta': 5e-4, 'qmax': 0.12},
                                 {'theta': 0.017, 'dtheta': 5e-4,
                                  'qmax': None}]),
@@ -770,6 +793,7 @@ class LayerEditor(QtWidgets.QGroupBox):
         self.stack, self.index = None, None     # for ties (load)
         self._loading = False
         self._sliding = False           # value change coming from a slider
+        self._fronting = False          # the loaded layer is the fronting
 
         self.name = QtWidgets.QLineEdit()
         self.model = QtWidgets.QComboBox()
@@ -830,6 +854,16 @@ class LayerEditor(QtWidgets.QGroupBox):
         self.rows['MSLD_phi'][4].setToolTip(
             'θ: elevation of M out of the film plane (0 = in plane, +90° = '
             '+z). Only ρ cos θ is seen by neutrons (Halperin)')
+        # the magnetic profile's own roughness (model.stack MAGNETIC
+        # ROUGHNESS); unticked, it follows Roughness σ
+        self.msig_own = QtWidgets.QCheckBox('separate')
+        self.msig_own.setToolTip(
+            'Give the magnetic profile (ρ, φ, θ) its own roughness at this '
+            'interface; the NSLD keeps Roughness σ.\nUnticked: the '
+            'magnetic profile uses Roughness σ.  In the Licorne scheme '
+            'the magnetic profile gets its own Licorne window\n(truncated, '
+            'renormalised) — no longer a model Licorne itself can make.')
+        self.msig_own.toggled.connect(self._msig_toggled)
 
         g = QtWidgets.QGridLayout(self)
         g.setColumnStretch(1, 1)
@@ -853,6 +887,8 @@ class LayerEditor(QtWidgets.QGroupBox):
             g.addWidget(cb, r, 4, alignment=QtCore.Qt.AlignmentFlag.AlignCenter)
             g.addWidget(self.sliders[attr], r + 1, 1, 1, 3)
             g.addWidget(self.priors[attr], r + 1, 4)
+            if attr == 'MSLD_sigma':
+                g.addWidget(self.msig_own, r + 1, 0)
             r += 2
         g.addWidget(QtWidgets.QLabel('Roughness model'), r, 0)
         g.addWidget(self.model, r, 1)
@@ -882,10 +918,15 @@ class LayerEditor(QtWidgets.QGroupBox):
             return
         self._loading = True
         self.name.setText(layer.name)
+        own = layer.MSLD_sigma is not None
+        self.msig_own.setChecked(own)
         for attr, *_, scale in EDITOR_PARAMS:
             val, bmin, bmax, cb, _ = self.rows[attr]
             e = layer.fit_entry(attr)
-            val.setValue(getattr(layer, attr) * scale)
+            v = getattr(layer, attr)
+            if attr == 'MSLD_sigma' and not own:
+                v = layer.roughness_sigma
+            val.setValue(v * scale)
             bmin.setValue(e['min'] * scale)
             bmax.setValue(e['max'] * scale)
             cb.setChecked(e['vary'])
@@ -906,10 +947,22 @@ class LayerEditor(QtWidgets.QGroupBox):
         # semi-infinite media have no thickness; fronting has no top interface
         self._set_row_enabled('thickness', not (is_fronting or is_backing))
         self._set_row_enabled('roughness_sigma', not is_fronting)
+        self._set_row_enabled('MSLD_sigma', not is_fronting and own)
+        self.msig_own.setEnabled(not is_fronting)
+        self._fronting = is_fronting
         for w in (self.model, self.nsub, self.nsub_min, self.nsub_max,
                   self.nsub_slider):
             w.setEnabled(not is_fronting)
         self._check_bounds()
+
+    def _msig_toggled(self, own):
+        """Separate magnetic σ on (it starts at Roughness σ) or off."""
+        if self._loading or self.layer is None:
+            return
+        self.rows['MSLD_sigma'][0].setValue(
+            self.rows['roughness_sigma'][0].value())
+        self._set_row_enabled('MSLD_sigma', own and not self._fronting)
+        self._store()
 
     def _set_row_enabled(self, attr, on):
         for w in self.rows[attr] + (self.priors[attr],):
@@ -922,10 +975,20 @@ class LayerEditor(QtWidgets.QGroupBox):
         k = None if self.stack is None else \
             self.stack.tie_of(self.index, attr)
         lab.setText(label + (' ⛓' if k is not None else ''))
-        lab.setToolTip(
-            'Tied: %s, fitted as one parameter (right-click to untie)'
-            % self.stack.tie_name(k) if k is not None else
-            'Right-click to tie with the same parameter of other layers')
+        if k is None:
+            tip = 'Right-click to tie with the same parameter of other layers'
+        elif self.stack.ties[k]['mode'] == 'total':
+            mem = self.stack.ties[k]['members']
+            tip = ('Tied: %s — a fit keeps their total thickness (now '
+                   '%.4g Å) and varies each; %s takes what the others leave '
+                   '(right-click to untie)' % (
+                       self.stack.tie_name(k),
+                       sum(self.stack.layers[i].thickness for i, _ in mem),
+                       self.stack.layers[mem[-1][0]].name))
+        else:
+            tip = ('Tied: %s, fitted as one parameter (right-click to untie)'
+                   % self.stack.tie_name(k))
+        lab.setToolTip(tip)
 
     def _tie_menu(self, attr, pos):
         if self.stack is None or self.index is None:
@@ -940,7 +1003,8 @@ class LayerEditor(QtWidgets.QGroupBox):
         menu.exec(self.rows[attr][4].mapToGlobal(pos))
 
     def _tie_with(self, attr):
-        """Choose the layers whose `attr` is fitted equal to this one's."""
+        """Choose the layers whose `attr` is fitted equal to this one's, or,
+        for a thickness, whose total thickness with this one a fit keeps."""
         st, i = self.stack, self.index
         tied = st.tied()
         others = [j for j in range(len(st.layers)) if j != i and
@@ -950,9 +1014,23 @@ class LayerEditor(QtWidgets.QGroupBox):
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle('Tie %s.%s' % (st.layers[i].name, attr))
         v = QtWidgets.QVBoxLayout(dlg)
-        v.addWidget(QtWidgets.QLabel(
-            'Fit these layers\' value equal to %s\'s, as one parameter:'
-            % st.layers[i].name))
+        equal = QtWidgets.QRadioButton(
+            'Equal: fit these layers\' value equal to %s\'s, as one '
+            'parameter' % st.layers[i].name)
+        total = QtWidgets.QRadioButton(
+            'Fixed total: a fit keeps the total thickness of %s and these '
+            'layers\nand varies each; the deepest of them takes what the '
+            'others leave' % st.layers[i].name)
+        # an equal thickness tie rarely has overlapping bounds (a layer and
+        # its interface): a fixed total is the default
+        (total if attr == 'thickness' else equal).setChecked(True)
+        if attr == 'thickness':
+            v.addWidget(equal)
+            v.addWidget(total)
+        else:
+            v.addWidget(QtWidgets.QLabel(
+                'Fit these layers\' value equal to %s\'s, as one parameter:'
+                % st.layers[i].name))
         boxes = []
         for j in others:
             b = QtWidgets.QCheckBox(st.layers[j].name)
@@ -968,7 +1046,10 @@ class LayerEditor(QtWidgets.QGroupBox):
             return
         chosen = [j for j, b in boxes if b.isChecked()]
         if chosen:
-            st.tie([(i, attr)] + [(j, attr) for j in chosen])
+            if total.isChecked():
+                st.tie([(j, attr) for j in sorted([i] + chosen)], 'total')
+            else:
+                st.tie([(i, attr)] + [(j, attr) for j in chosen])
             self._show_tie(attr)
             self.changed.emit()
 
@@ -1043,6 +1124,12 @@ class LayerEditor(QtWidgets.QGroupBox):
         for attr, *_, scale in EDITOR_PARAMS:
             val, bmin, bmax, cb, _ = self.rows[attr]
             setattr(L, attr, val.value() / scale)
+            if attr == 'MSLD_sigma' and not self.msig_own.isChecked():
+                L.MSLD_sigma = None
+                val.blockSignals(True)          # shown following Roughness σ
+                val.setValue(self.rows['roughness_sigma'][0].value())
+                val.blockSignals(False)
+                self._sync_slider(attr)
             # the prior (set in its own dialog) is kept
             L.fit[attr] = dict(L.fit.get(attr, {}), vary=cb.isChecked(),
                                min=bmin.value() / scale,
@@ -1067,7 +1154,12 @@ class SimulationTab(QtWidgets.QWidget):
         self.stack = stack if stack is not None else make_stack()
         self.last_Q = self.last_R = None     # latest Q, {channel: R}
         self._refl_note = ''                 # warning of the last reflectivity
+        # [(dataset name, {channel: (Q, dQ, theta)})] of the imported data
+        # with a dQ column, for the resolution dialog (set by the
+        # Experimental tab)
+        self.dq_sets = lambda: []
         self._profile = None        # (z, edges, [curves], [slab values])
+        self._crossings = []        # crossing_warnings of the profile
         self._locked = False        # a fit is running: see set_locked
 
         self._timer = QtCore.QTimer(self, singleShot=True, interval=120)
@@ -1176,6 +1268,31 @@ class SimulationTab(QtWidgets.QWidget):
             'clipped at half thicknesses,\n  thin layers renormalised, jumps '
             'at the window edges (Licorne manual, App. 10.1).')
 
+        self.iorder = QtWidgets.QComboBox()
+        self.iorder.addItems(['additive', 'ordered (non-crossing)',
+                              'independent (smooth)'])
+        self.iorder.setCurrentIndex(
+            INTERFACE_ORDERS.index(self.stack.interface_order))
+        self.iorder.setToolTip(
+            'How the rms interfaces combine (rms roughness only).\n'
+            'additive: the erf / tanh steps add up.  Where a wider interface '
+            'reaches past a sharper neighbour\n  they cross: a layer\'s '
+            'occupancy goes negative, so ρ or the NSLD overshoot and in '
+            'vector smearing\n  M points backwards (φ flips half a turn).  '
+            'Sessions saved before this setting load as additive.\n'
+            'ordered: each interface stays above the one grown before it '
+            '(the substrate side), so every depth is a\n  weighted average '
+            'of the layers; identical to additive where nothing crosses.  '
+            'Where interfaces cross,\n  a layer\'s integrated moment / SLD '
+            'gains the area additive made negative.\n'
+            'independent: each interface fluctuates on its own, again kept '
+            'above the ones below it; never negative\n  and smooth (no kink '
+            'where interfaces cross), but a layer only a few σ thick gains '
+            'material\n  even where nothing crosses (+2.5 % erf, +4 % tanh '
+            'for t = 2σ).')
+        self.iorder_warn = QtWidgets.QLabel()
+        self.iorder_warn.setWordWrap(True)
+
         self.lic_exact = QtWidgets.QCheckBox(
             'exact (roughness, M smearing, resolution)')
         self.lic_exact.setChecked(self.stack.is_licorne_exact())
@@ -1198,14 +1315,16 @@ class SimulationTab(QtWidgets.QWidget):
             'Average the reflectivity over a Gaussian in Q of standard '
             'deviation\nσ_Q = Q·√((Δθ/θ)² + (Δλ/λ)²).')
         self.res_mode = QtWidgets.QComboBox()
-        self.res_mode.addItems(['fixed λ', 'fixed θ per Q band'])
+        self.res_mode.addItems(['fixed θ per Q band', 'from data dQ'])
         self.res_mode.setCurrentIndex(RES_MODES.index(res['mode']))
         self.res_mode.setToolTip(
-            'fixed λ: one wavelength, angle scan, θ = asin(Qλ/4π) '
-            '(Licorne resolution.m, MONO mode).\n'
-            'fixed θ per Q band: one or more fixed angles, each used over a '
-            'Q band, λ = 4π sin θ / Q\n(presets: Mono with 3 angles, ToF '
-            'with 1).')
+            'fixed θ per Q band: time of flight at one or more fixed angles, '
+            'each used over a Q band,\nλ = 4π sin θ / Q (presets: 3 angles '
+            'or 1).\n'
+            'from data dQ: the measured dQ — a fit averages each data point '
+            'over its own dQ (stitched angles\nas measured); curves '
+            'elsewhere interpolate the dQ of the dataset chosen with '
+            'Show….')
         self.res_conv = QtWidgets.QComboBox()
         self.res_conv.addItems([c[0] for c in RES_CONVOLUTIONS])
         self.res_conv.setCurrentIndex(res_convolution(res))
@@ -1224,16 +1343,6 @@ class SimulationTab(QtWidgets.QWidget):
             'distance between its neighbours.\n'
             'The fit uses the data Q; the curve here uses this tab\'s Q grid, '
             'so it can differ from Licorne\'s.')
-        self.res_lambda = dspin(0.1, 50, 3, 0.1, ' Å')
-        self.res_lambda.setValue(res['wavelength'])
-        self.res_lambda.setToolTip('Neutron wavelength λ')
-        self.res_dlambda = dspin(0, 50, 3, 0.05, ' %')
-        self.res_dlambda.setValue(100 * res['dlambda_rel'])
-        self.res_dlambda.setToolTip('Relative wavelength spread Δλ/λ '
-                                    '(standard deviation)')
-        self.res_dtheta = dspin(0, 100, 3, 0.05, ' mrad')
-        self.res_dtheta.setValue(1e3 * res['dtheta'])
-        self.res_dtheta.setToolTip('Angular spread Δθ (standard deviation)')
         self.res_tof_dl = dspin(0, 1, 4, 0.001, ' Å')
         self.res_tof_dl.setValue(res['tof_dlambda'])
         self.res_tof_dl.setToolTip('Absolute wavelength spread Δλ '
@@ -1290,24 +1399,25 @@ class SimulationTab(QtWidgets.QWidget):
         f.addRow('Q reference', self.q_fronting)
         f.addRow('Licorne', self.lic_exact)
         f.addRow('Roughness', self.rscheme)
+        orow = QtWidgets.QHBoxLayout()
+        orow.addWidget(self.iorder)
+        orow.addWidget(self.iorder_warn, 1)
+        f.addRow('Interfaces', orow)
         f.addRow('M smearing', self.msmear)
         resrow = QtWidgets.QHBoxLayout()
         resrow.addWidget(self.res_on)
         resrow.addSpacing(10)
         resrow.addWidget(self.res_mode, 1)
         resrow.addWidget(self.res_conv, 1)
+        res_show = QtWidgets.QPushButton('Show…')
+        res_show.setToolTip('Plot σ_Q against Q, compare it with the dQ '
+                            'column of the imported data and fit the '
+                            'spreads to it')
+        res_show.clicked.connect(self._show_resolution)
+        resrow.addWidget(res_show)
         f.addRow('Resolution', resrow)
 
         # one page of parameters per mode, in RES_MODES order
-        mono = QtWidgets.QWidget()
-        mrow = QtWidgets.QHBoxLayout(mono)
-        mrow.setContentsMargins(0, 0, 0, 0)
-        for lab, w in (('λ', self.res_lambda), ('Δλ/λ', self.res_dlambda),
-                       ('Δθ', self.res_dtheta)):
-            mrow.addSpacing(10)
-            mrow.addWidget(QtWidgets.QLabel(lab))
-            mrow.addSpacing(4)
-            mrow.addWidget(w, 1)
         tof = QtWidgets.QWidget()
         tg = QtWidgets.QGridLayout(tof)
         tg.setContentsMargins(0, 0, 0, 0)
@@ -1318,14 +1428,25 @@ class SimulationTab(QtWidgets.QWidget):
         tg.addWidget(self.res_preset, 0, 4)
         tg.addWidget(self.res_tof, 1, 0, 1, 5)
         tg.setColumnStretch(1, 1)
+        data = QtWidgets.QWidget()
+        drow = QtWidgets.QHBoxLayout(data)
+        drow.setContentsMargins(0, 0, 0, 0)
+        self.res_data_info = QtWidgets.QLabel()
+        self.res_data_info.setProperty('role', 'muted')
+        self.res_data_info.setWordWrap(True)
+        drow.addWidget(self.res_data_info, 1)
+        res_data_pick = QtWidgets.QPushButton('Choose…')
+        res_data_pick.setToolTip('Pick the dataset whose dQ (σ) the '
+                                 'curves use')
+        res_data_pick.clicked.connect(self._show_resolution)
+        drow.addWidget(res_data_pick)
         self.res_pages = QtWidgets.QStackedWidget()
-        self.res_pages.addWidget(mono)
         self.res_pages.addWidget(tof)
+        self.res_pages.addWidget(data)
         f.addRow(self.res_pages)
 
         for w in (self.qmin, self.qmax, self.tail,
-                  self.background, self.res_lambda, self.res_dlambda,
-                  self.res_dtheta, self.res_tof_dl):
+                  self.background, self.res_tof_dl):
             w.valueChanged.connect(self.schedule)
         for val, bmin, bmax, cb in self.stack_rows.values():
             for w in (val, bmin, bmax):
@@ -1333,6 +1454,7 @@ class SimulationTab(QtWidgets.QWidget):
             cb.toggled.connect(self.schedule)
         self.nq.valueChanged.connect(self.schedule)
         self.msmear.currentIndexChanged.connect(self.schedule)
+        self.iorder.currentIndexChanged.connect(self.schedule)
         self.rscheme.activated.connect(self._scheme_changed)
         # the Licorne-exact box follows its settings at once
         for w in (self.rscheme, self.msmear, self.res_conv):
@@ -1352,6 +1474,10 @@ class SimulationTab(QtWidgets.QWidget):
                                 QtWidgets.QSizePolicy.Policy.Fixed)
         self.list.setFixedHeight(7 * self.list.fontMetrics().height() + 16)
         self.list.currentRowChanged.connect(self._on_select)
+        # picking a layer (click, or arrow keys in the list) opens its page
+        self.list.itemClicked.connect(self._show_layer_page)
+        self.list.currentRowChanged.connect(
+            lambda _: self.list.hasFocus() and self._show_layer_page())
         self.list.setDragDropMode(
             QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
         self.list.model().rowsMoved.connect(self._on_rows_moved)
@@ -1538,18 +1664,18 @@ class SimulationTab(QtWidgets.QWidget):
         for cb in (self.logy, self.rq4, self.freeze_y):
             cb.toggled.connect(self.schedule)
             bar.addWidget(cb)
+        bar.addWidget(line_colours.button())
         v.addLayout(bar)
 
         w, self.refl_plot = plot_widget('Q (Å⁻¹)', 'Reflectivity')
         self.refl_plot.addLegend(offset=(-10, 10))
-        self.refl_curves = [
-            self.refl_plot.plot(pen=pg.mkPen(c, width=1.8), connect='finite')
-            for c in CH_COLOURS]
-        self.hp_curves = [
-            self.refl_plot.plot(pen=pg.mkPen(c, width=1.8), connect='finite')
-            for c in HP_COLOURS]
-        self.asym_curve = self.refl_plot.plot(
-            pen=pg.mkPen(ASYM_COLOUR, width=1.8), connect='finite')
+        self.refl_curves = [self.refl_plot.plot(connect='finite')
+                            for _ in CHANNELS]
+        self.hp_curves = [self.refl_plot.plot(connect='finite')
+                          for _ in range(2)]
+        self.asym_curve = self.refl_plot.plot(connect='finite')
+        self._line_colours()
+        line_colours.notifier().changed.connect(self._line_colours)
         self.asym_zero = pg.InfiniteLine(
             pos=0, angle=0, pen=pg.mkPen('#4b4e55', width=0.7))
         self.refl_plot.addItem(self.asym_zero)
@@ -1559,6 +1685,15 @@ class SimulationTab(QtWidgets.QWidget):
         self.refl_cursor = Crosshair(w, self.refl_plot, self._refl_readout)
         v.addWidget(w)
         return box
+
+    def _line_colours(self):
+        """Pens of the reflectivity curves from line_colours."""
+        for curve, key in zip(self.refl_curves + self.hp_curves
+                              + [self.asym_curve],
+                              CHANNELS + ['+', '-', 'asym']):
+            curve.setPen(pg.mkPen(line_colours.get(key), width=1.8))
+        for sample, _ in self.refl_plot.legend.items:
+            sample.update()
 
     # -- layer list management ---------------------------------------------
     def refresh_list(self, select=None):
@@ -1593,6 +1728,12 @@ class SimulationTab(QtWidgets.QWidget):
             self.editor.setEnabled(False)
         self.prof_layers.style()
 
+    def _show_layer_page(self, *_):
+        """Open the tool box on the layer's page (from General parameters or
+        Polarisation) when the user picks a layer.  Not done in _on_select,
+        which also runs after edits made on those pages."""
+        self.toolbox.setCurrentIndex(0)
+
     def set_locked(self, locked):
         """While a fit or sampling runs: nothing that changes the model can
         be edited (layer values, general parameters, polarisation, adding /
@@ -1610,9 +1751,17 @@ class SimulationTab(QtWidgets.QWidget):
         row = self.list.currentRow()
         pos = min(max(row + 1, 1), len(self.stack.layers) - 1)
         old = list(self.stack.layers)
-        self.stack.layers.insert(pos, Layer('L%d' % pos, thickness=50.0,
-                                            NSLD_real=2.0e-6, roughness_sigma=3.0,
-                                            roughness_sublayer=10))
+        above = old[pos - 1]
+        if pos > 1:
+            # a copy of the layer above, its fit bounds kept but nothing
+            # varied: a new layer adds no fit parameters
+            layer = copy.deepcopy(above)
+            layer.name = 'L%d' % pos
+            layer.fit = {a: dict(e, vary=False) for a, e in above.fit.items()}
+        else:                            # below the fronting: the defaults
+            layer = Layer('L%d' % pos, thickness=50.0, NSLD_real=2.0e-6,
+                          roughness_sigma=3.0, roughness_sublayer=10)
+        self.stack.layers.insert(pos, layer)
         self.stack.reindex_ties(old)
         self._renumber()
         self.refresh_list(select=pos)
@@ -1779,13 +1928,13 @@ class SimulationTab(QtWidgets.QWidget):
                 self.msmear.currentIndex()]
             self.stack.roughness_scheme = ROUGHNESS_SCHEMES[
                 self.rscheme.currentIndex()]
+            self.stack.interface_order = INTERFACE_ORDERS[
+                self.iorder.currentIndex()]
             self.tail.setEnabled(self.stack.roughness_scheme == 'rms')
+            self.iorder.setEnabled(self.stack.roughness_scheme == 'rms')
             mode = RES_MODES[self.res_mode.currentIndex()]
             self.stack.resolution.update(
                 enabled=self.res_on.isChecked(), mode=mode,
-                wavelength=self.res_lambda.value(),
-                dlambda_rel=self.res_dlambda.value() / 100,
-                dtheta=self.res_dtheta.value() / 1e3,
                 tof_dlambda=self.res_tof_dl.value())
             scheme, fun = RES_CONVOLUTIONS[self.res_conv.currentIndex()][1:]
             self.stack.resolution['scheme'] = scheme
@@ -1796,6 +1945,7 @@ class SimulationTab(QtWidgets.QWidget):
             self._sync_licorne_exact()
             self.stack.build_sublayers()
             self._compute_profile()
+            self._show_crossings()
             self._show_profile()
             self._draw_reflectance()
             text = '%d layers, %d sublayers' % (len(self.stack.layers),
@@ -1803,6 +1953,10 @@ class SimulationTab(QtWidgets.QWidget):
             if self._refl_note:
                 text += ('<br><span style="color:%s">%s</span>'
                          % (style.ERROR, html.escape(self._refl_note)))
+            if self._crossings:
+                text += ('<br><span style="color:%s">%s (General parameters '
+                         '→ Interfaces)</span>'
+                         % (style.ERROR, html.escape(self._crossing_text())))
             res = self.stack.resolution
             if res['enabled'] and res.get('scheme') == 'licorne':
                 text += ('<br><i>Licorne convolution: this curve depends on '
@@ -1823,7 +1977,59 @@ class SimulationTab(QtWidgets.QWidget):
         self.res_conv.setEnabled(on)
         self.res_pages.setCurrentIndex(self.res_mode.currentIndex())
         self.res_pages.setEnabled(on)
+        res = self.stack.resolution
+        n = len(res.get('data_q', ()))
+        self.res_data_info.setText(
+            'dQ of %s (%d Q, overlap: %s); a fit uses each point\'s '
+            'own dQ' % (res.get('data_set') or '?', n,
+                        {'first': 'earlier angle', 'last': 'later angle'}.get(
+                            res.get('data_overlap'), 'mean')) if n else
+            'No dQ yet: choose a dataset')
         self.schedule()
+
+    def resolution_shown(self):
+        """Copy of the resolution parameters the widgets show (mode
+        included), whether the resolution is on or not."""
+        res = copy.deepcopy(self.stack.resolution)
+        res.update(mode=RES_MODES[self.res_mode.currentIndex()],
+                   tof_dlambda=self.res_tof_dl.value())
+        if res['mode'] == 'tof':
+            res['tof_angles'] = self._tof_angles()
+        return res
+
+    def set_resolution_spreads(self, res):
+        """The spreads of res (Δλ and the angles' Δθ) into the widgets, and
+        the resolution on."""
+        self.res_tof_dl.setValue(res['tof_dlambda'])
+        self._set_tof_angles(res['tof_angles'])
+        self.res_mode.setCurrentIndex(RES_MODES.index(res['mode']))
+        self.res_on.setChecked(True)
+        self.schedule()
+
+    def set_data_dq(self, name, Q, sigma, overlap='mean'):
+        """The 'data' mode with the dQ table (Q, sigma_Q) of dataset
+        `name` (overlap: the rule the table was made with,
+        tabs.resolution.dq_table), and the resolution on."""
+        Q, sigma = np.asarray(Q, dtype=float), np.asarray(sigma, dtype=float)
+        q, inv = np.unique(Q, return_inverse=True)    # a repeated Q: the mean
+        dq = np.bincount(inv, sigma) / np.bincount(inv)
+        self.stack.resolution.update(data_q=q.tolist(), data_dq=dq.tolist(),
+                                     data_set=name,
+                                     data_overlap=overlap)
+        self.res_mode.setCurrentIndex(RES_MODES.index('data'))
+        self.res_on.setChecked(True)
+        self._sync_resolution()
+
+    def _show_resolution(self):
+        # imported here: tabs.resolution takes plot_widget from this module
+        from tabs.resolution import ResolutionDialog
+        dlg = getattr(self, '_res_dialog', None)
+        if dlg is None:
+            dlg = self._res_dialog = ResolutionDialog(self, self)
+        dlg.refresh_datasets()
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     # -- TOF angle table (mrad in the table, rad in the model) ---------------
     def _set_tof_angles(self, angles):
@@ -1913,6 +2119,34 @@ class SimulationTab(QtWidgets.QWidget):
 
     def _compute_profile(self):
         self._profile, self._on_bars = profile_data(self.stack)
+        self._crossings = crossing_warnings(self.stack)
+
+    def _crossing_text(self):
+        """'Additive interfaces cross: CrSb Mx -163 %' (see CROSSING_WARN)."""
+        names = [l.name for l in self.stack.layers]
+        return 'Additive interfaces cross: ' + ', '.join(
+            '%s %s %+.0f %%' % (names[c['host']], CROSSING_NAMES[q], v)
+            for c, q, v in self._crossings)
+
+    def _show_crossings(self):
+        """The warning beside the Interfaces combo (see CROSSING_WARN)."""
+        names = [l.name for l in self.stack.layers]
+        tips = []
+        for c, q, v in self._crossings:
+            host = names[c['host']]
+            tips.append(
+                '%s: the interfaces of %s cross (its occupancy goes down to '
+                '%.3g at %.1f Å); the additive %s goes %+.0f %% of %s\'s '
+                'value past the layer values over %.1f – %.1f Å (shaded).'
+                % (host, names[c['layer']], c['occupancy'], c['z'],
+                   CROSSING_NAMES[q], v, host, *c['zrange']))
+        self.iorder_warn.setText(
+            '<span style="color:%s">⚠ %s</span>'
+            % (style.ERROR, html.escape(self._crossing_text()))
+            if self._crossings else '')
+        self.iorder_warn.setToolTip(
+            '\n'.join(tips + ['Interfaces ordered keeps every quantity '
+                              'within the layer values.']) if tips else '')
 
     def _show_profile(self, *_):
         """Draw the checked quantities from the cached profile."""
@@ -1940,6 +2174,14 @@ class SimulationTab(QtWidgets.QWidget):
         for item in self.prof_decor:
             p.removeItem(item)
         self.prof_decor = []
+        shade = QtGui.QColor(style.ERROR)
+        shade.setAlpha(45)
+        for c, _, _ in self._crossings:
+            region = pg.LinearRegionItem(c['zrange'], movable=False,
+                                         brush=shade, pen=pg.mkPen(None))
+            region.setZValue(-60)
+            p.addItem(region, ignoreBounds=True)
+            self.prof_decor.append(region)
         line = pg.mkPen('#62666d', width=1)
         for Zj in Z:
             ln = pg.InfiniteLine(pos=Zj, angle=90, pen=line)
@@ -1960,6 +2202,7 @@ class SimulationTab(QtWidgets.QWidget):
             return
         x = vb.mapSceneToView(ev.scenePos()).x()
         self.list.setCurrentRow(int(np.searchsorted(self._profile[1], x)))
+        self._show_layer_page()
 
     def _profile_readout(self, x):
         """Cursor text for the depth profile: layer, depth, checked curves."""
@@ -2112,6 +2355,7 @@ class SimulationTab(QtWidgets.QWidget):
         self.stack.resolution = new.resolution
         self.stack.magnetic_smearing = new.magnetic_smearing
         self.stack.roughness_scheme = new.roughness_scheme
+        self.stack.interface_order = new.interface_order
         self.stack.licorne_renorm = new.licorne_renorm
         self.stack.licorne_outer = new.licorne_outer
         self.stack.step_fallback = new.step_fallback
@@ -2122,9 +2366,8 @@ class SimulationTab(QtWidgets.QWidget):
         sim = d.get('simulation', {})
         widgets = [self.qmin, self.qmax, self.nq, self.tail, self.pol,
                    self.background, self.q_fronting, self.res_on,
-                   self.msmear, self.rscheme, self.res_mode,
-                   self.res_conv, self.res_tof_dl,
-                   self.res_lambda, self.res_dlambda, self.res_dtheta]
+                   self.msmear, self.rscheme, self.iorder, self.res_mode,
+                   self.res_conv, self.res_tof_dl]
         for w in widgets:
             w.blockSignals(True)
         self.qmin.setValue(sim.get('qmin', self.qmin.value()))
@@ -2138,11 +2381,10 @@ class SimulationTab(QtWidgets.QWidget):
             SMEARING_MODES.index(new.magnetic_smearing))
         self.rscheme.setCurrentIndex(
             ROUGHNESS_SCHEMES.index(new.roughness_scheme))
+        self.iorder.setCurrentIndex(
+            INTERFACE_ORDERS.index(new.interface_order))
         res = new.resolution
         self.res_on.setChecked(res['enabled'])
-        self.res_lambda.setValue(res['wavelength'])
-        self.res_dlambda.setValue(100 * res['dlambda_rel'])
-        self.res_dtheta.setValue(1e3 * res['dtheta'])
         self.res_mode.setCurrentIndex(RES_MODES.index(res['mode']))
         self.res_conv.setCurrentIndex(res_convolution(res))
         self.res_tof_dl.setValue(res['tof_dlambda'])

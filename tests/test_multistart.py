@@ -183,3 +183,58 @@ def test_session_A_de_restarts():
     assert sum(r['hits'] for r in m) == 3
     assert cost == m[0]['chi2'] and np.allclose(p.to_u(x), m[0]['u'])
     assert cost <= 4.93
+
+
+def test_progress(monkeypatch):
+    """Every start reports as it begins, runs and ends, in this process
+    and from worker processes."""
+    import fit.multistart as ms
+    monkeypatch.setattr(ms, 'PROGRESS_EVERY', 0.0)
+    p = TwoMinima()
+    for workers in (1, 2):
+        seen = []
+        run_multistart(p, n_starts=4, seed=2, workers=workers,
+                       progress=seen.append)
+        for k in range(5):
+            mine = [i['phase'] for i in seen if i['start'] == k]
+            assert 'done' in mine
+            if workers == 1:
+                assert mine[0] == 'begin' and mine[-1] == 'done'
+        # from the workers through the queue (one may come after its
+        # start's end, or be left in the queue when the run ends)
+        assert any(i['phase'] == 'begin' for i in seen)
+        done = [i for i in seen if i['phase'] == 'done']
+        assert len(done) == 5 and all(i['best'] is not None for i in done)
+        if workers == 1:            # the patch does not reach the workers
+            assert {'begin', 'lbfgs', 'done'} <= {i['phase'] for i in seen}
+            it = [i for i in seen if i['phase'] == 'lbfgs']
+            assert it[0]['step'] == 1 and it[0]['maxiter'] == 3000
+
+
+def test_de_progress(monkeypatch):
+    """A short DE reports its members as they are evaluated, generation by
+    generation, then its polish."""
+    import math
+    import fit.multistart as ms
+    from test_dream_fit import small_problem
+    monkeypatch.setattr(ms, 'PROGRESS_EVERY', 0.0)
+    seen = []
+    fp = small_problem().fit
+    run_multistart(fp, n_starts=1, method='de', seed=0,
+                   de_options=dict(maxiter=5, init='sobol'),
+                   progress=seen.append)
+    phases = [i['phase'] for i in seen if i['start'] == 0]
+    assert phases[0] == 'begin' and phases[-1] == 'done'
+    de = [i for i in seen if i['phase'] == 'de' and i['start'] == 0]
+    steps = [i['step'] for i in de]
+    # the first population, generations 1-5, then 6 as the last ends
+    assert steps == sorted(steps) and set(steps) == set(range(7))
+    assert de[0]['maxiter'] == 5
+    # the members of the first population, one by one
+    first = [i['evals'] for i in de if i['step'] == 0]
+    assert first == list(range(1, len(first) + 1))
+    assert first[-1] == de[0]['size'] == \
+        2 ** math.ceil(math.log2(15 * len(fp.params)))
+    one = [i['evals'] for i in de if i['step'] == 1]
+    assert one[-1] == de[0]['size']
+    assert 'polish' in phases

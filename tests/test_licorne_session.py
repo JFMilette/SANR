@@ -318,23 +318,11 @@ Sigma=Q.*sqrt((DTheta./Theta).^2+(DLambda/Lambda)^2);
 """
 
 
-def test_mono_template(tmp_path):
+def test_mono_template_not_read(tmp_path):
+    """SANR has no fixed-wavelength resolution: the MONO template is not
+    one it reads (the importer then turns the resolution off)."""
     p = tmp_path / 'resolution.m'
     p.write_text(MONO_SCRIPT)
-    r = read_resolution(p)
-    assert r == pytest.approx({'enabled': True, 'mode': 'mono',
-                               'wavelength': 5.0, 'dlambda_rel': 0.002,
-                               'dtheta': 0.0007}, rel=1e-15)
-    st = load_licorne_model(FIX1 / 'parameters.m')
-    st.resolution.update(r)
-    q = np.linspace(0.005, 0.3, 50)
-    theta = np.arcsin(q * 5.0 / 4 / np.pi)
-    expect = q * np.sqrt((0.0007 / theta)**2 + (0.01 / 5.0)**2)
-    assert np.max(np.abs(st.resolution_sigma(q) / expect - 1)) < 1e-14
-    p.write_text(MONO_SCRIPT.replace('DTheta(Q > 0)=0.0007;', ''))
-    assert read_resolution(p) is None
-    p.write_text(MONO_SCRIPT.replace('Theta=asin(Q*Lambda/4/pi);',
-                                     'Theta=0.01;'))
     assert read_resolution(p) is None
 
 

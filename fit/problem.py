@@ -11,7 +11,7 @@ thicknesses (~100) are on the same footing.
 
 DATA -- a list of measured channels, each a dict
   {'Q', 'R', 'dR', 'P0': vector, 'P': vector or None, 'name' (optional),
-   'norm' (optional, default 1)}
+   'norm' (optional, default 1), 'dQ' (optional)}
 with (P0, P) its polarisation pair (see model.stack POLARISATION and
 model.polarisation); 'name' labels it in warnings; 'norm' is a fixed factor
 on that channel's model before the background (Licorne's Norm_factor, see
@@ -29,6 +29,14 @@ warning); or, without `grid`, each channel's grid is all its finite Q points, th
 range and unusable R or dR only choosing the fitted ones among them
 (Licorne's QPOINTS), and each distinct grid is evaluated on its own (one
 call per grid; a warning says so when the channels' grids differ).
+
+RESOLUTION -- with the stack's resolution on in the 'data' mode (model.stack
+RESOLUTION) and the quadrature scheme, every point is averaged over its own
+dQ (Stack.data_sigma; the dQ table where it has none): the model is then ONE
+call on every channel's points one after the other, a Q repeated in two
+channels or two stitched angles taken with each one's dQ.  With the
+'licorne' scheme the 'data' mode takes sigma_Q from the dQ table on the
+grid, like the other modes.
 
 COST -- mean over all points of the squared residual, plus, for parameters
 with a prior from other measurements (fit.priors), -2 (log p - its maximum)
@@ -60,6 +68,24 @@ from fit.priors import prior_terms
 COSTS = ('chi2', 'log')
 
 
+def parameter_names(stack, params):
+    """'layer.attr' of each free_parameters() entry ('stack.attr' for the
+    stack's own, 'tie(Fe.thickness, Co.thickness)' for a tie); layers
+    sharing a name get their index: '#2 Fe.thickness'."""
+    names = [l.name for l in stack.layers]
+    out = []
+    for i, attr, *_ in params:
+        if i is None:
+            out.append('stack.%s' % attr)
+        elif isinstance(i, tuple):
+            out.append(stack.entry_name(i))
+        elif names.count(names[i]) > 1:
+            out.append('#%d %s.%s' % (i, names[i], attr))
+        else:
+            out.append('%s.%s' % (names[i], attr))
+    return out
+
+
 def _interp(q, Q, R):
     """R (on the increasing grid Q) at the points q: linear in log R when R
     is positive everywhere (it falls off by decades), else linear; the end
@@ -81,13 +107,14 @@ class FitProblem:
         self.stack = copy.deepcopy(stack)
         self.cost = cost
         self.params = self.stack.free_parameters()
+        self.names = parameter_names(self.stack, self.params)
         if not self.params:
             raise ValueError('no parameter is varied: tick Fit on at least '
                              'one layer parameter in the Simulation tab')
         bad = [p for p in self.params if not p[3] < p[4]]
         if bad:
             raise ValueError('empty bounds for %s' % ', '.join(
-                self.stack.tie_name(i[1]) if isinstance(i, tuple) else
+                self.stack.entry_name(i) if isinstance(i, tuple) else
                 '%s.%s' % ('stack' if i is None else
                            self.stack.layers[i].name, a)
                 for i, a, *_ in bad))
@@ -113,9 +140,12 @@ class FitProblem:
         self.error_floor = float(error_floor)
         self.raw_sigma = []                # each channel's dR, no floor
         Qs = []
+        dQs = []                           # each channel's dQ, NaN if none
         full = []                          # (finite Q, fitted ones among them)
         for k, e in enumerate(data):
             Q, R, dR = (np.asarray(e[c], dtype=float) for c in ('Q', 'R', 'dR'))
+            dQ = np.asarray(e['dQ'], dtype=float) if e.get('dQ') is not None \
+                else np.full_like(Q, np.nan)
             ok = np.isfinite(Q) & np.isfinite(R) & (Q >= qmin) & (Q <= qmax)
             if cost == 'log':
                 ok &= R > 0
@@ -136,6 +166,7 @@ class FitProblem:
                 self.channels.append((e.get('name', 'channel %d' % k),
                                       R[ok], sigma))
                 Qs.append(Q[ok])
+                dQs.append(dQ[ok])
                 fin = np.isfinite(Q)
                 full.append((Q[fin], np.flatnonzero(ok[fin])))
         if not self.channels:
@@ -148,6 +179,11 @@ class FitProblem:
         self.npoints = sum(len(ch[2]) for ch in self.channels)
         self.grid = None if grid is None else np.asarray(grid, dtype=float)
         self.groups = self._groups(Qs, full)
+        # sigma_Q of each group's points, None: the resolution's own
+        self.sigmas = [None] * len(self.groups)
+        if self._pointwise():
+            self.sigmas = [self.stack.data_sigma(self.groups[0][0],
+                                                 np.concatenate(dQs))]
 
         # said once here; the cost function itself never warns
         m = self.stack.fronting_direction()
@@ -174,6 +210,12 @@ class FitProblem:
         as Licorne computes the model on every point of q.dat before it
         selects QPOINTS (fit_reflection.m)."""
         res = self.stack.resolution
+        if self._pointwise():
+            # every channel's points in turn, each with its own dQ
+            end = np.cumsum([len(q) for q in Qs])
+            return [(np.concatenate(Qs),
+                     [(k, np.arange(e - len(q), e), q) for k, (q, e)
+                      in enumerate(zip(Qs, end))])]
         if not (res.get('enabled') and res.get('scheme') == 'licorne'):
             return [(self.Q, [(k, ch[1], q) for k, (ch, q)
                               in enumerate(zip(self.channels, Qs))])]
@@ -207,6 +249,12 @@ class FitProblem:
                           'own', stacklevel=3)
         return list(grids.values())
 
+    def _pointwise(self):
+        """Each point averaged over its own dQ (see RESOLUTION)."""
+        res = self.stack.resolution
+        return bool(res.get('enabled')) and res.get('mode') == 'data' and \
+            res.get('scheme', 'quadrature') != 'licorne'
+
     # -- parameters ---------------------------------------------------------
     def to_x(self, u):
         """Physical values of normalised u, never outside [lo, hi]."""
@@ -231,11 +279,12 @@ class FitProblem:
         self.apply(x)
         self.stack.build_sublayers()
         out = [None] * len(self.channels)
-        for Q, members in self.groups:
+        for (Q, members), sigma in zip(self.groups, self.sigmas):
             norms = [self.norms[k] for k, *_ in members]
             R = self.stack.reflectivities(
                 Q, [self.pairs[k] for k, *_ in members], warn=False,
-                norms=None if all(n == 1 for n in norms) else norms)
+                norms=None if all(n == 1 for n in norms) else norms,
+                sigma=sigma)
             for c, (k, idx, q) in enumerate(members):
                 out[k] = R[idx, c] if idx is not None else \
                     _interp(q, Q, R[:, c])

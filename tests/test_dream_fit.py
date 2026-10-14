@@ -382,3 +382,31 @@ def test_fixed_floor_round_trip(tmp_path):
     _, back, _ = load_run(tmp_path / 'g.npz')        # the floor once
     x = res.best()[0]
     assert back.fit.error_floor == 0.05 and back(x) == pp(x)
+
+
+def test_asymmetry_with_shifted_q_grids():
+    """R- measured on Q points a little off R+'s (a second angle reduced
+    for each spin state): the asymmetry is still given, on R+'s points,
+    as with one grid."""
+    from fit.dream.dream_fit import PosteriorProblem, predictive_bands
+    from fit.problem import FitProblem
+    st = film()
+    fe = st.layers[1]
+    fe.fit['thickness'] = {'vary': True, 'min': 60, 'max': 100}
+    data = measure(film(), ('+', '-'))
+    for d, n in zip(data, ('R+', 'R-')):
+        d['name'] = n
+    shifted = [dict(d) for d in data]
+    Qs = Q * (1 + 1e-4 * (Q > 0.05))
+    shifted[1]['Q'] = Qs
+    shifted[1]['R'] = np.interp(Qs, Q, data[1]['R'])
+    bands = []
+    for dd in (data, shifted):
+        pp = PosteriorProblem(FitProblem(st, dd, 'chi2'))
+        res = sample(pp, **OLD, n_gen=40, seed=0, stop_when_converged=False)
+        bands.append(predictive_bands(res, pp, n=10, replicates=2))
+    same, off = (b['asymmetry'] for b in bands)
+    assert off is not None and np.array_equal(off['Q'], Q)
+    assert np.allclose(off['A'], same['A'], atol=1e-3, equal_nan=True)
+    assert np.allclose(off['bands'], same['bands'], atol=1e-2,
+                       equal_nan=True)

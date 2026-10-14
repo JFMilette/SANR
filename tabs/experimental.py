@@ -31,10 +31,19 @@ fit gives every live dataset the fitted channels' pairs, so what is drawn
 against the data is exactly what is fitted.  It is recomputed whenever the
 simulation changes, drawn as lines without error bars, and can be frozen
 into a static copy from its context menu; the frozen copy is still drawn as
-lines.
+lines and keeps the model it was computed from (Stack.to_dict, saved in the
+session): "Send model to Simulation" in its context menu writes those layers
+and model settings back into the Simulation tab (its Q grid, polarisation
+and display stay).
 
 Only points between the Simulation tab's Q min and Q max are plotted, the
 range that is also fitted.
+
+COLOURS -- a channel is drawn in its line_colours colour and a dataset's
+asymmetry in a colour of SET_COLOURS, unless the dataset has its own:
+"Colour…" in a dataset's context menu sets one for all its channels and its
+asymmetries, on a channel for that channel of that dataset only (kept with
+the dataset, so a live dataset keeps it).  Both are saved in the session.
 
 Asymmetries combine channels measured on different Q grids: every channel is
 linearly interpolated (value and error) onto the Q points of the first
@@ -44,11 +53,15 @@ otherwise built as R+ = R++ + R+-, R- = R-- + R-+ (a simulated dataset
 always holds R+ / R- themselves, with the background counted once).
 
 The Fit tool box (fit.panel.FitPanel, a mixin of this tab) fits the
-Simulation tab's model to every channel of one dataset: by differential
-evolution (fit.de, followed in fit.de.de_window) or by sampling its
-posterior with DREAM (fit.dream, followed in fit.dream.dream_window).
+Simulation tab's model to every channel of one dataset, or of several
+datasets together (a joint fit, fit.joint): by differential evolution
+(fit.de, followed in fit.de.de_window) or by sampling its posterior with
+DREAM (fit.dream, followed in fit.dream.dream_window).  The live
+simulation datasets take the norms (and Licorne grid) of the first fitted
+dataset.
 """
 
+import copy
 import os
 import re
 
@@ -58,18 +71,16 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 
 from fit.panel import FitPanel
 from model.polarisation import CHANNEL_NAMES, default_vectors, vectors_pair
+import line_colours
 import style
-from .simulation import (CH_COLOURS, HP_COLOURS, REFL_QUANTITIES, Crosshair,
-                         PairTable, dspin, fmt, plot_widget)
+from .simulation import (REFL_QUANTITIES, Crosshair, PairTable, dspin, fmt,
+                         plot_widget)
 
 
 DATA_FILTER = 'Data files (*.dat *.txt *.csv *.refl);;All files (*)'
 DIALOG_OPTIONS = QtWidgets.QFileDialog.Option.DontUseNativeDialog
-# import order in the channel combo; colours follow the simulation tab
+# import order in the channel combo; colours: line_colours
 DATA_CHANNELS = ['+', '-', '++', '-+', '+-', '--']
-CHANNEL_COLOURS = {'++': CH_COLOURS[0], '+-': CH_COLOURS[1],
-                   '-+': CH_COLOURS[2], '--': CH_COLOURS[3],
-                   '+': HP_COLOURS[0], '-': HP_COLOURS[1]}
 PLOT_ORDER = ['++', '+-', '-+', '--', '+', '-']
 SPLIT = re.compile(r'[\s,;]+')
 # where the Q values of an imported file come from
@@ -533,28 +544,31 @@ def asymmetry(D, name):
     return Q, v, e, dQ
 
 
-def dataset_series(D, k, line=False):
+def dataset_series(D, k, line=False, colour=None):
     """Series of REFL_QUANTITIES[k] for one dataset as
-    ([(label, colour, Q, y, dy, dQ)], note); colour None = per-dataset.
+    ([(label, colour, Q, y, dy, dQ)], note).  colour(key) is the colour of
+    a channel or a half-polarized sign (default line_colours.get), and
+    colour(None) that of an asymmetry (default None = per-dataset).
     A simulated (line) dataset's R+ / R- only show as half-polarized."""
+    if colour is None:
+        colour = lambda key: key and line_colours.get(key)      # noqa: E731
     name, label, _ = REFL_QUANTITIES[k]
     if k == 0:
         hide = {'+', '-'} if line and len(D) > 2 else set()
-        return [('R' + ch, CHANNEL_COLOURS[ch], D[ch]['Q'], D[ch]['R'],
+        return [('R' + ch, colour(ch), D[ch]['Q'], D[ch]['R'],
                  D[ch]['dR'], D[ch]['dQ']) for ch in PLOT_ORDER
                 if ch in D and ch not in hide], ''
     if label is None:
         out = []
-        for sign, col, lab in (('+', HP_COLOURS[0], 'R+'),
-                               ('-', HP_COLOURS[1], 'R−')):
+        for sign, lab in (('+', 'R+'), ('-', 'R−')):
             hp = half_polarized(D, sign)
             if hp is not None:
-                out.append((lab, col) + hp)
+                out.append((lab, colour(sign)) + hp)
         return out, '' if out else 'needs R+ / R− or the four spin channels'
     res = asymmetry(D, name)
     if isinstance(res, str):
         return [], res
-    return [(name, None) + res], ''
+    return [(name, colour(None)) + res], ''
 
 
 def simulation_channels(stack, Q, vectors, norms=None):
@@ -645,6 +659,7 @@ class PairDialog(QtWidgets.QDialog):
 
 # ------------------------------------------------------- data tree ----
 ROLE = QtCore.Qt.ItemDataRole.UserRole          # (set index, channel or None)
+GLYPH_ROLE = ROLE + 1                           # a dataset's own colour
 SYMBOLS = ['o', 's', 't', 'd', 'star', 't1', 'p', 'h', '+', 'x']
 # marker shown beside each dataset name in the tree
 SYMBOL_GLYPH = {'o': '●', 's': '■', 't': '▼', 'd': '◆', 'star': '★',
@@ -653,12 +668,13 @@ SET_COLOURS = ['#b392f0', '#1b9e77', '#d95f02', '#e7298a', '#66a61e',
                '#e6ab02', '#d4a55a', '#5aa9e6']
 
 
-def glyph_icon(glyph):
-    """Small icon showing a dataset's marker glyph."""
+def glyph_icon(glyph, colour=None):
+    """Small icon showing a dataset's marker glyph, in its colour (None:
+    the theme's text colour)."""
     pix = QtGui.QPixmap(16, 16)
     pix.fill(QtCore.Qt.GlobalColor.transparent)
     p = QtGui.QPainter(pix)
-    p.setPen(QtGui.QColor(style.TEXT))
+    p.setPen(QtGui.QColor(colour or style.TEXT))
     p.drawText(pix.rect(), QtCore.Qt.AlignmentFlag.AlignCenter, glyph)
     p.end()
     return QtGui.QIcon(pix)
@@ -686,14 +702,18 @@ class DataTree(QtWidgets.QTreeWidget):
         self.setDefaultDropAction(QtCore.Qt.DropAction.MoveAction)
 
     @staticmethod
-    def set_icon(item, i):
-        """Marker glyph of dataset i on its top-level item."""
-        item.setIcon(0, glyph_icon(SYMBOL_GLYPH[SYMBOLS[i % len(SYMBOLS)]]))
+    def set_icon(item, i, colour=None):
+        """Marker glyph of dataset i on its top-level item, in the
+        dataset's own colour if it has one."""
+        item.setData(0, GLYPH_ROLE, colour)
+        item.setIcon(0, glyph_icon(SYMBOL_GLYPH[SYMBOLS[i % len(SYMBOLS)]],
+                                   colour))
 
     def _restyle(self, *_):
         """Redraw the glyphs in the theme's text colour."""
         for i in range(self.topLevelItemCount()):
-            self.set_icon(self.topLevelItem(i), i)
+            item = self.topLevelItem(i)
+            self.set_icon(item, i, item.data(0, GLYPH_ROLE))
 
     def dropEvent(self, ev):
         src = self.currentItem()
@@ -764,6 +784,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(splitter)
         if simulation is not None:
+            simulation.dq_sets = self.dq_sets
             simulation.reflectanceChanged.connect(self._update_live)
             # the live curves take that dataset's norms (and Licorne grid)
             self.fit_set.currentIndexChanged.connect(self._update_live)
@@ -817,12 +838,25 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self.rq4 = QtWidgets.QCheckBox('R·Q⁴')
         self.show_err = QtWidgets.QCheckBox('error bars')
         self.show_err.setChecked(True)
+        self.show_points = QtWidgets.QCheckBox('points')
+        self.show_points.setChecked(True)
+        self.show_points.setToolTip('Draw a marker at each data point')
+        self.show_line = QtWidgets.QCheckBox('line')
+        self.show_line.setToolTip('Join the data points of each channel '
+                                  'with a line, in file order')
         opts = QtWidgets.QHBoxLayout()
         opts.addWidget(self.logy)
         opts.addWidget(self.rq4)
-        opts.addWidget(self.show_err)
+        opts.addStretch(1)
         f.addRow('Scale', opts)
-        for w in (self.logy, self.rq4, self.show_err):
+        data = QtWidgets.QHBoxLayout()
+        data.addWidget(self.show_points)
+        data.addWidget(self.show_line)
+        data.addWidget(self.show_err)
+        data.addStretch(1)
+        f.addRow('Data', data)
+        for w in (self.logy, self.rq4, self.show_err, self.show_points,
+                  self.show_line):
             w.toggled.connect(self.redraw)
         v.addWidget(disp)
         # the fit tools get most of the height the window has to spare
@@ -848,7 +882,9 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self.formula.setProperty('role', 'muted')
         bar.addWidget(self.formula)
         bar.addStretch(1)
+        bar.addWidget(line_colours.button())
         v.addLayout(bar)
+        line_colours.notifier().changed.connect(self._line_colours)
 
         w, self.plot = plot_widget('Qz (Å⁻¹)', 'Reflectivity')
         self.plot.addLegend(offset=(-10, 10))
@@ -871,7 +907,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         current = None
         for i, s in enumerate(self.sets):
             top = QtWidgets.QTreeWidgetItem([s['name']])
-            t.set_icon(top, i)
+            t.set_icon(top, i, s.get('colour'))
             top.setData(0, ROLE, (i, None))
             live = s.get('live', False)
             flags = (top.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable
@@ -902,7 +938,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                             & ~QtCore.Qt.ItemFlag.ItemIsDropEnabled)
                 if live:
                     it.setFlags(it.flags() & ~QtCore.Qt.ItemFlag.ItemIsDragEnabled)
-                it.setForeground(0, QtGui.QColor(CHANNEL_COLOURS[ch]))
+                it.setForeground(0, QtGui.QColor(self.series_colour(i, ch)))
                 tip = d['path'] if not d.get('q_path') else \
                     '%s\nQ: %s' % (d['path'], d['q_path'])
                 if d.get('q_shift'):
@@ -949,6 +985,8 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         s['visible'] = item.checkState(0) == QtCore.Qt.CheckState.Checked
         name = item.text(0).strip()
         if name:
+            if name != s['name']:
+                self._rename_fit_set(s['name'], name)
             s['name'] = name
         # rebuild outside the itemChanged handler
         QtCore.QTimer.singleShot(0, lambda: self.refresh_tree((i, None)))
@@ -961,16 +999,30 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         i, ch = it.data(0, ROLE)
         menu = QtWidgets.QMenu(self)
         live = self.sets[i].get('live', False)
+        s = self.sets[i]
         if ch is None:
             menu.addAction('Rename', lambda: self.tree.editItem(it, 0))
+            menu.addAction('Colour…', lambda: self.pick_colour(i))
+            if s.get('colour') or s.get('channel_colours'):
+                menu.addAction('Default colours',
+                               lambda: self.reset_colours(i))
             menu.addAction('Polarisation…', lambda: self.edit_polarisation(i))
             if live:
                 menu.addAction('Freeze as static copy',
                                lambda: self.freeze_simulation(i))
-            else:
+            elif s.get('model'):
+                act = menu.addAction('Send model to Simulation',
+                                     lambda: self.send_model(i))
+                act.setEnabled(not self.busy())
+            if not live:
                 menu.addAction('Import into this dataset…',
                                lambda: self.import_data(self.sets[i]['name']))
-        elif not live:
+        else:
+            menu.addAction('Colour…', lambda: self.pick_colour(i, ch))
+            if ch in s.get('channel_colours', {}):
+                menu.addAction('Default colour',
+                               lambda: self.reset_colours(i, ch))
+        if ch is not None and not live:
             move = menu.addMenu('Move to')
             for j, s in enumerate(self.sets):
                 if j != i:
@@ -980,6 +1032,61 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                 i, ch, self.new_set(refresh=False)))
         menu.addAction('Remove', self.remove_selected)
         menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def dq_sets(self):
+        """[(name, {channel: (Q, dQ, theta)})] of the measured datasets
+        (not simulated) with some dQ > 0, for the resolution dialog."""
+        out = []
+        for s in self.sets:
+            if s.get('line') or s.get('live'):
+                continue
+            chans = {ch: (d['Q'], d['dQ'], d.get('theta'))
+                     for ch, d in s['channels'].items()
+                     if np.any(np.asarray(d['dQ']) > 0)}
+            if chans:
+                out.append((s['name'], chans))
+        return out
+
+    # -- colours --------------------------------------------------------------
+    def series_colour(self, i, key):
+        """Colour of dataset i for a channel or half-polarized sign `key`
+        (its own, else the dataset's, else line_colours) or, key None, for an
+        asymmetry (the dataset's, else SET_COLOURS)."""
+        s = self.sets[i]
+        own = s.get('channel_colours', {}).get(key) if key else None
+        return own or s.get('colour') or (
+            line_colours.get(key) if key else SET_COLOURS[i % len(SET_COLOURS)])
+
+    def pick_colour(self, i, ch=None):
+        """Colour of dataset i (every channel without its own, and its
+        asymmetries) or, with ch, of that channel of the dataset."""
+        s = self.sets[i]
+        first = next((c for c in PLOT_ORDER if c in s['channels']), None)
+        start = self.series_colour(i, ch) if ch else \
+            s.get('colour') or self.series_colour(i, first)
+        c = QtWidgets.QColorDialog.getColor(
+            QtGui.QColor(start), self, 'Colour of %s%s'
+            % (s['name'], ' — R' + ch if ch else ''))
+        if not c.isValid():
+            return
+        if ch:
+            s.setdefault('channel_colours', {})[ch] = c.name()
+        else:
+            s['colour'] = c.name()
+        self.refresh_tree((i, ch))
+        self.redraw()
+
+    def reset_colours(self, i, ch=None):
+        """Back to line_colours: channel ch of dataset i, or the whole
+        dataset (its colour and its channels')."""
+        s = self.sets[i]
+        if ch:
+            s.get('channel_colours', {}).pop(ch, None)
+        else:
+            s.pop('colour', None)
+            s.pop('channel_colours', None)
+        self.refresh_tree((i, ch))
+        self.redraw()
 
     # -- polarisation ---------------------------------------------------------
     def sim_vectors(self):
@@ -1079,8 +1186,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         the 'licorne' resolution scheme (model_grid; the grid chosen for
         the fit when its channels differ)."""
         sim = self.simulation
-        i = self._set_index(self.fit_set.currentText())
-        data = None if i is None else self.sets[i]
+        data = next(iter(self._fit_sets()), None)
         channels = data['channels'] if data else None
         grid = None
         ch = data and self._grid_choice.get(data['name'])
@@ -1099,12 +1205,35 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         s = self.sets[i]
         self.sets.append(dict(
             name=self._unique_name(s['name'] + ' (frozen)'), visible=True,
-            line=True,
+            line=True, model=copy.deepcopy(self.simulation.stack.to_dict()),
             channels={ch: dict(d, path='simulation (frozen)',
                                pol=self.channel_vectors(s, ch))
                       for ch, d in s['channels'].items()}))
         self.refresh_tree((len(self.sets) - 1, None))
         self.redraw()
+
+    def send_model(self, i):
+        """Write the model frozen with dataset i (layers and model
+        settings) back into the Simulation tab, replacing its own."""
+        s = self.sets[i]
+        if self.busy() or not s.get('model'):
+            return
+        if QtWidgets.QMessageBox.question(
+                self, 'Send model to Simulation',
+                'Replace the layers and model settings of the Simulation tab '
+                'with those %s was frozen from?' % s['name']) != \
+                QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.simulation.restore_state(copy.deepcopy(s['model']))
+        except (KeyError, TypeError, ValueError) as exc:
+            QtWidgets.QMessageBox.critical(
+                self, 'Send model to Simulation',
+                'Could not load the model of %s:\n%s' % (s['name'], exc))
+            return
+        # Revert would write the old fit start into other layers
+        self._fit_start = None
+        self.btn_revert.setEnabled(False)
 
     def _update_live(self):
         sim = self.simulation
@@ -1176,6 +1305,12 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
             self.refresh_tree((src, ch))
             return
         self.sets[dst]['channels'][ch] = self.sets[src]['channels'].pop(ch)
+        own = self.sets[src].get('channel_colours', {}).pop(ch, None)
+        dcol = self.sets[dst].setdefault('channel_colours', {})
+        if own:
+            dcol[ch] = own
+        else:
+            dcol.pop(ch, None)
         self.refresh_tree((dst, ch))
         self.redraw()
 
@@ -1211,9 +1346,14 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         for s in self.sets:
             e = dict(name=s['name'], visible=s['visible'],
                      live=bool(s.get('live')), line=bool(s.get('line')))
+            for k in ('colour', 'channel_colours'):
+                if s.get(k):
+                    e[k] = s[k]
             if s.get('live'):
                 e['pairs'] = s.get('pairs')
             else:
+                if s.get('model'):              # a frozen simulation's
+                    e['model'] = s['model']
                 e['channels'] = {}
                 for ch, d in s['channels'].items():
                     if 'start' in d:            # imported from a file
@@ -1240,14 +1380,17 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
             sets=sets,
             display=dict(quantity=self.quantity.currentIndex(),
                          logy=self.logy.isChecked(), rq4=self.rq4.isChecked(),
-                         errors=self.show_err.isChecked()),
-            fit=dict(dataset=self.fit_set.currentText(),
+                         errors=self.show_err.isChecked(),
+                         points=self.show_points.isChecked(),
+                         line=self.show_line.isChecked()),
+            fit=dict(dataset=self.fit_set.currentText(), joint=self._joint,
                      cost=self.fit_cost.currentIndex(),
                      maxiter=self.fit_maxiter.value(),
                      mutation=[self.fit_mut_lo.value(),
                                self.fit_mut_hi.value()],
                      population=self.fit_pop.value(), tol=self.fit_tol.value(),
                      polish=self.fit_polish.isChecked(),
+                     lbfgs_maxiter=self.lb_maxiter.value(),
                      workers=self.fit_workers.value()))
 
     def restore_state(self, state, base):
@@ -1258,12 +1401,17 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self.sets = []
         for e in state.get('sets', []):
             s = dict(name=e['name'], visible=e['visible'], channels={})
+            for k in ('colour', 'channel_colours'):
+                if e.get(k):
+                    s[k] = copy.deepcopy(e[k])
             if e.get('live'):
                 s.update(live=True, line=True, pairs=e.get('pairs'))
                 self.sets.append(s)
                 continue
             if e.get('line'):
                 s['line'] = True
+            if e.get('model'):
+                s['model'] = copy.deepcopy(e['model'])
             for ch, c in e.get('channels', {}).items():
                 if 'values' in c:
                     d = {k: np.asarray(v, dtype=float)
@@ -1290,15 +1438,19 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                 s['channels'] = self._live_channels(s)
 
         disp, fit = state.get('display', {}), state.get('fit', {})
-        widgets = (self.quantity, self.logy, self.rq4, self.show_err)
+        widgets = (self.quantity, self.logy, self.rq4, self.show_err,
+                   self.show_points, self.show_line)
         for w in widgets:
             w.blockSignals(True)
         self.quantity.setCurrentIndex(disp.get('quantity', 0))
         self.logy.setChecked(disp.get('logy', True))
         self.rq4.setChecked(disp.get('rq4', False))
         self.show_err.setChecked(disp.get('errors', True))
+        self.show_points.setChecked(disp.get('points', True))
+        self.show_line.setChecked(disp.get('line', False))
         for w in widgets:
             w.blockSignals(False)
+        self._joint = copy.deepcopy(fit.get('joint'))
         self.refresh_tree()
         if fit:
             self.fit_set.setCurrentIndex(max(0, self.fit_set.findText(
@@ -1311,6 +1463,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
             self.fit_pop.setValue(fit.get('population', 15))
             self.fit_tol.setValue(fit.get('tol', 0.01))
             self.fit_polish.setChecked(fit.get('polish', True))
+            self.lb_maxiter.setValue(fit.get('lbfgs_maxiter', 1000))
             self.fit_workers.setValue(fit.get('workers',
                                               self.fit_workers.value()))
         self._fit_start = None
@@ -1319,6 +1472,11 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         return missing
 
     # -- drawing ------------------------------------------------------------
+    def _line_colours(self):
+        """New channel colours: the tree's channel names and the plot."""
+        self.refresh_tree(self._selected())
+        self.redraw()
+
     def redraw(self, *_):
         p = self.plot
         for curve, err in self._items:
@@ -1347,14 +1505,16 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self._log = log
 
         # colour = channel, marker = dataset; single-series quantities
-        # (asymmetries) are coloured per dataset instead
+        # (asymmetries) are coloured per dataset instead; a dataset's own
+        # colours come first (series_colour)
         shown = [(i, s) for i, s in enumerate(self.sets)
                  if s['visible'] and s['channels']]
         prefix = len(shown) > 1
         notes = []
         for i, s in shown:
-            series, note = dataset_series(s['channels'], k,
-                                          s.get('line', False))
+            series, note = dataset_series(
+                s['channels'], k, s.get('line', False),
+                lambda key, i=i: self.series_colour(i, key))
             if note:
                 notes.append('%s: %s' % (s['name'], note))
             symbol = SYMBOLS[i % len(SYMBOLS)]
@@ -1363,8 +1523,6 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                     keep = (Q >= self.simulation.qmin.value()) & \
                         (Q <= self.simulation.qmax.value())
                     Q, y, dy, dQ = Q[keep], y[keep], dy[keep], dQ[keep]
-                if col is None:
-                    col = SET_COLOURS[i % len(SET_COLOURS)]
                 if rq4:
                     y, dy = y * Q**4, dy * Q**4
                 lab = '%s — %s' % (s['name'], sname) if prefix else sname
@@ -1384,7 +1542,8 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self.cursor.refresh()
 
     def _add_series(self, name, col, symbol, Q, y, dy, dQ, log, line=False):
-        """Markers with error bars, or a plain line (simulated data)."""
+        """Markers (if 'points' is ticked) joined by a line (if 'line' is)
+        with error bars, or a plain line (simulated data)."""
         if line:
             # keep gaps (NaN) as breaks in the line
             yy = np.where(np.isfinite(y) & ((y > 0) if log else True), y, np.nan)
@@ -1401,8 +1560,13 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         Q, y, dy, dQ = Q[ok], y[ok], dy[ok], dQ[ok]
         dy = np.where(np.isfinite(dy), np.abs(dy), 0.0)
         dQ = np.where(np.isfinite(dQ), np.abs(dQ), 0.0)
-        curve = pg.PlotDataItem(Q, y, pen=None, symbol=symbol, symbolSize=6,
-                                symbolPen=pg.mkPen(col), symbolBrush=col)
+        # width 1 exactly: Qt strokes any other width as a path, which on
+        # noisy data (e.g. a spin asymmetry) is ~5x slower to repaint
+        curve = pg.PlotDataItem(
+            Q, y, pen=pg.mkPen(col, width=1) if self.show_line.isChecked()
+            else None,
+            symbol=symbol if self.show_points.isChecked() else None,
+            symbolSize=6, symbolPen=pg.mkPen(col), symbolBrush=col)
         # ErrorBarItem has no log mode: give it log10 coordinates directly,
         # with the asymmetric bars that a symmetric dR becomes in log space
         if log:
@@ -1437,8 +1601,8 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                 continue
             i = int(np.argmin(np.abs(Q - x)))
             yv = np.log10(y[i]) if self._log else y[i]
-            pen = curve.opts['symbolPen'] if curve.opts['symbol'] else \
-                curve.opts['pen']
+            pen = curve.opts['pen'] if curve.opts['pen'] is not None else \
+                curve.opts['symbolPen']
             col = pg.mkPen(pen).color().name()
             rows.append(('%s @ %.5g' % (name, Q[i]),
                          '%s ± %s' % (fmt(y[i]), fmt(dy[i])),

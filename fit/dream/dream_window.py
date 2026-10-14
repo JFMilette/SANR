@@ -17,20 +17,23 @@ max R-hat), Stop, and its results, all drawn with pyqtgraph:
               thinned chains, at most every CORNER_EVERY s while shown) once
               the adaptation phase is over; redrawn from the full chains at
               the end
+then one tab per fitted dataset (several in a joint fit, fit.joint), with
   Predictive  data with the 68 / 95 % bands and median of the model R of
               200 posterior draws, and the spin asymmetry if R+ / R- (or
               R++ / R--) share their Q points
   Profile     68 / 95 % bands and median of the slab NSLD and in-plane
-              MSLD of 200 draws
+              MSLD of 200 draws, below it
 
 Values are shown in the Simulation tab's units (SLDs in 1e-6 A^-2, angles
-in degrees).  Predictive and Profile are computed when first shown.
+in degrees).  A dataset's tab is computed when first shown.
 "Load MAP into model" sends the best state visited to the Simulation tab;
 "Apply ±σ to bounds" sets Min / Max of every sampled parameter there to
-median -/+ k sigma (16 / 84 % widths); "Save chains..." writes the run
-with fit.dream.dream_fit.save_result.
+median -/+ k sigma (16 / 84 % widths); in a joint fit both write the
+values as the dataset chosen beside them sees them.  "Save chains..."
+writes the run with fit.dream.dream_fit.save_result.
 """
 
+import os
 import time
 from collections import deque
 
@@ -42,9 +45,13 @@ from fit.dream.dream_fit import (FLOOR_NAME, SIGMA_NAME, chains_split,
                          format_summary,
                          posterior_warnings, predictive_bands, profile_bands,
                          sample, save_result, summary_table)
+import line_colours
 import style
-from tabs.simulation import (CH_COLOURS, HP_COLOURS, PARAM_DISPLAY,
-                             PROFILE_QUANTITIES, shown_names)
+from tabs.simulation import PARAM_DISPLAY, PROFILE_QUANTITIES, shown_names
+
+# where saved chains go, with the sessions (sessions/ of the repo)
+SESSIONS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))), 'sessions')
 
 OK, BAD = '#4ade80', '#f87171'
 PROGRESS_EVERY = 0.2                     # s between progress signals
@@ -52,9 +59,6 @@ TRACE_ROWS = 4000                        # live trace: thinned to this many
 CORNER_EVERY = 1.0                       # s between live corner redraws
 CHAIN_COLOURS = ['#5b9bd5', '#e0a458', '#4fc08d', '#e36fa8', '#b392f0',
                  '#d95f02', '#66a61e', '#e6ab02', '#9aa0a6', '#1b9e77']
-CHANNEL_COLOURS = {'R++': CH_COLOURS[0], 'R+-': CH_COLOURS[1],
-                   'R-+': CH_COLOURS[2], 'R--': CH_COLOURS[3],
-                   'R+': HP_COLOURS[0], 'R-': HP_COLOURS[1]}
 NSLD_COLOUR, MSLD_COLOUR = PROFILE_QUANTITIES[0][2], PROFILE_QUANTITIES[1][2]
 CORRELATION = pg.colormap.get('CET-D1A')
 ADAPT_BRUSH = pg.mkBrush(154, 160, 166, 40)
@@ -621,6 +625,9 @@ class PredictivePanel(QtWidgets.QWidget):
             self.boxes[kind] = cb
             row.addWidget(cb)
         row.addStretch(1)
+        row.addWidget(line_colours.button())
+        self._bands = None                    # what show_bands drew last
+        line_colours.notifier().changed.connect(self._line_colours)
         v = QtWidgets.QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.addLayout(row)
@@ -641,7 +648,12 @@ class PredictivePanel(QtWidgets.QWidget):
         plot.addItem(item)
         self.items.append(('data', ch, item))
 
+    def _line_colours(self):
+        if self._bands is not None:
+            self.show_bands(self._bands)
+
     def show_bands(self, b):
+        self._bands = b
         view = self.view
         view.clear()
         self.items, self.points = [], {}
@@ -651,7 +663,7 @@ class PredictivePanel(QtWidgets.QWidget):
         p.addLegend(offset=(-10, 10))
         view.addItem(p, 1, 0)
         for c in b['channels']:
-            col = CHANNEL_COLOURS.get(c['name'], '#9aa0a6')
+            col = line_colours.get(c['name'][1:])     # 'R++' -> '++'
             Q, R, dR = c['Q'], c['R'], c['dR']
             lo95, lo68, med, hi68, hi95 = np.maximum(c['bands'], 1e-300)
             # a replicate below 0 cannot be drawn on a log axis: cap the
@@ -740,8 +752,9 @@ class DreamWindow(QtWidgets.QWidget):
     """One DREAM run: progress while it samples, its results after."""
 
     stopRequested = QtCore.pyqtSignal()
-    sendRequested = QtCore.pyqtSignal(object)        # MAP state x
-    boundsRequested = QtCore.pyqtSignal(object, object)   # min, max
+    # MAP state x, dataset whose values are sent
+    sendRequested = QtCore.pyqtSignal(object, int)
+    boundsRequested = QtCore.pyqtSignal(object, object, int)   # min, max
     continueRequested = QtCore.pyqtSignal()
 
     def __init__(self, parent=None):
@@ -749,7 +762,7 @@ class DreamWindow(QtWidgets.QWidget):
         self.setWindowTitle('Bayesian sampling (DREAM)')
         self.resize(1100, 820)
         self.problem = self.result = None
-        self.sources = []
+        self.sources, self.datasets = [], []
         self._live, self._corner_t = None, 0.0   # chains so far, last redraw
         self._previous = None              # the run being continued
         self.may_stop_early = False        # stop when converged is on
@@ -779,20 +792,13 @@ class DreamWindow(QtWidgets.QWidget):
             QtWidgets.QPlainTextEdit.LineWrapMode.NoWrap)
         self.trace = TracePanel()
         self.corner = CornerPanel()
-        self.predictive = PredictivePanel()
-        self.profile = ProfilePanel()
-        # result tabs: a page holding either a placeholder or the panel
-        self.pages = {}
         self.tabs.addTab(self.summary, 'Summary')
         self.tabs.addTab(self.trace, 'Traces')
-        for name, panel in (('Corner', self.corner),
-                            ('Predictive', self.predictive),
-                            ('Profile', self.profile)):
-            page = QtWidgets.QStackedWidget()
-            page.addWidget(placeholder('Shown when the run ends.'))
-            page.addWidget(panel)
-            self.pages[name] = page
-            self.tabs.addTab(page, name)
+        # result tabs: a page holding either a placeholder or the panel;
+        # 'Corner', then each dataset's (start), drawn when first shown
+        self.pages = {'Corner': self._page(self.corner)}
+        self.tabs.addTab(self.pages['Corner'], 'Corner')
+        self.part_pages = []           # (page, PredictivePanel, ProfilePanel)
         self._drawn = set()
         self.tabs.currentChanged.connect(self._draw_tab)
 
@@ -802,7 +808,9 @@ class DreamWindow(QtWidgets.QWidget):
         self.btn_map.setToolTip('Send the best state visited to the '
                                 'Simulation tab')
         self.btn_map.clicked.connect(
-            lambda: self.sendRequested.emit(self.result.best()[0]))
+            lambda: self.sendRequested.emit(self.result.best()[0],
+                                            max(self.part_box.currentIndex(),
+                                                0)))
         self.bounds_k = QtWidgets.QDoubleSpinBox()
         self.bounds_k.setRange(0.1, 10.0)
         self.bounds_k.setSingleStep(0.5)
@@ -818,8 +826,15 @@ class DreamWindow(QtWidgets.QWidget):
             'to median − k·(−σ) and median + k·(+σ) (16 / 84 % widths); '
             'Revert restores the bounds from before the run')
         self.btn_bounds.clicked.connect(self._apply_bounds)
+        self.part_box = QtWidgets.QComboBox()
+        self.part_box.setToolTip('Joint fit: the dataset whose values "Apply '
+                                 '±σ to bounds" and "Load MAP into model" '
+                                 'write')
+        self.part_label = QtWidgets.QLabel('Dataset')
         bottom = QtWidgets.QHBoxLayout()
         bottom.addWidget(self.converged, 1)
+        bottom.addWidget(self.part_label)
+        bottom.addWidget(self.part_box)
         bottom.addWidget(self.bounds_k)
         bottom.addWidget(self.btn_bounds)
         bottom.addSpacing(12)
@@ -833,8 +848,46 @@ class DreamWindow(QtWidgets.QWidget):
         v.addWidget(self.tabs, 1)
         v.addLayout(bottom)
 
-    def start(self, problem, n_gen, header, sources=()):
+    @staticmethod
+    def _page(panel):
+        page = QtWidgets.QStackedWidget()
+        page.addWidget(placeholder('Shown when the run ends.'))
+        page.addWidget(panel)
+        return page
+
+    def _set_datasets(self, names):
+        """One tab per dataset, with its predictive and profile bands."""
+        for page, *_ in self.part_pages:
+            self.tabs.removeTab(self.tabs.indexOf(page))
+            page.deleteLater()
+        self.part_pages = []
+        for name in names:
+            pred, prof = PredictivePanel(), ProfilePanel()
+            split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+            split.addWidget(pred)
+            split.addWidget(prof)
+            split.setStretchFactor(0, 3)
+            split.setStretchFactor(1, 2)
+            page = self._page(split)
+            self.part_pages.append((page, pred, prof))
+            self.tabs.addTab(page, name)
+        self.part_box.clear()
+        self.part_box.addItems(names)
+        for w in (self.part_box, self.part_label):
+            w.setVisible(len(names) > 1)
+
+    def _all_pages(self):
+        return list(self.pages.values()) + [p for p, *_ in self.part_pages]
+
+    def start(self, problem, n_gen, header, sources=(), datasets=()):
+        """A new run of problem (a PosteriorProblem); datasets: the name
+        of each dataset fitted (a joint fit's are its own)."""
         self.problem, self.result, self.sources = problem, None, list(sources)
+        self.datasets = list(getattr(problem.fit, 'part_names', None)
+                             or datasets or ['Data'])
+        self.tabs.blockSignals(True)
+        self._set_datasets(self.datasets)
+        self.tabs.blockSignals(False)
         self.infos = display_info(problem)
         self.header.setText(header)
         self.bar.setRange(0, n_gen)
@@ -847,7 +900,7 @@ class DreamWindow(QtWidgets.QWidget):
         self.trace.set_parameters(self.infos, max(n_gen // 10, 1))
         self.corner.clear()
         self._live, self._corner_t = None, 0.0
-        for page in self.pages.values():
+        for page in self._all_pages():
             page.setCurrentIndex(0)
             page.widget(0).setText('Shown when the run ends.')
         self._drawn = set()
@@ -873,10 +926,9 @@ class DreamWindow(QtWidgets.QWidget):
             'Continuing: the summary below is from generation %d and is '
             'updated when the run ends.\n\n' % last
             + self.summary.toPlainText())
-        for name, page in self.pages.items():
-            if name != 'Corner':
-                page.setCurrentIndex(0)
-                page.widget(0).setText('Shown when the run ends.')
+        for page, *_ in self.part_pages:
+            page.setCurrentIndex(0)
+            page.widget(0).setText('Shown when the run ends.')
         self._drawn = set()
         self._live, self._corner_t = None, 0.0
         self.btn_stop.setEnabled(True)
@@ -884,9 +936,10 @@ class DreamWindow(QtWidgets.QWidget):
                   self.btn_continue):
             b.setEnabled(False)
 
-    def show_loaded(self, result, problem, header, sources=()):
+    def show_loaded(self, result, problem, header, sources=(), datasets=()):
         """A saved run (fit.dream.dream_fit.load_run), shown as a finished one."""
-        self.start(problem, int(result.generations[-1]), header, sources)
+        self.start(problem, int(result.generations[-1]), header, sources,
+                   datasets)
         self.finish(result)
         self.status.setText('Saved run: %d generation(s), %d evaluations.'
                             % (result.generations[-1], result.n_evals))
@@ -971,7 +1024,7 @@ class DreamWindow(QtWidgets.QWidget):
             msg = ('Stopped within the adaptation phase (the first %d '
                    'generations): no posterior sample.' % result.adapt_until)
             self.summary.setPlainText(msg)
-            for page in self.pages.values():
+            for page in self._all_pages():
                 page.widget(0).setText(msg)
             return
         # warnings in the Summary, not above the tabs: a long list would
@@ -997,7 +1050,7 @@ class DreamWindow(QtWidgets.QWidget):
         self.converged.setText(text)
         self.btn_map.setEnabled(True)
         self.btn_bounds.setEnabled(True)
-        for page in self.pages.values():
+        for page in self._all_pages():
             page.widget(0).setText('Computing…')
         self._draw_tab(self.tabs.currentIndex())
 
@@ -1017,33 +1070,34 @@ class DreamWindow(QtWidgets.QWidget):
                             else 'Failed: %s' % msg)
 
     def _draw_tab(self, i):
-        name = self.tabs.tabText(i)
-        if name == 'Corner' and self.result is None:   # still running
+        page = self.tabs.widget(i)
+        corner = page is self.pages['Corner']
+        if corner and self.result is None:             # still running
             self._live_corner()
             return
-        if name not in self.pages or name in self._drawn or \
+        if page not in self._all_pages() or page in self._drawn or \
                 self.result is None or \
                 self.result.generations[-1] <= self.result.adapt_until:
             return
-        page = self.pages[name]
         QtWidgets.QApplication.setOverrideCursor(
             QtCore.Qt.CursorShape.WaitCursor)
         try:
-            if name == 'Corner':
+            if corner:
                 self.corner.set_result(self.result, self.infos)
-            elif name == 'Predictive':
-                self.predictive.show_bands(
-                    predictive_bands(self.result, self.problem))
             else:
-                self.profile.show_bands(
-                    *profile_bands(self.result, self.problem))
+                k = [p for p, *_ in self.part_pages].index(page)
+                _, pred, prof = self.part_pages[k]
+                pred.show_bands(predictive_bands(self.result, self.problem,
+                                                 part=k))
+                prof.show_bands(*profile_bands(self.result, self.problem,
+                                               part=k))
         except Exception as exc:
             page.widget(0).setText('Cannot draw: %s' % exc)
             return
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
         page.setCurrentIndex(1)
-        self._drawn.add(name)
+        self._drawn.add(page)
 
     def _apply_bounds(self):
         """median -/+ k sigma of each model parameter (not the error scale)
@@ -1053,17 +1107,20 @@ class DreamWindow(QtWidgets.QWidget):
         n = len(self.problem.fit.params)
         self.boundsRequested.emit(
             [r['median'] - k * r['minus'] for r in rows[:n]],
-            [r['median'] + k * r['plus'] for r in rows[:n]])
+            [r['median'] + k * r['plus'] for r in rows[:n]],
+            max(self.part_box.currentIndex(), 0))
 
     # -- saving -------------------------------------------------------------
     def _save(self):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, 'Save chains', 'dream_run.npz', 'NumPy archive (*.npz)',
+            self, 'Save chains', os.path.join(SESSIONS_DIR, 'dream_run.npz'),
+            'NumPy archive (*.npz)',
             options=QtWidgets.QFileDialog.Option.DontUseNativeDialog)
         if not path:
             return
         try:
-            save_result(path, self.result, self.problem, self.sources)
+            save_result(path, self.result, self.problem, self.sources,
+                        self.datasets)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, 'Save chains',
                                            'Could not save %s:\n%s'

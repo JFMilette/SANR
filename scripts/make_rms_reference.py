@@ -16,7 +16,7 @@ For each case it stores, under '<case>/<field>':
                              resolution on and off, shape (nQ, 6)
 
 Cases: the stress stacks (stress_<s1>_<s2>_<model>_<smearing>), the
-Cr2Te3 session (session_Cr2Te3.json) and tests/data/show_mistake.json.
+Cr2Te3 session (sessions/session_Cr2Te3.json) and tests/data/show_mistake.json.
 """
 
 import json
@@ -32,7 +32,8 @@ from model.polarisation import CHANNEL_NAMES, channel_pair   # noqa: E402
 from model.stack import Layer, Stack                         # noqa: E402
 
 OUT = os.path.join(ROOT, 'tests', 'data', 'rms_additive_reference.npz')
-SESSIONS = {'session_Cr2Te3': os.path.join(ROOT, 'session_Cr2Te3.json'),
+SESSIONS = {'session_Cr2Te3': os.path.join(ROOT, 'sessions',
+                                            'session_Cr2Te3.json'),
             'show_mistake': os.path.join(ROOT, 'tests', 'data',
                                          'show_mistake.json')}
 # (sigma at the top, sigma at the bottom) of the 20 A ferromagnet
@@ -53,6 +54,7 @@ def stress_stack(s_top, s_bot, model, smearing):
                MSLD_phi=0.05),
          Layer('Si', 0, 2.07e-6, 0, 0, 0, other, model, 6)]
     st = Stack(L, magnetic_smearing=smearing)
+    st.interface_order = 'additive'     # the reference (new stacks: 'ordered')
     st.resolution['enabled'] = True
     return st
 

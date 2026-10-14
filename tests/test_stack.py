@@ -226,7 +226,7 @@ def test_to_dict_round_trip():
 
 @pytest.mark.parametrize('f', ['session_Cr2Te3.json', 'session_Cr2Te3_2.json'])
 def test_example_models_load(f):
-    with open(HERE.parent / f) as fh:
+    with open(HERE.parent / 'sessions' / f) as fh:
         st = S.Stack.from_dict(json.load(fh))
     st.build_sublayers()
     assert np.all(np.isfinite(st.reflectivities(Q, pairs(LAB))))
@@ -269,21 +269,19 @@ def test_tof_resolution_matches_licorne_script():
 def test_resolution_grid_follows_local_sigma():
     """The adaptive grid matches the ideal R at every node (brute force)."""
     st = mk()
-    for mode in ('mono', 'tof'):
-        st.resolution.update(enabled=True, mode=mode)
-        p = pairs(['++', '--'])
-        sig = st.resolution_sigma(Q)
-        x = np.linspace(-S.RES_SPAN, S.RES_SPAN, S.RES_NODES)
-        w = np.exp(-0.5 * x**2)
-        Qn = np.maximum(np.abs(Q[:, None] + x * sig[:, None]), 1e-6)
-        Ri = st._trace(Qn.ravel(), p).reshape(len(Q), len(x), -1)
-        brute = (Ri * w[None, :, None]).sum(1) / w.sum()
-        assert rel(st.reflectivities(Q, p), brute) <= 1e-2
+    st.resolution.update(enabled=True, mode='tof')
+    p = pairs(['++', '--'])
+    sig = st.resolution_sigma(Q)
+    x = np.linspace(-S.RES_SPAN, S.RES_SPAN, S.RES_NODES)
+    w = np.exp(-0.5 * x**2)
+    Qn = np.maximum(np.abs(Q[:, None] + x * sig[:, None]), 1e-6)
+    Ri = st._trace(Qn.ravel(), p).reshape(len(Q), len(x), -1)
+    brute = (Ri * w[None, :, None]).sum(1) / w.sum()
+    assert rel(st.reflectivities(Q, p), brute) <= 1e-2
 
 
-@pytest.mark.parametrize('res_mode', ['mono', 'tof'])
 @pytest.mark.parametrize('magnetic_backing', [False, True])
-def test_resolution_grid_accuracy(res_mode, magnetic_backing, monkeypatch):
+def test_resolution_grid_accuracy(magnetic_backing, monkeypatch):
     """The coarse grid refined at the critical edges stays within a small
     fraction of a 1 % error bar of a 16x finer uniform grid."""
     st = mk(PH)
@@ -291,7 +289,7 @@ def test_resolution_grid_accuracy(res_mode, magnetic_backing, monkeypatch):
         b = st.backing
         b.MSLD_rho, b.MSLD_theta, b.MSLD_phi = 1.5e-6, 0.3, 0.05
         st.build_sublayers()
-    st.resolution.update(enabled=True, mode=res_mode)
+    st.resolution.update(enabled=True, mode='tof')
     q = np.linspace(0.004, 0.15, 600)
     p = pairs(NAMES)
     R = st.reflectivities(q, p)

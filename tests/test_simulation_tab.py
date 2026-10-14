@@ -151,3 +151,94 @@ def test_angle_letters(app):
     assert 'in plane' in PROFILE_QUANTITIES[2][1]
     assert shown_names('Fe.MSLD_theta, Co.MSLD_phi, stack.scale') == \
         'Fe.MSLD φ, Co.MSLD θ, stack.scale'
+
+
+def test_interfaces_combo_and_crossing_warning(app):
+    """A session saved before interface_order loads additive and is flagged
+    where its interfaces cross (shaded on the profile); ordered clears it,
+    is saved, and the combo only applies to the rms scheme."""
+    import json
+    import pyqtgraph as pg
+    from model.stack import INTERFACE_ORDERS
+    sim = SimulationTab()
+    assert INTERFACE_ORDERS[sim.iorder.currentIndex()] == 'ordered'
+    with open(HERE / 'data' / 'show_mistake.json') as f:
+        sim.restore_state(json.load(f))
+    sim.recompute()
+    assert sim.stack.interface_order == 'additive'
+    assert 'CrSb Mx -163 %' in sim.iorder_warn.text()
+    assert 'CrSb Mx -163 %' in sim.status.text()
+    shaded = [i for i in sim.prof_decor if isinstance(i, pg.LinearRegionItem)]
+    assert len(shaded) == 1 and shaded[0].getRegion()[0] < 69.2 < \
+        shaded[0].getRegion()[1]
+    sim.iorder.setCurrentIndex(INTERFACE_ORDERS.index('ordered'))
+    sim.recompute()
+    assert sim.stack.interface_order == 'ordered'
+    assert 'cross' not in sim.status.text()
+    assert sim.iorder_warn.text() == '' and not any(
+        isinstance(i, pg.LinearRegionItem) for i in sim.prof_decor)
+    assert sim.session_state()['interface_order'] == 'ordered'
+    sim.iorder.setCurrentIndex(INTERFACE_ORDERS.index('independent'))
+    sim.recompute()
+    assert sim.stack.interface_order == 'independent'
+    assert sim.iorder_warn.text() == ''
+    assert sim.session_state()['interface_order'] == 'independent'
+    sim.rscheme.setCurrentIndex(1)                          # Licorne
+    sim.recompute()
+    assert not sim.iorder.isEnabled()
+
+
+def test_picking_a_layer_opens_its_page(app):
+    """A click in the layer list or in the profile opens the tool box on
+    Layer properties; a reselect from code (after an edit made on another
+    page) leaves the page alone."""
+    from pyqtgraph.Qt import QtCore
+    sim = SimulationTab()
+    sim.recompute()
+    sim.toolbox.setCurrentIndex(1)                  # General parameters
+    sim.refresh_list(select=2)
+    assert sim.toolbox.currentIndex() == 1
+    sim.list.itemClicked.emit(sim.list.item(1))
+    assert sim.toolbox.currentIndex() == 0
+
+    sim.toolbox.setCurrentIndex(2)                  # Polarisation
+    vb = sim.prof_plot.vb
+    vb.setGeometry(QtCore.QRectF(0, 0, 400, 300))
+    z = 0.5 * sum(sim._profile[1][1:3])             # inside layer 2
+    pos = vb.mapViewToScene(QtCore.QPointF(z, 0))
+
+    class Click:
+        def double(self):
+            return False
+
+        def scenePos(self):
+            return pos
+    sim._on_profile_click(Click())
+    assert sim.list.currentRow() == 2 and sim.toolbox.currentIndex() == 0
+
+
+def test_new_layer_copies_the_layer_above(app):
+    """+ adds below the selected layer a copy of it (own name, its fit
+    bounds, nothing varied); below the fronting, the defaults."""
+    sim = SimulationTab()
+    sim.recompute()
+    st = sim.stack
+    sim.list.setCurrentRow(1)
+    A = st.layers[1]
+    A.thickness, A.NSLD_real, A.MSLD_rho = 123.0, 4.5e-6, 1.5e-6
+    A.MSLD_sigma, A.roughness_model = 2.0, 'erf'
+    A.fit_entry('thickness').update(vary=True, min=100.0, max=150.0)
+    sim.add_layer()
+    new = st.layers[2]
+    assert sim.list.currentRow() == 2 and new is not A and new.name == 'L2'
+    for a in ('thickness', 'NSLD_real', 'MSLD_rho', 'MSLD_sigma',
+              'roughness_model', 'roughness_sigma', 'roughness_sublayer'):
+        assert getattr(new, a) == getattr(A, a)
+    assert new.fit['thickness'] == dict(vary=False, min=100.0, max=150.0)
+    assert A.fit['thickness']['vary']                   # the original kept
+    new.thickness = 7.0
+    assert A.thickness == 123.0                         # not shared
+    sim.list.setCurrentRow(0)                           # the fronting
+    sim.add_layer()
+    assert st.layers[1].thickness == 50.0 and \
+        not any(e['vary'] for e in st.layers[1].fit.values())
