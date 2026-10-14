@@ -1,4 +1,5 @@
-"""The mouse wheel never changes a spin box; it scrolls the panel instead.
+"""The mouse wheel never changes a spin box or a combo box; it scrolls the
+panel instead.
 
 Run from the repo root: python -m pytest tests
 """
@@ -13,7 +14,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 QtWidgets = pytest.importorskip('PyQt6.QtWidgets')
 from PyQt6 import QtCore, QtGui                                 # noqa: E402
-from main import NoWheelOnSpinBoxes                             # noqa: E402
+from main import NoWheelOnInputs                                # noqa: E402
 
 
 @pytest.fixture(scope='module')
@@ -44,7 +45,7 @@ def test_wheel_leaves_spin_boxes_alone(app):
         b.setValue(50)
         b.show()
     app.processEvents()
-    f = NoWheelOnSpinBoxes(app)
+    f = NoWheelOnInputs(app)
     app.installEventFilter(f)
     try:
         for b in boxes:
@@ -64,3 +65,27 @@ def test_wheel_leaves_spin_boxes_alone(app):
         app.removeEventFilter(f)
     wheel(boxes[0])                             # without it, the box moves
     assert boxes[0].value() != 50
+
+
+def test_wheel_leaves_combo_boxes_alone(app):
+    """Same for combo boxes, editable or not."""
+    boxes = []
+    for editable in (False, True):
+        b = QtWidgets.QComboBox()
+        b.addItems(['a', 'b', 'c'])
+        b.setEditable(editable)
+        b.setCurrentIndex(1)
+        b.show()
+        boxes.append(b)
+    app.processEvents()
+    f = NoWheelOnInputs(app)
+    app.installEventFilter(f)
+    try:
+        for b in boxes:
+            b.setFocus()
+            assert not wheel(b).isAccepted()
+            assert b.currentIndex() == 1
+    finally:
+        app.removeEventFilter(f)
+    wheel(boxes[0])                             # without it, the box moves
+    assert boxes[0].currentIndex() != 1

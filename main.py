@@ -13,8 +13,8 @@ the choice is remembered for the next launch.  Settings -> Line colours (or
 "Colours…" beside a reflectivity plot) sets the channels' colours in every
 reflectivity plot (line_colours.py), remembered the same way.
 
-The mouse wheel never changes a spin box (NoWheelOnSpinBoxes): it scrolls
-the panel under the pointer, so a value cannot be changed by accident.
+The mouse wheel never changes a spin box or a combo box (NoWheelOnInputs): it
+scrolls the panel under the pointer, so a value cannot be changed by accident.
 
 File -> Import Licorne session reads a saved Licorne session folder
 (model.licorne_io.load_licorne_session) into the same form: its rexp<k>.dat
@@ -242,14 +242,17 @@ def settings():
     return QtCore.QSettings('SANR', 'SANR')
 
 
-class NoWheelOnSpinBoxes(QtCore.QObject):
-    """Application event filter: the wheel never changes a spin box value.
-    The event is ignored instead, so Qt hands it to the parent and the
-    panel under the pointer scrolls as if the box were not there."""
+class NoWheelOnInputs(QtCore.QObject):
+    """Application event filter: the wheel never changes a spin box value
+    or a combo box choice.  The event is ignored instead, so Qt hands it to
+    the parent and the panel under the pointer scrolls as if the box were
+    not there.  An open combo box list still scrolls (it is not a
+    QComboBox)."""
 
     def eventFilter(self, obj, ev):
         if ev.type() == QtCore.QEvent.Type.Wheel and \
-                isinstance(obj, QtWidgets.QAbstractSpinBox):
+                isinstance(obj, (QtWidgets.QAbstractSpinBox,
+                                 QtWidgets.QComboBox)):
             ev.ignore()
             return True
         return False
@@ -310,7 +313,7 @@ def main():
     app.setApplicationName('SANR')
     # every window's icon, and the Dock / task-bar icon
     app.setWindowIcon(QtGui.QIcon(APP_ICON))
-    no_wheel = NoWheelOnSpinBoxes(app)
+    no_wheel = NoWheelOnInputs(app)
     app.installEventFilter(no_wheel)
     style.apply(app, settings().value('theme', style.DEFAULT))
     try:
