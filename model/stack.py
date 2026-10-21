@@ -231,41 +231,65 @@ lateral distances much larger than the neutron's transverse coherence
 length, so each region reflects independently and the measured specular
 reflectivity is the area-weighted incoherent sum of the regions'
 reflectivities, not the reflectivity of the averaged profile (Majkrzak,
-O'Donovan & Berk 2006, sec. 1.4.4; Majkrzak et al. 2014, 2022).  Every
-interior layer (all but the fronting and backing) is scaled by one factor
-f, Gaussian of mean 1 and standard deviation sigma_t: a growth-rate
-variation correlated across the layers.  Roughness, SLDs, magnetisation and
-angles are unchanged; only the thicknesses scale:
+O'Donovan & Berk 2006, sec. 1.4.4; Majkrzak et al. 2014, 2022).  The
+thicknesses of the target layers (Stack.thickness_spread_target) are
+scaled by one factor f of mean 1 and standard deviation sigma_t:
+  'stack' (default): every interior layer (all but the fronting and
+      backing) together, a growth-rate variation correlated across them;
+  a layer index i (1 .. len(layers) - 2, set_spread_target): layer i alone,
+      a lateral variation of that layer, e.g. island growth or a flux
+      gradient of one source; the layers below it shift in depth by the
+      change of its thickness.  It can trade off against the roughness of
+      that layer's interfaces and the thicknesses of its neighbours: check
+      such fits with DREAM.
+Roughness, SLDs, magnetisation and angles are unchanged; only thicknesses
+scale:
 
-    R_spread(Q) = SUM_k w_k R(Q; d_j -> f_k d_j),
-    f_k = 1 + sqrt(2) sigma_t x_k,   w_k = h_k / sqrt(pi)
+    R_spread(Q) = SUM_k w_k R(Q; d_j -> f_k d_j for the target layers)
 
-with x_k, h_k the n-point Gauss-Hermite nodes and weights
-(numpy.polynomial.hermite.hermgauss; Abramowitz & Stegun 25.4.46); the w_k
-sum to 1.  Stack.thickness_spread_nodes is n, an odd int >= 3, or 'auto':
-n = clamp(odd_ceil(0.4 phi^2 + 3), 5, 41) with phi = Qmax D sigma_t (D the
-interior thickness, Qmax the largest Q computed + 3 sigma_Q), which keeps
-the largest relative error in R below 2e-3 (tests/test_thickness_spread.py:
-two films of D = 300 A to Q = 0.2 need 5, 7, 11, 19, 23 and 33 nodes at
-sigma_t = 3, 5, 7, 10, 12 and 15 %; the count grows as phi^2, so the
-linear rule of plans/thickness_spread_plan_v1.md, fitted to a stack with
-shallower fringes, gave 9 nodes and 7e-3 at 7 %).  fit.problem freezes it
-for a fit, from the upper bound of sigma_t (the cost must not jump where n
-changes).  The outer Gauss-Hermite nodes reach far into the tails: a node
-whose factor f_k <= 0.05 (a thickness near zero, unphysical) is left out
-and the others' weights renormalised; their weight is the Gaussian's tail
-there (<= 2e-10 up to 15 %, a few 1e-6 at 20 %), and more than
-SPREAD_DROP_MAX of it is refused (ValueError: a spread above ~25 %).  The average is linear, so it commutes with the resolution (both
-schemes), the Q shift, the norms, scale and background: it is taken on the
-ideal reflectivity, inside the function the resolution averages, each
-node's slabs built once per parameter change (Stack._spread_sequences) by
+with n Gauss-Hermite nodes x_k and weights h_k
+(numpy.polynomial.hermite.hermgauss; Abramowitz & Stegun 25.4.46), w_k =
+h_k / sqrt(pi), and the distribution Stack.thickness_spread_dist
+(spread_factors):
+  'gaussian' (default): f_k = 1 + sqrt(2) sigma_t x_k.  A thickness cannot
+      be negative: with p = Phi(-0.95 / sigma_t) the probability below
+      f = 0.05, p > SPREAD_P_MAX (1e-6, sigma_t above ~19 %) is refused
+      (ValueError: use the log-normal); otherwise a node with f_k <= 0.05
+      (high counts put negligible-weight nodes there) is left out and the
+      weights renormalised.
+  'lognormal': s^2 = ln(1 + sigma_t^2), mu = -s^2 / 2,
+      f_k = exp(mu + sqrt(2) s x_k), so E[f] = 1 and SD[f] = sigma_t: sigma_t
+      means the same for both, and the fitted thickness stays the mean
+      thickness (papers often quote the mode instead, e.g. Morelhao et al.,
+      arXiv:2109.01914: N0 and b = N0 e^(sigma^2); the median is e^mu and
+      the mode e^(mu - s^2)).  Always positive.
+The w_k sum to 1.  The two distributions are indistinguishable at a few %
+(plans/thickness_spread_plan_v2.md sec. 1).
+
+NODES -- Stack.thickness_spread_nodes is n, an odd int >= 3, or 'auto', a
+convergence check (spread_count): from n0 = the smallest odd int >=
+1.5 phi + 2 (at least 5), phi = Qmax D sigma_t (D the target layers'
+thickness, Qmax the largest Q computed + 3 sigma_Q), the ideal R+ and R-
+(the lab channels for a magnetic fronting) on 200 Q up to Qmax are
+computed with n and n + 4 nodes, and n grows by 4 until they agree to
+SPREAD_TOL (2e-3 relative), up to SPREAD_NMAX (41; a warning if it is
+reached).  The result is cached per spread, distribution, target, layer
+thicknesses (to 0.1 A) and Qmax.  fit.problem freezes it once per fit, at
+the upper bound of sigma_t (the cost must not jump where n changes).
+Gauss-Hermite converges slowly for a wide log-normal on a thick target:
+30 % on a 220 A stack to Q = 0.2 (phi 13) needs over 100 nodes (2.8e-2 at
+41); the same spread on a 40 A layer needs 15.
+
+The average is linear, so it commutes with the resolution (both schemes),
+the Q shift, the norms, scale and background: it is taken on the ideal
+reflectivity, inside the function the resolution averages, each node's
+slabs built once per parameter change (Stack._spread_sequences) by
 build_sublayers itself, so both roughness schemes (the Licorne windows and
 renormalisation included) scale as the nominal stack would.
 critical_edges() depends only on the fronting and backing: the quadrature
 grid is the same for every node.  sigma_t = 0 is the code path without it,
 untouched; profile() and the slabs drawn stay the nominal (f = 1) ones.
-Every f_k must be > 0.05 (ValueError otherwise).  It is not part of
-LICORNE_EXACT: Licorne has no such parameter.
+It is not part of LICORNE_EXACT: Licorne has no such parameter.
 
   C. F. Majkrzak, K. V. O'Donovan, N. F. Berk, "Polarized neutron
     reflectometry", in Neutron Scattering from Magnetic Materials
@@ -303,7 +327,7 @@ import copy
 import warnings
 
 import numpy as np
-from scipy.special import erf
+from scipy.special import erf, erfc
 
 from model import roughness as rough
 from model.licorne_resolution import kernel as licorne_kernel
@@ -324,9 +348,14 @@ FIT_PARAMS = ('thickness', 'NSLD_real', 'NSLD_img', 'MSLD_rho', 'MSLD_theta',
 STACK_FIT_PARAMS = ('scale', 'background', 'q_shift', 'thickness_spread')
 # THICKNESS SPREAD: the node choices and the 'auto' rule's limits
 SPREAD_NODE_CHOICES = ('auto', 5, 7, 9, 11, 15, 21)
-SPREAD_NODES_MIN, SPREAD_NODES_MAX = 5, 41
-SPREAD_F_MIN = 0.05             # nodes with a smaller factor are left out
-SPREAD_DROP_MAX = 1e-4          # the weight they may carry
+SPREAD_DISTS = ('gaussian', 'lognormal')
+SPREAD_NODES_MIN = 5            # 'auto' starts at least here
+SPREAD_NMAX = 41                # and stops here
+SPREAD_TOL = 2e-3               # n and n + 4 nodes agree to this
+SPREAD_F_MIN = 0.05             # Gaussian nodes below are left out
+SPREAD_P_MAX = 1e-6             # Gaussian probability allowed below it
+# default upper fit bound of sigma_t for each distribution
+SPREAD_BOUND = {'gaussian': 0.15, 'lognormal': 0.5}
 
 
 # Default fit bounds, the same for every layer: attr -> (min, max).
@@ -342,7 +371,7 @@ DEFAULT_BOUNDS = {
     'scale':           (0.5, 1.5),
     'background':      (0.0, 1e-5),
     'q_shift':         (-0.002, 0.002),    # A^-1
-    'thickness_spread': (0.0, 0.2),        # fraction
+    'thickness_spread': (0.0, 0.15),       # fraction (Gaussian)
 }
 
 
@@ -452,22 +481,28 @@ def _check_P(P, name):
     return P
 
 
-def spread_nodes(n, s):
-    """[(w_k, f_k)] of n Gauss-Hermite nodes at sigma_t s (THICKNESS
-    SPREAD): those with f_k > SPREAD_F_MIN, renormalised; ValueError if the
-    others weigh more than SPREAD_DROP_MAX."""
+def spread_factors(sigma, dist, n):
+    """(f, w): the thickness factors and weights of n Gauss-Hermite nodes
+    for sigma_t `sigma` and distribution `dist` (THICKNESS SPREAD); a
+    Gaussian too wide for positive thicknesses raises ValueError."""
     x, h = np.polynomial.hermite.hermgauss(int(n))
-    s = float(s)
-    f = 1.0 + np.sqrt(2.0) * s * x
     w = h / np.sqrt(np.pi)
+    sigma = float(sigma)
+    if dist == 'lognormal':
+        s2 = np.log1p(sigma ** 2)
+        return np.exp(-s2 / 2 + np.sqrt(2.0 * s2) * x), w
+    if dist != 'gaussian':
+        raise ValueError('unknown thickness spread distribution %r '
+                         '(one of %s)' % (dist, ', '.join(SPREAD_DISTS)))
+    if sigma > 0 and \
+            0.5 * erfc((1 - SPREAD_F_MIN) / (sigma * np.sqrt(2.0))) > \
+            SPREAD_P_MAX:
+        raise ValueError('Gaussian spread too large for positive '
+                         'thicknesses (%.3g %%); use the log-normal'
+                         % (100 * sigma))
+    f = 1.0 + np.sqrt(2.0) * sigma * x
     keep = f > SPREAD_F_MIN
-    lost = float(w[~keep].sum())
-    if lost > SPREAD_DROP_MAX:
-        raise ValueError(
-            'thickness spread %.3g %%: a weight of %.2g of the thickness '
-            'distribution lies at thicknesses below %g of the nominal; '
-            'lower the spread' % (100 * s, lost, SPREAD_F_MIN))
-    return list(zip(w[keep] / w[keep].sum(), f[keep]))
+    return f[keep], w[keep] / w[keep].sum()
 
 
 def _node_sum(seqs, R):
@@ -782,6 +817,10 @@ class Stack:
         self.q_shift = 0.0                   # A^-1, see Q SHIFT
         self.thickness_spread = 0.0          # fraction, see THICKNESS SPREAD
         self.thickness_spread_nodes = 'auto'  # or an odd int >= 3
+        # 'stack' or an interior layer index (set_spread_target)
+        self.thickness_spread_target = 'stack'
+        self.thickness_spread_dist = 'gaussian'   # SPREAD_DISTS
+        self._spread_counts = {}             # spread_count's 'auto' cache
         # incremented whenever self.sublayers is replaced: the key of the
         # thickness-spread nodes' slabs (_spread_sequences)
         self._sub_gen = 0
@@ -859,6 +898,8 @@ class Stack:
                 'q_shift': self.q_shift,
                 'thickness_spread': self.thickness_spread,
                 'thickness_spread_nodes': self.thickness_spread_nodes,
+                'thickness_spread_target': self.thickness_spread_target,
+                'thickness_spread_dist': self.thickness_spread_dist,
                 'fit': copy.deepcopy(self.fit),
                 'q_in_fronting': self.q_in_fronting,
                 'resolution': copy.deepcopy(self.resolution),
@@ -887,6 +928,11 @@ class Stack:
         s.q_shift = float(d.get('q_shift', 0.0))
         s.thickness_spread = float(d.get('thickness_spread', 0.0))
         s.thickness_spread_nodes = d.get('thickness_spread_nodes', 'auto')
+        s.set_spread_target(d.get('thickness_spread_target', 'stack'))
+        s.thickness_spread_dist = d.get('thickness_spread_dist', 'gaussian')
+        if s.thickness_spread_dist not in SPREAD_DISTS:
+            raise ValueError('unknown thickness spread distribution %r'
+                             % (s.thickness_spread_dist,))
         s.fit = copy.deepcopy(d.get('fit', {}))
         s.q_in_fronting = bool(d['q_in_fronting'])
         res = copy.deepcopy(d['resolution'])
@@ -1043,6 +1089,65 @@ class Stack:
                             for i, a in t['members']]
             ties.append(t)
         self.ties = ties
+
+    # -- thickness spread target (THICKNESS SPREAD) ---------------------------
+    def set_spread_target(self, target):
+        """'stack', or the index of an interior layer (not the fronting or
+        the backing); ValueError otherwise."""
+        if target != 'stack':
+            if isinstance(target, bool) or not isinstance(
+                    target, (int, np.integer)) or \
+                    not 1 <= target <= len(self.layers) - 2:
+                raise ValueError(
+                    'the thickness spread target must be \'stack\' or an '
+                    'interior layer index 1 .. %d, not %r'
+                    % (len(self.layers) - 2, target))
+            target = int(target)
+        self.thickness_spread_target = target
+
+    def _spread_layers(self):
+        """Indices of the layers the thickness spread scales."""
+        t = getattr(self, 'thickness_spread_target', 'stack')
+        return list(range(1, len(self.layers) - 1)) if t == 'stack' else [t]
+
+    def spread_summary(self):
+        """What a thickness spread means in the stack's own terms, for the
+        fit results: [(label, value, unit)] -- the RMS thickness variation
+        sigma_t d_i of a one-layer target, and for the log-normal the median
+        e^mu and mode e^(mu - s^2) of f with their thicknesses (of the
+        layer, or of all interior layers together)."""
+        s = float(self.thickness_spread)
+        idx = self._spread_layers()
+        d = sum(self.layers[i].thickness for i in idx)
+        out = []
+        if self.thickness_spread_target != 'stack':
+            out.append(('RMS thickness variation', s * d, 'Å'))
+        if self.thickness_spread_dist == 'lognormal':
+            s2 = np.log1p(s ** 2)
+            for name, f in (('median', np.exp(-s2 / 2)),
+                            ('mode', np.exp(-1.5 * s2))):
+                out.append(('%s factor' % name, float(f), ''))
+                out.append(('%s thickness' % name, float(f * d), 'Å'))
+        return out
+
+    def reindex_spread_target(self, old_layers):
+        """Follow the target layer after layers were added, removed or moved
+        (old_layers: the list before), as reindex_ties.  If it was removed:
+        back to 'stack' with no spread, not fitted (a fitted spread must
+        not move onto the whole stack unnoticed); returns True then."""
+        t = getattr(self, 'thickness_spread_target', 'stack')
+        if t == 'stack':
+            return False
+        where = {id(l): i for i, l in enumerate(self.layers)}
+        i = where.get(id(old_layers[t])) if t < len(old_layers) else None
+        if i is not None and 1 <= i <= len(self.layers) - 2:
+            self.thickness_spread_target = i
+            return False
+        self.thickness_spread_target = 'stack'
+        self.thickness_spread = 0.0
+        if 'thickness_spread' in self.fit:
+            self.fit['thickness_spread']['vary'] = False
+        return True
 
     def free_parameters(self):
         """[(layer index, attr, value, min, max)] of every varied parameter:
@@ -1763,8 +1868,9 @@ class Stack:
         return self.scale * R + self.background
 
     def spread_count(self, qmax, spread=None):
-        """The number of thickness-spread nodes (THICKNESS SPREAD) for the
-        largest Q qmax and sigma_t `spread` (default the stack's)."""
+        """The number of thickness-spread nodes for the largest Q qmax and
+        sigma_t `spread` (default the stack's): the int setting, or the
+        'auto' convergence check (NODES), cached."""
         n = self.thickness_spread_nodes
         if n != 'auto':
             n = int(n)
@@ -1772,50 +1878,95 @@ class Stack:
                 raise ValueError('thickness_spread_nodes must be an odd '
                                  'integer >= 3 or \'auto\', not %r' % (n,))
             return n
-        s = self.thickness_spread if spread is None else float(spread)
-        D = sum(l.thickness for l in self.layers[1:-1])
-        x = 0.4 * (qmax * D * s) ** 2 + 3
-        k = int(np.ceil(x))
-        k += 1 - k % 2                       # the smallest odd int >= x
-        return min(max(k, SPREAD_NODES_MIN), SPREAD_NODES_MAX)
+        s = float(self.thickness_spread if spread is None else spread)
+        if not s > 0:
+            return SPREAD_NODES_MIN
+        dist = self.thickness_spread_dist
+        key = (round(s, 12), dist, self.thickness_spread_target,
+               tuple(round(float(l.thickness), 1) for l in self.layers),
+               round(float(qmax), 6))
+        cache = self.__dict__.setdefault('_spread_counts', {})
+        if key in cache:
+            return cache[key]
+        D = sum(self.layers[i].thickness for i in self._spread_layers())
+        x = 1.5 * qmax * D * s + 2
+        n = int(np.ceil(x))
+        n = min(max(n + 1 - n % 2, SPREAD_NODES_MIN), SPREAD_NMAX)
+        q = np.linspace(qmax / 200, qmax, 200)
+        R = self._spread_probe(q, s, n)
+        while n + 4 <= SPREAD_NMAX:
+            R4 = self._spread_probe(q, s, n + 4)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                d = np.abs(R / R4 - 1)
+            if np.nanmax(d) < SPREAD_TOL:
+                break
+            n, R = n + 4, R4
+        else:
+            warnings.warn('thickness spread %.3g %% (%s): %d nodes do not '
+                          'reach a relative change of %g; kept at %d'
+                          % (100 * s, dist, n, SPREAD_TOL, n), stacklevel=3)
+        if len(cache) > 64:
+            cache.clear()
+        cache[key] = n
+        return n
+
+    def _spread_probe(self, q, s, n):
+        """The ideal R+ and R- (the lab channels with a magnetic fronting)
+        at q averaged over n nodes of sigma_t s: spread_count's check."""
+        f, w = spread_factors(s, self.thickness_spread_dist, n)
+        seqs = self._node_sequences(f, w)
+        if self.fronting_direction() is None:
+            pairs = [(np.array([1.0, 0, 0]), None),
+                     (np.array([-1.0, 0, 0]), None)]
+            return _node_sum(seqs, lambda seq: self._trace(q, pairs, seq))
+        return _node_sum(seqs, lambda seq: self._lab_channels(q, seq))
 
     def spread_nodes(self, qmax, spread=None):
-        """[(w_k, f_k)] of the thickness spread (THICKNESS SPREAD) at
-        sigma_t `spread` (default the stack's): the nodes with f_k > 0.05,
-        their weights renormalised."""
-        return spread_nodes(self.spread_count(qmax, spread),
-                            self.thickness_spread if spread is None
-                            else spread)
+        """[(w_k, f_k)] of the thickness spread at sigma_t `spread` (default
+        the stack's)."""
+        s = self.thickness_spread if spread is None else spread
+        f, w = spread_factors(s, self.thickness_spread_dist,
+                              self.spread_count(qmax, spread))
+        return list(zip(w, f))
 
-    def _spread_sequences(self, qmax):
-        """[(w_k, seq_k)]: each thickness-spread node's slabs (seq as
-        build_transfer_matrix takes it), built by build_sublayers with every
-        interior thickness times f_k, then the stack restored exactly (the
-        saved thicknesses, the nominal slabs).  Cached until the slabs are
-        rebuilt (_sub_gen), the spread or the nodes change."""
-        nodes = self.spread_nodes(qmax)
+    def _node_sequences(self, f, w):
+        """[(w_k, seq_k)]: the slabs (seq as build_transfer_matrix takes it)
+        with the target layers' thicknesses times each f_k, built by
+        build_sublayers, then the stack restored exactly (the saved
+        thicknesses, the nominal slabs)."""
         if self.sublayers is None:
             self.build_sublayers()
-        key = (getattr(self, '_sub_gen', 0), float(self.thickness_spread),
-               tuple(float(f) for _, f in nodes))
-        cache = getattr(self, '_spread_cache', None)
-        if cache is not None and cache[0] == key:
-            return cache[1]
-        inner = self.layers[1:-1]
+        inner = [self.layers[i] for i in self._spread_layers()]
         d0 = [float(l.thickness) for l in inner]
         saved = (self.sublayers, self._slab_arrays,
                  getattr(self, '_sub_gen', 0))
         out = []
         try:
-            for w, f in nodes:
+            for wk, fk in zip(w, f):
                 for l, d in zip(inner, d0):
-                    l.thickness = d * f
+                    l.thickness = d * fk
                 self.build_sublayers()
-                out.append((float(w), self._slab_arrays))
+                out.append((float(wk), self._slab_arrays))
         finally:
             for l, d in zip(inner, d0):
                 l.thickness = d
             self.sublayers, self._slab_arrays, self._sub_gen = saved
+        return out
+
+    def _spread_sequences(self, qmax):
+        """The nodes' slabs of the stack's own spread, cached until the
+        slabs are rebuilt (_sub_gen) or the spread, its distribution,
+        target or nodes change."""
+        w, f = zip(*self.spread_nodes(qmax))
+        if self.sublayers is None:
+            self.build_sublayers()
+        key = (getattr(self, '_sub_gen', 0), float(self.thickness_spread),
+               self.thickness_spread_dist, self.thickness_spread_target,
+               tuple(float(x) for x in f))
+        cache = getattr(self, '_spread_cache', None)
+        if cache is not None and cache[0] == key:
+            return cache[1]
+        out = self._node_sequences(f, w)
         self._spread_cache = (key, out)
         return out
 

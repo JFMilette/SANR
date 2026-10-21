@@ -81,11 +81,13 @@ pair cannot be fitted.  Fitting 'sum' and
 each alone is a deliberate choice of part of it.
 
 THICKNESS SPREAD -- with the stack's thickness_spread_nodes 'auto', the
-node count (model.stack THICKNESS SPREAD) would change with sigma_t and
-the cost jump where it does: the fit's copy of the stack gets it frozen
-once, from the upper bound of sigma_t (its value when not fitted) and the
-largest Q computed (+ 3 sigma_Q and the largest |Q shift| allowed); the
-caller's stack keeps 'auto'.  A message says how many nodes, i.e. how many
+node count (model.stack NODES) would change with sigma_t and the cost jump
+where it does: the fit's copy of the stack gets it frozen once, by the
+convergence check at the upper bound of sigma_t (its value when not
+fitted), for the stack's distribution and target, on the largest Q
+computed (+ 3 sigma_Q and the largest |Q shift| allowed); the caller's
+stack keeps 'auto'.  The target and distribution are model choices, not
+fit parameters: compare them by separate fits (BIC, bounds, DREAM).  A message says how many nodes, i.e. how many
 times slower each evaluation is.  fit.joint gives every dataset the
 largest count.
 
@@ -99,7 +101,7 @@ import warnings
 import numpy as np
 
 from fit.priors import prior_terms
-from model.stack import spread_nodes as gauss_hermite_nodes
+from model.stack import spread_factors
 
 
 COSTS = ('chi2', 'log')
@@ -292,11 +294,14 @@ class FitProblem:
             sigma = max(sigma, float(np.max(sg, initial=0.0)))
         self.spread_qmax = qmax + max(shift) + 3 * sigma
         n = st.thickness_spread_nodes = st.spread_count(self.spread_qmax, s)
-        # a spread too wide for its upper bound: refused now, not in the
-        # middle of the fit
-        gauss_hermite_nodes(n, s)
-        warnings.warn('thickness spread: %d nodes, each evaluation about '
-                      '%d× slower' % (n, n), stacklevel=3)
+        # a spread too wide for its upper bound (a Gaussian reaching zero
+        # thickness): refused now, not in the middle of the fit
+        spread_factors(s, st.thickness_spread_dist, n)
+        t = st.thickness_spread_target
+        warnings.warn('thickness spread (%s, %s): %d nodes, each evaluation '
+                      'about %d× slower'
+                      % ('whole stack' if t == 'stack' else st.layers[t].name,
+                         st.thickness_spread_dist, n, n), stacklevel=3)
         return n
 
     def _combine_data(self):

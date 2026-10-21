@@ -536,8 +536,34 @@ class DEWindow(QtWidgets.QWidget):
                 it.setToolTip(2, 'At its fit bound [%.6g, %.6g]'
                               % (lo * scale, hi * scale))
             t.addTopLevelItem(it)
+            if (i, attr) == (None, 'thickness_spread'):
+                self._spread_rows(it, j, scopes)
         for c in range(t.columnCount()):
             t.resizeColumnToContents(c)
+
+    def _spread_rows(self, it, j, scopes):
+        """A thickness spread's row says its target and distribution, with
+        what it means below it (Stack.spread_summary), at the entry drawn,
+        as the dataset of its scope sees it (a shared one: the first)."""
+        names = getattr(self.problem, 'part_names', None)
+        k = names.index(scopes[j]) if scopes is not None and scopes[j] \
+            else 0
+        sub = parts(self.problem)[k]
+        st = copy.deepcopy(sub.stack)
+        sub.apply(part_x(self.problem, self._x, k), st)
+        t = st.thickness_spread_target
+        it.setText(0, 'whole stack' if t == 'stack' else st.layers[t].name)
+        it.setText(1, 'Thickness spread (%s)' % {
+            'gaussian': 'Gaussian', 'lognormal': 'log-normal'}[
+                st.thickness_spread_dist])
+        for label, v, unit in st.spread_summary():
+            row = QtWidgets.QTreeWidgetItem(['', '  ' + label, '%.4g' % v,
+                                             unit])
+            row.setTextAlignment(2, QtCore.Qt.AlignmentFlag.AlignRight
+                                 | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            for c in range(4):
+                row.setForeground(c, QtGui.QColor(style.MUTED))
+            self.params.addTopLevelItem(row)
 
 
 class DatasetView(QtWidgets.QSplitter):

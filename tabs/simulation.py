@@ -33,9 +33,9 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from model.polarisation import (CHANNEL_NAMES, default_vectors, in_plane,
                                 vectors_pair)
 from model.stack import (DEFAULT_SMEARING, INTERFACE_ORDERS,
-                         ROUGHNESS_SCHEMES, SMEARING_MODES,
+                         ROUGHNESS_SCHEMES, SMEARING_MODES, SPREAD_BOUND,
                          SPREAD_NODE_CHOICES, Layer, Stack, cos_turns,
-                         wrap_turns)
+                         spread_factors, wrap_turns)
 import line_colours
 import style
 from fit.priors import complete as complete_prior
@@ -1260,13 +1260,31 @@ class SimulationTab(QtWidgets.QWidget):
             'curve to higher Q (e.g. a small misalignment of the Q axis).  '
             'The resolution keeps its σ_Q at the measured Q.')
         # THICKNESS SPREAD (model.stack), shown in %, stored as a fraction
-        self.spread = dspin(0.0, 30.0, 2, 0.1)
+        self.spread = dspin(0.0, 50.0, 2, 0.1)
         self.spread.setValue(100 * self.stack.thickness_spread)
         self.spread.setToolTip(
             'Lateral spread of the film thickness (σ/d, %).  Incoherent '
-            'average over regions larger than the neutron coherence length; '
-            'all interior layers scale together.\nEach node costs one more '
-            'reflectivity: see Nodes.')
+            'average over regions larger than the neutron coherence length: '
+            'every layer together, or one layer alone (Spread below).\n'
+            'Each node costs one more reflectivity: see nodes.')
+        self.spread_target = QtWidgets.QComboBox()
+        self.spread_target.setToolTip(
+            'Which thicknesses vary laterally: every layer together, or this '
+            'layer alone (the layers below it then shift in depth).\nA '
+            'one-layer spread can trade off against that layer\'s '
+            'roughness and its neighbours\' thicknesses: check with DREAM.')
+        self.spread_dist = QtWidgets.QComboBox()
+        for key, label in (('gaussian', 'Gaussian'),
+                           ('lognormal', 'log-normal')):
+            self.spread_dist.addItem(label, key)
+        self.spread_dist.setToolTip(
+            'Distribution of the thickness factor, mean 1 and standard '
+            'deviation the spread in both.\nGaussian: up to about 19 % '
+            '(thicknesses must stay positive).  log-normal: always positive, '
+            'for large one-layer spreads.')
+        self.spread_error = QtWidgets.QLabel(wordWrap=True)
+        self.spread_error.setStyleSheet('color: %s' % style.ERROR)
+        self.spread_error.hide()
         self.spread_nodes = QtWidgets.QComboBox()
         for n in SPREAD_NODE_CHOICES:
             self.spread_nodes.addItem(str(n), n)
@@ -1284,7 +1302,7 @@ class SimulationTab(QtWidgets.QWidget):
                 ('q_shift', self.q_shift,
                  lambda: dspin(-0.05, 0.05, 6, 0.0001)),
                 ('thickness_spread', self.spread,
-                 lambda: dspin(0.0, 30.0, 2, 0.1))):
+                 lambda: dspin(0.0, 50.0, 2, 0.1))):
             bmin, bmax = make(), make()
             for b in (bmin, bmax):
                 b.setButtonSymbols(
@@ -1468,9 +1486,12 @@ class SimulationTab(QtWidgets.QWidget):
             f.addRow(label, row)
             if attr == 'thickness_spread':
                 nrow = QtWidgets.QHBoxLayout()
-                nrow.addWidget(self.spread_nodes)
-                nrow.addStretch(1)
-                f.addRow('Spread nodes', nrow)
+                nrow.addWidget(self.spread_target, 3)
+                nrow.addWidget(self.spread_dist, 2)
+                nrow.addWidget(QtWidgets.QLabel('nodes'))
+                nrow.addWidget(self.spread_nodes, 1)
+                f.addRow('Spread', nrow)
+                f.addRow('', self.spread_error)
         f.addRow('Q reference', self.q_fronting)
         f.addRow('Licorne', self.lic_exact)
         f.addRow('Roughness', self.rscheme)
@@ -1528,6 +1549,8 @@ class SimulationTab(QtWidgets.QWidget):
                 w.valueChanged.connect(self.schedule)
             cb.toggled.connect(self.schedule)
         self.spread_nodes.currentIndexChanged.connect(self.schedule)
+        self.spread_target.currentIndexChanged.connect(self.schedule)
+        self.spread_dist.currentIndexChanged.connect(self._spread_dist_changed)
         self.nq.valueChanged.connect(self.schedule)
         self.msmear.currentIndexChanged.connect(self.schedule)
         self.iorder.currentIndexChanged.connect(self.schedule)
@@ -1786,6 +1809,7 @@ class SimulationTab(QtWidgets.QWidget):
                 it = self.list.item(i)
                 it.setFlags(it.flags() & ~QtCore.Qt.ItemFlag.ItemIsDragEnabled)
         self.list.blockSignals(False)
+        self._refresh_spread_targets()      # names and positions may change
         if select is not None:
             self.list.setCurrentRow(max(0, min(select, n - 1)))
         self._on_select(self.list.currentRow())
@@ -1841,6 +1865,7 @@ class SimulationTab(QtWidgets.QWidget):
                           roughness_sigma=3.0, roughness_sublayer=10)
         self.stack.layers.insert(pos, layer)
         self.stack.reindex_ties(old)
+        self._reindex_spread(old)
         self._renumber()
         self.refresh_list(select=pos)
         self.schedule()
@@ -1851,6 +1876,7 @@ class SimulationTab(QtWidgets.QWidget):
             old = list(self.stack.layers)
             del self.stack.layers[row]
             self.stack.reindex_ties(old)
+            self._reindex_spread(old)
             self._renumber()
             self.refresh_list(select=row)
             self.schedule()
@@ -1871,6 +1897,7 @@ class SimulationTab(QtWidgets.QWidget):
             old = list(L)
             L[row], L[new] = L[new], L[row]
             self.stack.reindex_ties(old)
+            self._reindex_spread(old)
             self._renumber()
             self.refresh_list(select=new)
             self.schedule()
@@ -1884,6 +1911,7 @@ class SimulationTab(QtWidgets.QWidget):
             old = list(L)
             L.insert(new, L.pop(start))
             self.stack.reindex_ties(old)
+            self._reindex_spread(old)
             self._renumber()
             self.schedule()
         else:
@@ -1947,6 +1975,53 @@ class SimulationTab(QtWidgets.QWidget):
                       self.stack.thickness_spread_nodes)
             c.setCurrentIndex(c.count() - 1)
         c.blockSignals(False)
+        c = self.spread_dist
+        c.blockSignals(True)
+        c.setCurrentIndex(max(0, c.findData(self.stack.thickness_spread_dist)))
+        c.blockSignals(False)
+        self._refresh_spread_targets()
+
+    def _refresh_spread_targets(self):
+        """The Spread target box: 'Whole stack', then each interior layer
+        by name ('#i name' when names repeat), the stack's target selected."""
+        c, L = self.spread_target, self.stack.layers
+        names = [l.name for l in L]
+        c.blockSignals(True)
+        c.clear()
+        c.addItem('Whole stack', 'stack')
+        for i in range(1, len(L) - 1):
+            c.addItem('#%d %s' % (i, names[i]) if names.count(names[i]) > 1
+                      else names[i], i)
+        c.setCurrentIndex(max(0, c.findData(
+            self.stack.thickness_spread_target)))
+        c.blockSignals(False)
+
+    def _reindex_spread(self, old):
+        """After layers were added, removed or moved: the spread follows its
+        layer; if that layer is gone it is reset, and the status bar says
+        so (Stack.reindex_spread_target)."""
+        if self.stack.reindex_spread_target(old):
+            self._load_stack_fit()
+            msg = ('The thickness spread\'s layer was deleted: the spread is '
+                   'reset (whole stack, 0 %, not fitted).')
+            win = self.window()
+            if isinstance(win, QtWidgets.QMainWindow):
+                win.statusBar().showMessage(msg, 15000)
+            else:
+                self.status.setText(msg)
+
+    def _spread_dist_changed(self, *_):
+        """The Gaussian's bounds kept within its default upper bound; the
+        log-normal's widened from the Gaussian's default."""
+        dist = self.spread_dist.currentData()
+        _, bmin, bmax, _ = self.stack_rows['thickness_spread']
+        top = 100 * SPREAD_BOUND[dist]
+        if dist == 'gaussian':
+            for b in (bmin, bmax):
+                b.setValue(min(b.value(), top))
+        elif bmax.value() == 100 * SPREAD_BOUND['gaussian']:
+            bmax.setValue(top)
+        self.schedule()
 
     def _edit_stack_prior(self, attr):
         e = self.stack.fit_entry(attr)
@@ -2018,6 +2093,16 @@ class SimulationTab(QtWidgets.QWidget):
             self.stack.thickness_spread = self.spread.value() / 100
             self.stack.thickness_spread_nodes = \
                 self.spread_nodes.currentData()
+            self.stack.set_spread_target(self.spread_target.currentData()
+                                         or 'stack')
+            self.stack.thickness_spread_dist = self.spread_dist.currentData()
+            try:
+                spread_factors(self.stack.thickness_spread,
+                               self.stack.thickness_spread_dist, 5)
+                self.spread_error.hide()
+            except ValueError as exc:       # a note, not a dialog
+                self.spread_error.setText(str(exc))
+                self.spread_error.show()
             for attr, (_, bmin, bmax, cb) in self.stack_rows.items():
                 k = STACK_ROW_FACTOR.get(attr, 1.0)
                 self.stack.fit[attr] = dict(
@@ -2422,6 +2507,8 @@ class SimulationTab(QtWidgets.QWidget):
         self.stack.q_shift = new.q_shift
         self.stack.thickness_spread = new.thickness_spread
         self.stack.thickness_spread_nodes = new.thickness_spread_nodes
+        self.stack.thickness_spread_target = new.thickness_spread_target
+        self.stack.thickness_spread_dist = new.thickness_spread_dist
         self.stack.fit = new.fit
         self.stack.q_in_fronting = new.q_in_fronting
         self.stack.resolution = new.resolution
