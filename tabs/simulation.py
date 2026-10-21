@@ -33,8 +33,9 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from model.polarisation import (CHANNEL_NAMES, default_vectors, in_plane,
                                 vectors_pair)
 from model.stack import (DEFAULT_SMEARING, INTERFACE_ORDERS,
-                         ROUGHNESS_SCHEMES, SMEARING_MODES, Layer, Stack,
-                         cos_turns, wrap_turns)
+                         ROUGHNESS_SCHEMES, SMEARING_MODES,
+                         SPREAD_NODE_CHOICES, Layer, Stack, cos_turns,
+                         wrap_turns)
 import line_colours
 import style
 from fit.priors import complete as complete_prior
@@ -357,6 +358,41 @@ def fmt(v):
     return '—' if not np.isfinite(v) else '%.4g' % v
 
 
+def profile_readout(view, x):
+    """Cursor text for a depth profile plot: layer, depth, checked curves.
+    view holds the plot as the Simulation tab does: stack, _profile and
+    _on_bars (profile_data), prof_boxes, prof_show_smooth,
+    prof_show_bars, prof_plot and prof_vb2 (the angles' axis)."""
+    if view._profile is None:
+        return None, []
+    z, Z, e, curves, slabs = view._profile
+    show_bars = view.prof_show_bars.isChecked()
+    show_smooth = view.prof_show_smooth.isChecked()
+    if show_bars:                                # as drawn, see _show_profile
+        curves = [view._on_bars.get(i, c) for i, c in enumerate(curves)]
+    layer = view.stack.layers[int(np.searchsorted(Z, x))]
+    rows = []
+    for i, (name, _, col) in enumerate(PROFILE_QUANTITIES):
+        if not view.prof_boxes[i].isChecked() or \
+                not (show_smooth or show_bars):
+            continue
+        unit = ' °' if i in RIGHT else ''
+        k = min(max(int(np.searchsorted(e, x)) - 1, 0), len(slabs[i]) - 1)
+        if not show_smooth:                      # the bar's top
+            y = slabs[i][k]
+            value = '%s%s  (sublayer)' % (fmt(y), unit)
+        else:
+            y = np.interp(x, z, curves[i], left=np.nan, right=np.nan)
+            if show_bars:
+                value = '%s%s  (sublayer %s)' % (fmt(y), unit,
+                                                 fmt(slabs[i][k]))
+            else:
+                value = fmt(y) + unit
+        vb = view.prof_vb2 if i in RIGHT else view.prof_plot.vb
+        rows.append((name, value, col, y, vb))
+    return 'z = %.4g Å  —  %s' % (x, layer.name), rows
+
+
 class LayerLabels:
     """A shaded band and a name (with the thickness) per layer on a depth
     profile plot.  selected() is the row drawn in bold (-1 for none)."""
@@ -514,7 +550,12 @@ PARAM_DISPLAY = {attr: (label.split(' (')[0], scale,
                                            '10⁻⁶ Å⁻²'))
                  for attr, label, *_, suffix, scale in EDITOR_PARAMS}
 PARAM_DISPLAY.update(scale=('Scale', 1.0, ''),
-                     background=('Background', 1.0, ''))
+                     background=('Background', 1.0, ''),
+                     q_shift=('Q shift', 1.0, 'Å⁻¹'),
+                     thickness_spread=('Thickness spread', 100.0, '%'))
+# the stack rows shown in other units than stored: attr -> factor (shown =
+# factor x stored)
+STACK_ROW_FACTOR = {'thickness_spread': 100.0}
 RES_MODES = ('tof', 'data')     # res_mode combo order
 # res_conv combo: label, resolution['scheme'], resolution['licorne_fun']
 RES_CONVOLUTIONS = [('quadrature', 'quadrature', None),
@@ -1211,12 +1252,39 @@ class SimulationTab(QtWidgets.QWidget):
         self.scale.setValue(self.stack.scale)
         self.scale.setToolTip('Factor on every reflectivity channel, applied '
                               'before the background')
+        self.q_shift = dspin(-0.05, 0.05, 6, 0.0001)
+        self.q_shift.setValue(self.stack.q_shift)
+        self.q_shift.setToolTip(
+            'Moves the model along Q (Å⁻¹): the reflectivity at a measured Q '
+            'is the sample\'s at Q − shift,\nso a positive shift moves the '
+            'curve to higher Q (e.g. a small misalignment of the Q axis).  '
+            'The resolution keeps its σ_Q at the measured Q.')
+        # THICKNESS SPREAD (model.stack), shown in %, stored as a fraction
+        self.spread = dspin(0.0, 30.0, 2, 0.1)
+        self.spread.setValue(100 * self.stack.thickness_spread)
+        self.spread.setToolTip(
+            'Lateral spread of the film thickness (σ/d, %).  Incoherent '
+            'average over regions larger than the neutron coherence length; '
+            'all interior layers scale together.\nEach node costs one more '
+            'reflectivity: see Nodes.')
+        self.spread_nodes = QtWidgets.QComboBox()
+        for n in SPREAD_NODE_CHOICES:
+            self.spread_nodes.addItem(str(n), n)
+        self.spread_nodes.setToolTip(
+            'Gauss–Hermite nodes of the thickness average.  auto: from the '
+            'spread, the film thickness and Q max (about 2e-3 relative '
+            'error or better); a fit freezes it from the spread\'s upper '
+            'bound so the cost does not jump.')
         # fit settings of the stack's own parameters (Stack.fit):
         # attr -> (value, min, max, Fit check box)
         self.stack_rows = {}
         for attr, val, make in (
                 ('scale', self.scale, lambda: dspin(0.0, 100.0, 4, 0.01)),
-                ('background', self.background, SciSpinBox)):
+                ('background', self.background, SciSpinBox),
+                ('q_shift', self.q_shift,
+                 lambda: dspin(-0.05, 0.05, 6, 0.0001)),
+                ('thickness_spread', self.spread,
+                 lambda: dspin(0.0, 30.0, 2, 0.1))):
             bmin, bmax = make(), make()
             for b in (bmin, bmax):
                 b.setButtonSymbols(
@@ -1386,7 +1454,9 @@ class SimulationTab(QtWidgets.QWidget):
         f.addRow('Q (Å⁻¹)', qrange)
         f.addRow('Q points', self.nq)
         f.addRow('Window tail', self.tail)
-        for attr, label in (('scale', 'Scale'), ('background', 'Background')):
+        for attr, label in (('scale', 'Scale'), ('background', 'Background'),
+                            ('q_shift', 'Q shift (Å⁻¹)'),
+                            ('thickness_spread', 'Thickness spread (%)')):
             val, bmin, bmax, cb = self.stack_rows[attr]
             row = QtWidgets.QHBoxLayout()
             row.addWidget(val, 3)
@@ -1396,6 +1466,11 @@ class SimulationTab(QtWidgets.QWidget):
             row.addWidget(cb)
             row.addWidget(self.stack_priors[attr])
             f.addRow(label, row)
+            if attr == 'thickness_spread':
+                nrow = QtWidgets.QHBoxLayout()
+                nrow.addWidget(self.spread_nodes)
+                nrow.addStretch(1)
+                f.addRow('Spread nodes', nrow)
         f.addRow('Q reference', self.q_fronting)
         f.addRow('Licorne', self.lic_exact)
         f.addRow('Roughness', self.rscheme)
@@ -1452,6 +1527,7 @@ class SimulationTab(QtWidgets.QWidget):
             for w in (val, bmin, bmax):
                 w.valueChanged.connect(self.schedule)
             cb.toggled.connect(self.schedule)
+        self.spread_nodes.currentIndexChanged.connect(self.schedule)
         self.nq.valueChanged.connect(self.schedule)
         self.msmear.currentIndexChanged.connect(self.schedule)
         self.iorder.currentIndexChanged.connect(self.schedule)
@@ -1595,6 +1671,7 @@ class SimulationTab(QtWidgets.QWidget):
         v.addLayout(bar)
 
         w, self.prof_plot = plot_widget('depth z (Å)', 'SLD (10⁻⁶ Å⁻²)')
+        w.setToolTip('Nominal thicknesses; the thickness spread is not drawn')
         p = self.prof_plot
         # SLDs share the left axis; the angle (deg) gets its own right axis
         self.prof_vb2 = pg.ViewBox()
@@ -1636,7 +1713,8 @@ class SimulationTab(QtWidgets.QWidget):
         # band and name of each layer; the list is built further down
         self.prof_layers = LayerLabels(p, lambda: self.list.currentRow())
         p.scene().sigMouseClicked.connect(self._on_profile_click)
-        self.prof_cursor = Crosshair(w, p, self._profile_readout)
+        self.prof_cursor = Crosshair(
+            w, p, lambda x: profile_readout(self, x))
         v.addWidget(w)
         return box
 
@@ -1830,7 +1908,11 @@ class SimulationTab(QtWidgets.QWidget):
                   for attr, _, a, b, *_, scale in EDITOR_PARAMS}
         limits.update(scale=(self.scale.minimum(), self.scale.maximum()),
                       background=(self.background.minimum(),
-                                  self.background.maximum()))
+                                  self.background.maximum()),
+                      q_shift=(self.q_shift.minimum(),
+                               self.q_shift.maximum()),
+                      thickness_spread=(self.spread.minimum() / 100,
+                                        self.spread.maximum() / 100))
         for (i, attr, *_), a, b in zip(params, lo, hi):
             lim_lo, lim_hi = sorted(limits[attr])
             e = self.stack.owner(i).fit_entry(attr)
@@ -1841,25 +1923,38 @@ class SimulationTab(QtWidgets.QWidget):
         self.schedule()
 
     def _load_stack_fit(self):
-        """Show the stack's scale and background and their fit settings."""
+        """Show the stack's own parameters (scale, background, Q shift,
+        thickness spread and its nodes) and their fit settings."""
         for attr, (val, bmin, bmax, cb) in self.stack_rows.items():
             e = self.stack.fit_entry(attr)
+            k = STACK_ROW_FACTOR.get(attr, 1.0)
             for w in (val, bmin, bmax, cb):
                 w.blockSignals(True)
-            val.setValue(getattr(self.stack, attr))
-            bmin.setValue(e['min'])
-            bmax.setValue(e['max'])
+            val.setValue(k * getattr(self.stack, attr))
+            bmin.setValue(k * e['min'])
+            bmax.setValue(k * e['max'])
             cb.setChecked(e['vary'])
             for w in (val, bmin, bmax, cb):
                 w.blockSignals(False)
-            show_prior(self.stack_priors[attr], e.get('prior'))
+            show_prior(self.stack_priors[attr], e.get('prior'),
+                       *PARAM_DISPLAY[attr][1:])
+        c = self.spread_nodes
+        c.blockSignals(True)
+        c.setCurrentIndex(max(0, c.findData(self.stack.thickness_spread_nodes)))
+        if c.currentData() != self.stack.thickness_spread_nodes:
+            # a count not among the choices (e.g. a session's 13): kept
+            c.addItem(str(self.stack.thickness_spread_nodes),
+                      self.stack.thickness_spread_nodes)
+            c.setCurrentIndex(c.count() - 1)
+        c.blockSignals(False)
 
     def _edit_stack_prior(self, attr):
         e = self.stack.fit_entry(attr)
-        dlg = PriorDialog(PARAM_DISPLAY[attr][0], e.get('prior'), parent=self)
+        label, scale, unit = PARAM_DISPLAY[attr]
+        dlg = PriorDialog(label, e.get('prior'), scale, unit, self)
         if dlg.exec():
             e['prior'] = dlg.spec
-            show_prior(self.stack_priors[attr], dlg.spec)
+            show_prior(self.stack_priors[attr], dlg.spec, scale, unit)
             self.schedule()
 
     def _on_layer_edit(self):
@@ -1919,10 +2014,15 @@ class SimulationTab(QtWidgets.QWidget):
             self.stack.tail = self.tail.value()
             self.stack.background = self.background.value()
             self.stack.scale = self.scale.value()
+            self.stack.q_shift = self.q_shift.value()
+            self.stack.thickness_spread = self.spread.value() / 100
+            self.stack.thickness_spread_nodes = \
+                self.spread_nodes.currentData()
             for attr, (_, bmin, bmax, cb) in self.stack_rows.items():
+                k = STACK_ROW_FACTOR.get(attr, 1.0)
                 self.stack.fit[attr] = dict(
                     self.stack.fit.get(attr, {}), vary=cb.isChecked(),
-                    min=bmin.value(), max=bmax.value())
+                    min=bmin.value() / k, max=bmax.value() / k)
             self.stack.q_in_fronting = self.q_fronting.isChecked()
             self.stack.magnetic_smearing = SMEARING_MODES[
                 self.msmear.currentIndex()]
@@ -2204,37 +2304,6 @@ class SimulationTab(QtWidgets.QWidget):
         self.list.setCurrentRow(int(np.searchsorted(self._profile[1], x)))
         self._show_layer_page()
 
-    def _profile_readout(self, x):
-        """Cursor text for the depth profile: layer, depth, checked curves."""
-        if self._profile is None:
-            return None, []
-        z, Z, e, curves, slabs = self._profile
-        show_bars = self.prof_show_bars.isChecked()
-        show_smooth = self.prof_show_smooth.isChecked()
-        if show_bars:                                # as drawn, see _show_profile
-            curves = [self._on_bars.get(i, c) for i, c in enumerate(curves)]
-        layer = self.stack.layers[int(np.searchsorted(Z, x))]
-        rows = []
-        for i, (name, _, col) in enumerate(PROFILE_QUANTITIES):
-            if not self.prof_boxes[i].isChecked() or \
-                    not (show_smooth or show_bars):
-                continue
-            unit = ' °' if i in RIGHT else ''
-            k = min(max(int(np.searchsorted(e, x)) - 1, 0), len(slabs[i]) - 1)
-            if not show_smooth:                      # the bar's top
-                y = slabs[i][k]
-                value = '%s%s  (sublayer)' % (fmt(y), unit)
-            else:
-                y = np.interp(x, z, curves[i], left=np.nan, right=np.nan)
-                if show_bars:
-                    value = '%s%s  (sublayer %s)' % (fmt(y), unit,
-                                                     fmt(slabs[i][k]))
-                else:
-                    value = fmt(y) + unit
-            vb = self.prof_vb2 if i in RIGHT else self.prof_plot.vb
-            rows.append((name, value, col, y, vb))
-        return 'z = %.4g Å  —  %s' % (x, layer.name), rows
-
     def _refl_readout(self, x):
         """Cursor text for the reflectivity plot: Q and each visible curve."""
         rows = []
@@ -2350,6 +2419,9 @@ class SimulationTab(QtWidgets.QWidget):
         self.stack.tail = new.tail
         self.stack.background = new.background
         self.stack.scale = new.scale
+        self.stack.q_shift = new.q_shift
+        self.stack.thickness_spread = new.thickness_spread
+        self.stack.thickness_spread_nodes = new.thickness_spread_nodes
         self.stack.fit = new.fit
         self.stack.q_in_fronting = new.q_in_fronting
         self.stack.resolution = new.resolution

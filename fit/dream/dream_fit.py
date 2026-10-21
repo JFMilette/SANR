@@ -42,6 +42,8 @@ the bands the plots draw: predictive_bands (model R and spin asymmetry of
 posterior draws over the data) and profile_bands (SLD profile of the draws,
 from the slabs that enter the transfer matrix).  Bands are the percentiles
 BAND_PERCENTILES (2.5, 16, 50, 84, 97.5) of the draws at each point.
+chain_curves gives the same curves (R, spin asymmetry, SLD profile) for
+each chain's best kept state (chain_best), drawn over the bands.
 """
 
 import copy
@@ -567,15 +569,21 @@ def chains_split(result, discard=0.5, split_nats=10):
     return m.size > 1 and np.ptp(m) > split_nats
 
 
-def chain_chi2(result, problem, discard=0.5):
-    """chi^2 / N of each chain's best kept state."""
+def chain_best(result, discard=0.5):
+    """Each chain's best kept state (highest log posterior after `discard`
+    and the adaptation phase), (N, d) in physical units."""
     g_max = result.generations[-1]
     g0 = discard * g_max if discard < 1 else discard
     keep = result.generations >= max(g0, result.adapt_until)
     lp = np.where(np.isfinite(result.logp[keep]), result.logp[keep], -np.inf)
     best = lp.argmax(axis=0)
     X = result.chains[keep]
-    return [problem.chi2_per_point(X[k, j]) for j, k in enumerate(best)]
+    return np.array([X[k, j] for j, k in enumerate(best)])
+
+
+def chain_chi2(result, problem, discard=0.5):
+    """chi^2 / N of each chain's best kept state."""
+    return [problem.chi2_per_point(x) for x in chain_best(result, discard)]
 
 
 def posterior_warnings(result, bounds=None, discard=0.5, rhat_max=1.1,
@@ -649,6 +657,17 @@ def draws(result, n=200, discard=0.5, seed=0):
     return s[rng.choice(len(s), size=min(n, len(s)), replace=False)]
 
 
+def _on_q(Q, Qb, y):
+    """Rows y on the points Qb at the points Q: linear, NaN outside Qb's
+    range (as the Experimental tab); y itself when Qb is Q."""
+    y = np.atleast_2d(y)
+    if np.array_equal(Q, Qb):
+        return y
+    o = np.argsort(Qb)
+    return np.array([np.interp(Q, Qb[o], r[o], left=np.nan, right=np.nan)
+                     for r in y])
+
+
 def _asymmetry_pair(names):
     """Indices (a, b) of R+ / R- or R++ / R-- among channel names, or None."""
     for a, b in (('R+', 'R-'), ('R++', 'R--')):
@@ -701,14 +720,8 @@ def predictive_bands(result, problem, n=200, discard=0.5, seed=0,
         Q = a['Q']
 
         def on_a(y):
-            # b's rows (data, model draws, replicates) at a's Q points,
-            # linear, NaN outside b's range (as the Experimental tab)
-            y = np.atleast_2d(y)
-            if np.array_equal(Q, b['Q']):
-                return y
-            o = np.argsort(b['Q'])
-            return np.array([np.interp(Q, b['Q'][o], r[o], left=np.nan,
-                                       right=np.nan) for r in y])
+            # b's rows (data, model draws, replicates) at a's Q points
+            return _on_q(Q, b['Q'], y)
 
         Ma = np.array([m[i] for m in models])
         Mb = on_a(np.array([m[j] for m in models]))
@@ -726,6 +739,37 @@ def predictive_bands(result, problem, n=200, discard=0.5, seed=0,
                         predictive=np.nanpercentile(
                             Arep, BAND_PERCENTILES, axis=0))
     return dict(channels=channels, asymmetry=asym)
+
+
+def chain_curves(result, problem, z, discard=0.5, part=0):
+    """The curves of each chain's best kept state (chain_best) for dataset
+    `part`: [{'chain' (its index), 'chi2' (chi^2 / N, every dataset),
+    'R' [the model R of each channel at its points, as predictive_bands'
+    channels], 'A' (the spin asymmetry at predictive_bands' asymmetry Q,
+    or None), 'nuc', 'mag' (slab NSLD and in-plane MSLD at depths z, in
+    A^-2, as profile_bands)}]."""
+    fit = problem.fit
+    nfit = len(fit.params)
+    sub = parts(fit)[part]
+    st = copy.deepcopy(sub.stack)
+    pair = _asymmetry_pair([c[0] for c in sub.channels])
+    out = []
+    for j, x in enumerate(chain_best(result, discard)):
+        xp = part_x(fit, x[:nfit], part)
+        R = sub.model(xp)
+        A = None
+        if pair is not None:
+            a, b = pair
+            Qa = sub.Q[sub.channels[a][1]]
+            Rb = _on_q(Qa, sub.Q[sub.channels[b][1]], R[b])[0]
+            with np.errstate(divide='ignore', invalid='ignore'):
+                A = (R[a] - Rb) / (R[a] + Rb)
+        sub.apply(xp, st)
+        st.build_sublayers()
+        nuc, mag = slab_profile(st, z)
+        out.append(dict(chain=j, chi2=problem.chi2_per_point(x), R=R, A=A,
+                        nuc=nuc, mag=mag))
+    return out
 
 
 def slab_profile(st, z):

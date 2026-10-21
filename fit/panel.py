@@ -5,16 +5,18 @@ differential evolution" page (fit.de, with restarts), a "Fit — local
 (L-BFGS-B)" page (fit.de.de_fit.run_lbfgs: L-BFGS-B alone from the current
 values, followed in the same fit window as DE), a "Fit — multistart" page
 (fit.multistart: local fits from many starts, followed in the fit window,
-which lists the minima they reach as does the page's table, which DE
-restarts also fill) and a "Fit — Bayesian (DREAM)"
+which lists the minima they reach as does the page's table, both
+updated as each start ends; DE restarts fill the table too) and a "Fit — Bayesian (DREAM)"
 page (fit.dream, which can start around a minimum of that table), with
 everything they do: building the fit problem from the chosen dataset
 and the Simulation tab, running it in a background thread, following it in
-its window and sending results back to the Simulation tab.
+its window (a closable tab of the main window, page_tabs) and sending
+results back to the Simulation tab.
 
 JOINT FIT -- "Select…" beside the Dataset box (fit.datasets_dialog) picks
 several datasets fitted together with one model, each parameter shared,
-own to a dataset or not fitted in it (fit.joint); the Dataset box then
+own to a dataset or not fitted in it, at a value typed for that dataset
+or the Simulation tab's (fit.joint); the Dataset box then
 holds a "Joint: …" entry for that selection (kept in the session), and the
 fit windows show one tab per dataset.  A result sent to the Simulation tab
 from a joint fit holds the values one dataset sees: that of the DE
@@ -38,18 +40,24 @@ import numpy as np
 from PyQt6 import QtCore, QtWidgets
 
 from model.polarisation import vectors_pair
-from tabs.simulation import SciSpinBox, dspin
+from tabs.simulation import PARAM_DISPLAY, SciSpinBox, dspin
 from fit.datasets_dialog import DatasetsDialog
 from fit.problem import FitProblem, parameter_names
+from fit.de.de_fit import STRATEGIES
 from fit.de.de_window import DEThread, DEWindow
 from fit.dream.dream_fit import (PosteriorProblem, jittered_start, load_run,
                                  prior_tension)
 from fit.dream.dream_window import SESSIONS_DIR, DreamThread, DreamWindow
 from fit.joint import JointProblem, part_index, part_x, parts
-from fit.multistart import run_multistart
+from fit.multistart import merge, run_multistart
 
 DIALOG_OPTIONS = QtWidgets.QFileDialog.Option.DontUseNativeDialog
 FIT_COSTS = [('chi2', 'χ² (weighted by dR)'), ('log', 'log R (per decade)')]
+# what the cost compares (fit.problem TARGET); the label's end names it in
+# the fit window
+FIT_TARGETS = [('channels', 'every channel', ''),
+               ('sum', '(R+ + R−)/2', ' of (R+ + R−)/2'),
+               ('asym', 'spin asymmetry SA', ' of SA')]
 # DREAM start (dream_fit.sample x0): label, key; 'multistart': around the
 # minimum selected in the multistart table
 DREAM_STARTS = [('Latin hypercube', None), ('DE population', 'de'),
@@ -62,6 +70,11 @@ FIT_PAGE_MIN = 160
 # chi^2/N of an optimum above which DREAM's error scale is ticked
 SIGMA_SUGGEST = 2.0
 JOINT = 'joint'           # data of the Dataset box's joint-fit entry
+# tab names (_tab_name): the method, a number, the dataset (cut to
+# TAB_NAME_MAX characters) or how many datasets a joint fit has
+TAB_METHODS = {'de': 'DE', 'lbfgs': 'L-BFGS-B', 'multistart': 'Multistart',
+               'dream': 'DREAM'}
+TAB_NAME_MAX = 18
 
 
 class MultistartThread(QtCore.QThread):
@@ -142,6 +155,21 @@ class FitPanel:
             'χ²: residuals divided by dR (points without dR use a relative '
             'residual).\nlog R: residuals of log10 R, every decade weighted '
             'equally.')
+        self.fit_target = QtWidgets.QComboBox()
+        for key, label, _ in FIT_TARGETS:
+            self.fit_target.addItem(label, key)
+        self.fit_target.setToolTip(
+            'What DE, L-BFGS-B and multistart compare with the data '
+            '(DREAM always samples every channel):\n'
+            'every channel: each channel (R+, R−, or all four) on its own.\n'
+            '(R+ + R−)/2: their mean point by point, where magnetism only '
+            'enters at second order:\n  the NSLD, thicknesses and '
+            'roughnesses, e.g. shared by datasets whose magnetism differs.\n'
+            'spin asymmetry (R+ − R−)/(R+ + R−): first order in the MSLD, '
+            'and the scale cancels:\n  the MSLD with the structure fixed.\n'
+            'Both use R+ and R− (else R++ and R−−) at their common Q, errors '
+            'propagated;\n  the spin-flip channels R+− and R−+ are still '
+            'fitted on their own.')
         self.fit_maxiter = QtWidgets.QSpinBox()
         self.fit_maxiter.setRange(1, 100000)
         self.fit_maxiter.setValue(200)
@@ -189,6 +217,24 @@ class FitPanel:
             'sqrt(dR² + (f R)²),\nfor errors the counting statistics leave '
             'out (e.g. the normalisation between angles).  0 = off.\n'
             'DREAM can fit it instead ("fit error floor").')
+        self.fit_strategy = QtWidgets.QComboBox()
+        for key, label in STRATEGIES:
+            self.fit_strategy.addItem(label, key)
+        self.fit_strategy.setToolTip(
+            'How each trial member is built (fit.de.de_fit STRATEGY), from '
+            'the greediest to the one that explores most:\n'
+            'best1bin: best member + F × (difference of two members).  Fast, '
+            'but with the current values near a minimum\n  the whole '
+            'population collapses onto that minimum within a few '
+            'generations.\n'
+            'current-to-best1bin: each member moves part way towards the '
+            'best.\n'
+            'rand-to-best1bin: a random member, part way towards the best.\n'
+            'rand1bin: random member + F × (difference of two members); no '
+            'pull towards the best:\n  slower to converge, much wider '
+            'search (to check whether a fit is stuck).\n'
+            'Also used by the multistart page\'s short DE and DREAM\'s DE '
+            'start.')
         self.fit_polish = QtWidgets.QCheckBox('polish (L-BFGS-B)')
         self.fit_polish.setChecked(True)
         self.fit_polish.setToolTip('Refine the best member with a local '
@@ -208,6 +254,7 @@ class FitPanel:
         row.addWidget(self.btn_sets)
         f.addRow('Dataset', row)
         f.addRow('Cost', self.fit_cost)
+        f.addRow('Fit to', self.fit_target)
         f.addRow('Workers', self.fit_workers)
         f.addRow('Error floor', self.fit_floor)
         f.addRow(QtWidgets.QLabel(
@@ -215,7 +262,8 @@ class FitPanel:
             'Q max of the Simulation tab, varying the parameters ticked Fit '
             'there (scale and background included); its Q points set the '
             'model curves of the fit windows.  Select… fits several '
-            'datasets together.</i>', wordWrap=True))
+            'datasets together.  Fit to (R+ + R−)/2 or SA combines R+ and '
+            'R− point by point.</i>', wordWrap=True))
         row = QtWidgets.QHBoxLayout()
         row.addStretch(1)
         row.addWidget(self.btn_revert)
@@ -234,17 +282,19 @@ class FitPanel:
         mrow.addSpacing(6)
         mrow.addWidget(self.fit_mut_hi, 1)
         f.addRow('Mutation', mrow)
+        f.addRow('Strategy', self.fit_strategy)
         f.addRow('', self.fit_polish)
 
         row = QtWidgets.QHBoxLayout()
         self.btn_fit = QtWidgets.QPushButton('Fit')
         self.btn_fit.setToolTip('Fit in the fit window; stop it there')
-        self.btn_window = QtWidgets.QPushButton('Window')
-        self.btn_window.setToolTip('Show the window of the last fit')
+        self.btn_window = QtWidgets.QPushButton('Show')
+        self.btn_window.setToolTip('Show the last fit')
         for b in (self.btn_fit, self.btn_window):
             row.addWidget(b)
         f.addRow(row)
-        self.btn_fit.clicked.connect(self.start_fit)
+        # not connected directly: clicked's `checked` would be the method
+        self.btn_fit.clicked.connect(lambda: self.start_fit())
         self.btn_window.clicked.connect(self._show_fit_window)
         self.btn_window.setEnabled(False)
 
@@ -260,6 +310,10 @@ class FitPanel:
         self._fit_warnings = ''        # html, shown above the fit report
         self._grid_choice = {}         # dataset -> channel of its Licorne Q
         self.fit_window = None         # DEWindow, made by the first fit
+        # the main window's QTabWidget: the fit and DREAM windows open there
+        # as closable tabs (close_page); None: as windows of their own
+        self.page_tabs = None
+        self._n_tabs = 0               # fit and DREAM tabs opened so far
         self._fit_out = self.fit_report  # the report of the page that fitted
         self._add_page(page, 'Fit — differential evolution')
 
@@ -312,8 +366,8 @@ class FitPanel:
         row = QtWidgets.QHBoxLayout()
         self.btn_lbfgs = QtWidgets.QPushButton('Fit')
         self.btn_lbfgs.setToolTip('Fit in the fit window; stop it there')
-        self.btn_lbfgs_window = QtWidgets.QPushButton('Window')
-        self.btn_lbfgs_window.setToolTip('Show the window of the last fit')
+        self.btn_lbfgs_window = QtWidgets.QPushButton('Show')
+        self.btn_lbfgs_window.setToolTip('Show the last fit')
         self.btn_lbfgs_window.setEnabled(False)
         row.addWidget(self.btn_lbfgs)
         row.addWidget(self.btn_lbfgs_window)
@@ -353,8 +407,8 @@ class FitPanel:
             'workers')
         self.btn_ms_stop = QtWidgets.QPushButton('Stop')
         self.btn_ms_stop.setEnabled(False)
-        self.btn_ms_window = QtWidgets.QPushButton('Window')
-        self.btn_ms_window.setToolTip('Show the window of the last fit')
+        self.btn_ms_window = QtWidgets.QPushButton('Show')
+        self.btn_ms_window.setToolTip('Show the last fit')
         self.btn_ms_window.setEnabled(False)
         row.addWidget(self.btn_ms_run)
         row.addWidget(self.btn_ms_stop)
@@ -418,10 +472,13 @@ class FitPanel:
             problem, n_starts=self.ms_starts.value(),
             method=self.ms_method.currentData(),
             workers=self.fit_workers.value(),
-            de_options=dict(popsize=self.fit_pop.value(), init='sobol'))
+            de_options=dict(popsize=self.fit_pop.value(), init='sobol',
+                            strategy=self.fit_strategy.currentData()))
         self._ms.progress.connect(self._ms_progress)
         self._ms.progress.connect(self.fit_window.set_starts)
         self._ms.status.connect(self.fit_window.set_start_status)
+        self._ms_ends = []              # (start, u, cost) of the ended starts
+        self._ms.status.connect(self._ms_status)
         self.fit_window.set_starts(0, self.ms_starts.value() + 1)
         self._ms.done.connect(
             lambda m: self._ms_show(self._ms_problem, m, 'multistart'))
@@ -451,6 +508,16 @@ class FitPanel:
         self.ms_report.setText(self._ms_note + '%d / %d starts done…'
                                % (done, total))
 
+    def _ms_status(self, info):
+        """A start of the running multistart ended: the table as the ended
+        starts give it so far (its buttons wait for the end)."""
+        if info['phase'] != 'done' or info.get('u') is None:
+            return
+        self._ms_ends.append((info['start'], np.asarray(info['u']),
+                              info['best']))
+        self._ms_fill(self._ms_problem,
+                      merge(self._ms_problem, self._ms_ends))
+
     def _ms_cleanup(self):
         self._ms.deleteLater()
         self._ms = None
@@ -463,6 +530,28 @@ class FitPanel:
     def _ms_show(self, problem, minima, source):
         """Fill the table with `minima` (fit.multistart rows) of problem's
         parameters, from `source` (multistart, DE restarts)."""
+        self._ms_fill(problem, minima)
+        for b in (self.btn_ms_apply, self.btn_ms_dream):
+            b.setEnabled(bool(minima))
+        self._ms_start_item(bool(minima))
+        if minima:
+            self._suggest_sigma(problem, minima[0]['x'])
+        hits = sum(m['hits'] for m in minima)
+        cost = 'χ²/N' if problem.cost == 'chi2' else 'cost'
+        note = self._ms_note if source == 'multistart' else ''
+        self.ms_report.setText(
+            note + '%s: %d end(s) in %d distinct minim%s, best %s %.5g.'
+            % (source, hits, len(minima), 'um' if len(minima) == 1 else 'a',
+               cost, minima[0]['chi2']) if minima
+            else '%s: stopped before any start ended.' % source)
+
+    def _ms_fill(self, problem, minima):
+        """The table's rows: `minima` of problem's parameters, the row
+        selected before kept selected (by its parameters), else the
+        best."""
+        old = self._ms_selected()
+        keep = None if old is None or old is self._ms_minima[0] \
+            else old['x']
         self._ms_minima = list(minima)
         self._ms_shown = problem        # the problem of the table's minima
         self._ms_names = list(problem.names)
@@ -482,24 +571,14 @@ class FitPanel:
                 t.setItem(r, c, QtWidgets.QTableWidgetItem(text))
         t.resizeColumnsToContents()
         if minima:
-            t.selectRow(0)
-        for b in (self.btn_ms_apply, self.btn_ms_dream):
-            b.setEnabled(bool(minima))
-        self._ms_start_item(bool(minima))
-        if minima:
-            self._suggest_sigma(problem, minima[0]['x'])
-        hits = sum(m['hits'] for m in minima)
-        note = self._ms_note if source == 'multistart' else ''
-        self.ms_report.setText(
-            note + '%s: %d end(s) in %d distinct minim%s, best %s %.5g.'
-            % (source, hits, len(minima), 'um' if len(minima) == 1 else 'a',
-               cost, minima[0]['chi2']) if minima
-            else '%s: stopped before any start ended.' % source)
+            t.selectRow(next((r for r, m in enumerate(minima)
+                              if keep is not None
+                              and np.array_equal(m['x'], keep)), 0))
 
     def _suggest_sigma(self, problem, x):
         """After an optimum with chi^2/N > 2: tick "fit error scale" on the
         DREAM page and say why (the user can untick it)."""
-        if problem.cost != 'chi2':
+        if problem.cost != 'chi2' or problem.target != 'channels':
             return
         c = float(np.mean(problem.residuals(x)**2))
         if not c > SIGMA_SUGGEST:
@@ -677,12 +756,12 @@ class FitPanel:
         self.btn_sample = QtWidgets.QPushButton('Sample')
         self.btn_sample.setToolTip('Sample the posterior of the parameters '
                                    'ticked Fit in the Simulation tab')
-        self.btn_dream_window = QtWidgets.QPushButton('Window')
-        self.btn_dream_window.setToolTip('Show the window of the last run')
+        self.btn_dream_window = QtWidgets.QPushButton('Show')
+        self.btn_dream_window.setToolTip('Show the last run')
         self.btn_dream_window.setEnabled(False)
         self.btn_dream_load = QtWidgets.QPushButton('Load chains…')
         self.btn_dream_load.setToolTip(
-            'Open a run saved with "Save chains…" in the DREAM window')
+            'Open a run saved with "Save chains…" in the DREAM tab')
         row.addWidget(self.btn_sample)
         row.addWidget(self.btn_dream_window)
         row.addWidget(self.btn_dream_load)
@@ -714,9 +793,10 @@ class FitPanel:
         names = self._fittable()
         if self._joint:
             sets = [n for n in self._joint['sets'] if n in names]
-            self._joint = dict(sets=sets, modes={
-                n: m for n, m in self._joint.get('modes', {}).items()
-                if n in sets}) if len(sets) > 1 else None
+            self._joint = dict(sets=sets, **{
+                key: {n: m for n, m in (self._joint.get(key) or {}).items()
+                      if n in sets} for key in ('modes', 'values')}) \
+                if len(sets) > 1 else None
         c.blockSignals(True)
         c.clear()
         c.addItems(names)
@@ -740,9 +820,10 @@ class FitPanel:
         if self._joint and old in self._joint['sets']:
             self._joint['sets'] = [new if n == old else n
                                    for n in self._joint['sets']]
-            modes = self._joint.get('modes', {})
-            if old in modes:
-                modes[new] = modes.pop(old)
+            for key in ('modes', 'values'):
+                d = self._joint.get(key) or {}
+                if old in d:
+                    d[new] = d.pop(old)
         if old in self._grid_choice:
             self._grid_choice[new] = self._grid_choice.pop(old)
 
@@ -754,13 +835,19 @@ class FitPanel:
             QtWidgets.QMessageBox.information(
                 self, 'Datasets to fit', 'Import data to fit first.')
             return
-        params = []
+        params, info = [], {}
         if self.simulation is not None:
             self.simulation.recompute()      # the Fit boxes into the stack
             st = self.simulation.stack
-            params = parameter_names(st, st.free_parameters())
+            free = st.free_parameters()
+            params = parameter_names(st, free)
+            # the value boxes of 'Not fitted': the Simulation tab's units
+            info = {n: PARAM_DISPLAY[a][1:] + (v,)
+                    for n, (_, a, v, *_) in zip(params, free)}
+        joint = self._joint or {}
         dlg = DatasetsDialog(names, [s['name'] for s in self._fit_sets()],
-                             (self._joint or {}).get('modes'), params, self)
+                             joint.get('modes'), params, self,
+                             values=joint.get('values'), info=info)
         if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
         sel = dlg.selection()
@@ -824,9 +911,10 @@ class FitPanel:
                 return None
         return vec, data, grid
 
-    def _problem(self, report, cost):
+    def _problem(self, report, cost, target=None):
         """(problem, [(dataset, {channel: [Pi, Pa]}, data, grid)], qmin,
-        qmax, warnings as html) of the fitted datasets with `cost`: a
+        qmax, warnings as html) of the fitted datasets with `cost` and
+        `target` (fit.problem TARGET; None: the Fit to box's): a
         fit.problem.FitProblem of one dataset, a fit.joint.JointProblem of
         the joint fit's; None, with the reason in `report`, if nothing can
         be fitted."""
@@ -844,6 +932,8 @@ class FitPanel:
             inputs.append((s,) + got)
         qmin, qmax = sim.qmin.value(), sim.qmax.value()
         joint = self.fit_set.currentData() == JOINT
+        if target is None:
+            target = self.fit_target.currentData()
         fits, said = [], {}             # warning -> datasets that gave it
         for s, vec, data, grid in inputs:
             try:
@@ -851,7 +941,8 @@ class FitPanel:
                     warnings.simplefilter('always')
                     fits.append((s['name'], FitProblem(
                         sim.stack, data, cost, qmin, qmax, grid,
-                        error_floor=self.fit_floor.value() / 100)))
+                        error_floor=self.fit_floor.value() / 100,
+                        target=target)))
             except ValueError as exc:
                 report.setText(self._error(
                     '%s: %s' % (s['name'], exc) if joint else exc))
@@ -859,8 +950,9 @@ class FitPanel:
             for w in caught:
                 said.setdefault(str(w.message), []).append(s['name'])
         try:
-            problem = JointProblem(fits, self._joint['modes']) if joint \
-                else fits[0][1]
+            problem = JointProblem(fits, self._joint['modes'],
+                                   values=self._joint.get('values')) \
+                if joint else fits[0][1]
         except ValueError as exc:
             report.setText(self._error(exc))
             return None
@@ -958,11 +1050,16 @@ class FitPanel:
         sim = self.simulation
         # imported here: tabs.experimental imports this module
         from tabs.experimental import model_grid
-        if self.fit_window is None:
-            self.fit_window = DEWindow(self)
-            self.fit_window.stopRequested.connect(self.stop_fit)
-            self.fit_window.continueRequested.connect(self.continue_fit)
-            self.fit_window.sendRequested.connect(self._send_fit)
+        # as tabs, each fit gets a new one and the last one stays
+        if self.fit_window is None or self.page_tabs is not None:
+            self._retire(self.fit_window)
+            w = self.fit_window = DEWindow(self)
+            w.stopRequested.connect(self.stop_fit)
+            w.continueRequested.connect(self.continue_fit)
+            w.sendRequested.connect(
+                lambda x, label, part, w=w: self._send_fit(x, label, part, w))
+        self.fit_window.tab_name = self._tab_name(
+            method, [s['name'] for s, *_ in inputs])
         # the model's other channels use the Simulation tab's pairs
         Q = np.linspace(qmin, qmax, sim.nq.value())
         views = [dict(name=s['name'],
@@ -974,8 +1071,10 @@ class FitPanel:
         self.fit_window.start(
             problem, views, title,
             ('χ²' if problem.cost == 'chi2' else 'cost (log R)')
+            + dict((k, end) for k, _, end in FIT_TARGETS)[problem.target]
             + (' + prior' if any(problem.priors) else ''),
             polish=self.fit_polish.isChecked(), method=method)
+        self._show_fit_window()
         for b in (self.btn_window, self.btn_lbfgs_window, self.btn_ms_window):
             b.setEnabled(True)
         # a live simulation dataset, computed from the same pairs as the
@@ -1021,7 +1120,8 @@ class FitPanel:
                                  polish=self.fit_polish.isChecked(),
                                  workers=self.fit_workers.value(),
                                  restarts=self.fit_restarts.value(),
-                                 atol=0.0, init='sobol', resume=resume)
+                                 atol=0.0, init='sobol', resume=resume,
+                                 strategy=self.fit_strategy.currentData())
         self._fit.minima.connect(
             lambda m, p=problem: self._ms_show(p, m, 'DE restarts'))
         self._fit.progress.connect(self._fit_progress)
@@ -1066,7 +1166,7 @@ class FitPanel:
         sim = self.simulation
         if sim is None or self.busy():
             return
-        built = self._problem(self.dream_report, 'chi2')
+        built = self._problem(self.dream_report, 'chi2', 'channels')
         if built is None:
             return
         fit, inputs, qmin, qmax, note = built
@@ -1096,7 +1196,8 @@ class FitPanel:
         if options['x0'] == 'de':
             options['de_options'] = dict(
                 maxiter=self.fit_maxiter.value(),
-                popsize=self.fit_pop.value(), tol=self.fit_tol.value())
+                popsize=self.fit_pop.value(), tol=self.fit_tol.value(),
+                strategy=self.fit_strategy.currentData())
         elif options['x0'] == 'multistart':
             row = self._ms_selected()
             if row is None or self._ms_names != problem.fit.names:
@@ -1108,7 +1209,7 @@ class FitPanel:
                                         else max(7, problem.ndim + 1))
             options['x0'] = jittered_start(problem, n, options['seed'],
                                            row['x'])
-        self._make_dream_window()
+        self._make_dream_window([s['name'] for s, *_ in inputs])
         header = ('%d parameter(s), %d points of %s (Q %.4g – %.4g Å⁻¹)'
                   % (problem.ndim, problem.fit.npoints,
                      ' + '.join(s['name'] for s, *_ in inputs), qmin, qmax))
@@ -1116,6 +1217,7 @@ class FitPanel:
                                 [d['path'] for s, *_ in inputs
                                  for d in s['channels'].values()],
                                 [s['name'] for s, *_ in inputs])
+        self._show_dream_window()
         self._launch_dream(problem, options,
                            note + 'Sampling ' + html_escape(header) + '…')
 
@@ -1158,14 +1260,44 @@ class FitPanel:
         self._launch_dream(self._dream_problem, options,
                            'Continuing to generation %d…' % n_gen)
 
-    def _make_dream_window(self):
-        if self.dream_window is None:
-            self.dream_window = DreamWindow(self)
-            self.dream_window.stopRequested.connect(self.stop_dream)
-            self.dream_window.sendRequested.connect(self._send_dream)
-            self.dream_window.boundsRequested.connect(self._bounds_dream)
-            self.dream_window.continueRequested.connect(self.continue_dream)
+    def _make_dream_window(self, names):
+        """The DREAM window of a run of datasets `names` (or of a loaded
+        file): as tabs, a new one each time, the last one staying."""
+        if self.dream_window is None or self.page_tabs is not None:
+            self._retire(self.dream_window)
+            w = self.dream_window = DreamWindow(self)
+            w.stopRequested.connect(self.stop_dream)
+            w.continueRequested.connect(self.continue_dream)
+            w.sendRequested.connect(
+                lambda x, part, label, w=w: self._send_dream(x, part, w,
+                                                             label))
+            w.boundsRequested.connect(
+                lambda lo, hi, part, w=w: self._bounds_dream(lo, hi, part, w))
+        self.dream_window.tab_name = self._tab_name('dream', names)
+        self.dream_window.setWindowTitle('Bayesian sampling (DREAM) — '
+                                         + ' + '.join(names))
         self.btn_dream_window.setEnabled(True)
+
+    def _tab_name(self, method, names):
+        """Short name of a new fit or DREAM tab: e.g. 'DE 3 · film_5K' or
+        'DREAM 4 · 3 datasets' (the full title is its tool tip)."""
+        self._n_tabs += 1
+        what = names[0] if len(names) == 1 else '%d datasets' % len(names)
+        if len(what) > TAB_NAME_MAX:
+            what = what[:TAB_NAME_MAX - 1].rstrip() + '…'
+        return '%s %d · %s' % (TAB_METHODS[method], self._n_tabs, what)
+
+    def _retire(self, w):
+        """The fit or DREAM window w is no longer the newest: its entries
+        can still be sent to the Simulation tab, but only the newest is
+        stopped or continued."""
+        if w is None:
+            return
+        w.stopRequested.disconnect()
+        w.continueRequested.disconnect()
+        w.btn_continue.setEnabled(False)
+        w.btn_continue.setToolTip('Only the newest fit or run can be '
+                                  'continued')
 
     def load_dream(self):
         """Show a run saved with "Save chains..." in the DREAM window.  Its
@@ -1200,12 +1332,13 @@ class FitPanel:
                        sim.stack.owner(i).fit_entry(a)['max'])
                       for i, a, *_ in parts(problem.fit)[0].params]
             self._fit_start = (params, [p[2] for p in params])
-        self._make_dream_window()
+        self._make_dream_window([os.path.basename(path)])
         self.dream_window.show_loaded(
             result, problem, 'Loaded %s — %d parameter(s), %d points'
             % (html_escape(os.path.basename(path)), problem.ndim,
                problem.fit.npoints), meta.get('sources', []),
             meta.get('datasets', []))
+        self._show_dream_window()
         self.dream_report.setText('Loaded %s.' % html_escape(
             os.path.basename(path)))
 
@@ -1216,14 +1349,57 @@ class FitPanel:
 
     def _show_dream_window(self):
         if self.dream_window is not None:
-            self.dream_window.show()
-            self.dream_window.raise_()
-            self.dream_window.activateWindow()
+            self._reveal(self.dream_window)
+
+    def _reveal(self, w):
+        """Bring the fit or DREAM window w forward: as a tab of page_tabs
+        (added the first time, named w.tab_name, its title as tool tip), or
+        on its own."""
+        tabs = self.page_tabs
+        if tabs is None:
+            w.show()
+            w.raise_()
+            w.activateWindow()
+            return
+        i = tabs.indexOf(w)
+        if i < 0:
+            i = tabs.addTab(w, '')
+        tabs.setTabText(i, getattr(w, 'tab_name', w.windowTitle()))
+        tabs.setTabToolTip(i, w.windowTitle())
+        tabs.setCurrentIndex(i)
+
+    def close_page(self, w):
+        """The close button of tab w of page_tabs: the fit or DREAM tab is
+        deleted with its history; not while its fit or run goes on."""
+        if isinstance(w, DEWindow):
+            running, what = w is self.fit_window and (
+                self._fit is not None or self._ms is not None), 'fit'
+        elif isinstance(w, DreamWindow):
+            running, what = w is self.dream_window and \
+                self._dream is not None, 'sampling'
+        else:
+            return
+        if running:
+            QtWidgets.QMessageBox.information(
+                self, 'Close', 'Stop the running %s first.' % what)
+            return
+        buttons = ()
+        if w is self.fit_window:
+            self.fit_window = None
+            buttons = (self.btn_window, self.btn_lbfgs_window,
+                       self.btn_ms_window)
+        elif w is self.dream_window:
+            self.dream_window = None
+            buttons = (self.btn_dream_window,)
+        for b in buttons:
+            b.setEnabled(False)
+        self.page_tabs.removeTab(self.page_tabs.indexOf(w))
+        w.deleteLater()
 
     def _dream_done(self, result):
         self.dream_window.finish(result)
         self.dream_report.setText(
-            'Done after %d generation(s); see the DREAM window.'
+            'Done after %d generation(s); see the DREAM tab.'
             % result.generations[-1])
 
     def _dream_failed(self, msg):
@@ -1239,10 +1415,13 @@ class FitPanel:
                   self.btn_dream_load, self.btn_ms_run):
             b.setEnabled(True)
 
-    def _same_layers(self, parent, title, what='run'):
-        """The Simulation tab still has the layers of the last fit or run;
-        a message box on `parent` if not."""
-        if [l.name for l in self.simulation.stack.layers] == self._fit_layers:
+    def _same_layers(self, parent, title, what='run', fit=None):
+        """The Simulation tab still has the layers of the fit problem `fit`
+        (default: of the last fit or run); a message box on `parent` if
+        not."""
+        layers = self._fit_layers if fit is None else \
+            [l.name for l in parts(fit)[0].stack.layers]
+        if [l.name for l in self.simulation.stack.layers] == layers:
             return True
         QtWidgets.QMessageBox.warning(
             parent, title, 'The layers of the Simulation tab changed since '
@@ -1256,26 +1435,30 @@ class FitPanel:
         return ' (the values of %s)' % html_escape(names[part]) if names \
             else ''
 
-    def _send_dream(self, x, part=0):
-        """Write a DREAM state (the MAP) into the Simulation tab: the values
-        dataset `part` of a joint fit sees."""
-        if self._dream is not None or not self._same_layers(
-                self.dream_window, 'Load MAP into model'):
+    def _send_dream(self, x, part=0, w=None, label='MAP'):
+        """Write a DREAM state of window w (default: the newest) into the
+        Simulation tab: the values dataset `part` of a joint fit sees;
+        label says which state ('MAP', 'chain 3')."""
+        w = w or self.dream_window
+        fit = w.problem.fit
+        if self.busy() or not self._same_layers(w, 'Load into model',
+                                                fit=fit):
             return
-        fit = self._dream_problem.fit
         self.simulation.set_parameters(parts(fit)[part].params,
                                        part_x(fit, x, part))
-        self.dream_report.setText('MAP sent to the Simulation tab%s.'
-                                  % self._whose(fit, part))
+        self.dream_report.setText('%s sent to the Simulation tab%s.'
+                                  % (label, self._whose(fit, part)))
         self.btn_revert.setEnabled(True)
 
-    def _bounds_dream(self, lo, hi, part=0):
-        """Write posterior-based fit bounds into the Simulation tab: those
-        of the parameters fitted in dataset `part` of a joint fit."""
-        if self._dream is not None or not self._same_layers(
-                self.dream_window, 'Apply ±σ to bounds'):
+    def _bounds_dream(self, lo, hi, part=0, w=None):
+        """Write posterior-based fit bounds of window w (default: the
+        newest) into the Simulation tab: those of the parameters fitted in
+        dataset `part` of a joint fit."""
+        w = w or self.dream_window
+        fit = w.problem.fit
+        if self.busy() or not self._same_layers(w, 'Apply ±σ to bounds',
+                                                fit=fit):
             return
-        fit = self._dream_problem.fit
         rows = [(p, lo[j], hi[j]) for p, j in zip(parts(fit)[part].params,
                                                   part_index(fit, part))
                 if j is not None]
@@ -1294,23 +1477,21 @@ class FitPanel:
 
     def _show_fit_window(self):
         if self.fit_window is not None:
-            self.fit_window.show()
-            self.fit_window.raise_()
-            self.fit_window.activateWindow()
+            self._reveal(self.fit_window)
 
-    def _send_fit(self, x, label, part=0):
-        """Write an entry of the fit window into the Simulation tab: the
-        values dataset `part` of a joint fit sees."""
-        if self._fit is not None or self._ms is not None or \
-                not self._same_layers(self.fit_window, 'Send to Simulation',
-                                      'fit'):
+    def _send_fit(self, x, label, part=0, w=None):
+        """Write an entry of fit window w (default: the newest) into the
+        Simulation tab: the values dataset `part` of a joint fit sees."""
+        w = w or self.fit_window
+        p = w.problem
+        if self.busy() or not self._same_layers(w, 'Send to Simulation',
+                                                'fit', fit=p):
             return
-        p = self._fit_problem
         self.simulation.set_parameters(parts(p)[part].params,
                                        part_x(p, x, part))
         self._fit_out.setText(self._fit_header(
             'Sent <b>%s</b> to the Simulation tab%s' % (html_escape(
-                '%s %s' % (self.fit_window.unit, label) if label[:1].isdigit()
+                '%s %s' % (w.unit, label) if label[:1].isdigit()
                 else label),
                 self._whose(p, part))))
         self.btn_revert.setEnabled(True)

@@ -6,14 +6,18 @@ multistart (fit.multistart, run in a fit.panel.MultistartThread) start by
 start.
 
 The history lists the best cost of every generation (and the polished
-result at the end); for a multistart, the distinct minima once the starts
-have ended, best first, with how many starts reached each (✓: the current
-values' start among them).  Selecting an entry draws, in one tab per fitted
+result at the end); for a multistart, the distinct minima of the starts
+ended so far, updated as each one ends (the entry selected stays selected,
+the best otherwise), best first, with how many starts reached each (✓:
+the current values' start among them).  Selecting an entry draws, in one tab per fitted
 dataset (several in a joint fit, fit.joint), its depth profile (with its
 sublayers) and its model against that dataset's fitted data, as any
 quantity of the Simulation tab (reflectivities, half-polarized,
 asymmetries; the model's channels outside the fit use the Simulation tab's
-pairs); once the fit is done or stopped, "Send to Simulation" writes that
+pairs), or the residuals (R_data - R_model) / sigma of every fitted point,
+with the fit's own points and sigma (error floor included; dR, or |R|
+without it, under the log R cost), so their mean square per channel is
+the chi^2/N it adds; once the fit is done or stopped, "Send to Simulation" writes that
 entry's parameters, as the dataset of the tab shown sees them, into the
 Simulation tab.  Nothing reaches the Simulation tab otherwise.
 
@@ -36,11 +40,14 @@ from fit.multistart import merge
 import line_colours
 import style
 from tabs.simulation import (PARAM_DISPLAY, PROFILE_QUANTITIES,
-                             REFL_QUANTITIES, RIGHT, LayerLabels, plot_widget,
-                             profile_data)
+                             REFL_QUANTITIES, RIGHT, Crosshair, LayerLabels,
+                             plot_widget, profile_data, profile_readout)
 
 
 AT_BOUND = QtGui.QColor('#f87171')
+# the fit tabs' plot list: the Simulation tab's quantities, then this one
+RESIDUALS = 'Residuals'
+RESIDUAL_FORMULA = "(R_data − R_model) / σ"
 
 
 def at_bound(v, lo, hi):
@@ -218,7 +225,15 @@ class DEWindow(QtWidgets.QWidget):
             view = DatasetView(copy.deepcopy(sub.stack), v['data'],
                                v['vectors'], v['grids'],
                                {name[1:]: n for (name, *_), n
-                                in zip(sub.channels, sub.norms)})
+                                in zip(sub.channels, sub.norms)},
+                               fit=copy.deepcopy(sub))
+            if getattr(sub, 'combined', None) is not None and \
+                    sub.target == 'asym':
+                # the fitted quantity: SA of the pair combined
+                up = sub.channels[sub.combined[0]][0]
+                view.quantity.setCurrentIndex(
+                    [q[0] for q in REFL_QUANTITIES].index(
+                        'SA half-polarized' if up == 'R+' else 'SA NSF'))
             self.views.append(view)
             self.tabs.addTab(view, v['name'])
         self.tabs.blockSignals(False)
@@ -257,15 +272,13 @@ class DEWindow(QtWidgets.QWidget):
         # a multistart: (done, total), the running starts' last reports
         # and the ended ones' costs (set_starts, set_start_status)
         self._ms_count, self._ms_run, self._ms_ended = (0, 0), {}, {}
+        self._ms_ends = []          # (start, u, cost) of the ended starts
         self.btn_stop.setEnabled(True)
         self.btn_continue.setEnabled(False)
         self.btn_send.setEnabled(False)
         # the starting model until the first generation arrives: the
         # current values clipped into the bounds, as the fit starts from
         self._draw(problem.to_x(problem.x0()))
-        self.show()
-        self.raise_()
-        self.activateWindow()
 
     def resume(self):
         """The fit goes on (Continue): same problem, history kept."""
@@ -347,6 +360,11 @@ class DEWindow(QtWidgets.QWidget):
         if info['phase'] == 'done':
             self._ms_ended[k] = info['best']
             self._ms_run.pop(k, None)
+            if self.running and info.get('u') is not None:
+                # the list of minima as the ended starts give it so far
+                self._ms_ends.append((k, np.asarray(info['u']),
+                                      info['best']))
+                self._fill_minima(merge(self.problem, self._ms_ends))
         elif k not in self._ms_ended:         # not a late report
             self._ms_run[k] = info
         self._show_starts()
@@ -384,18 +402,7 @@ class DEWindow(QtWidgets.QWidget):
         first) as the entries, the best one drawn."""
         self.running = False
         self.progress.hide()
-        # filled without drawing each, then the best drawn once
-        self.history.blockSignals(True)
-        self.history.clear()
-        self.entries = []
-        for k, m in enumerate(minima):
-            self._append('%d — %d start%s%s' % (
-                k + 1, m['hits'], '' if m['hits'] == 1 else 's',
-                ' ✓' if m['from_current'] else ''), m['chi2'], m['x'])
-        self.history.setCurrentItem(None)
-        self.history.blockSignals(False)
-        if minima:
-            self.history.setCurrentItem(self.history.topLevelItem(0))
+        self._fill_minima(minima)
         hits = sum(m['hits'] for m in minima)
         self.status.setText(
             '<b>%s</b> — %d start(s) ended in %d distinct minim%s, best %s '
@@ -406,6 +413,27 @@ class DEWindow(QtWidgets.QWidget):
             '<b>Stopped</b> before any start ended.')
         self.btn_stop.setEnabled(False)
         self.btn_send.setEnabled(self.history.currentItem() is not None)
+
+    def _fill_minima(self, minima):
+        """The entries: the minima (fit.multistart rows, best first), the
+        one selected before kept selected (by its parameters), else the
+        best; drawn once."""
+        e = self._selected()
+        keep = None if e is None or self.history.indexOfTopLevelItem(
+            self.history.currentItem()) == 0 else e[2]
+        self.history.blockSignals(True)
+        self.history.clear()
+        self.entries = []
+        for k, m in enumerate(minima):
+            self._append('%d — %d start%s%s' % (
+                k + 1, m['hits'], '' if m['hits'] == 1 else 's',
+                ' ✓' if m['from_current'] else ''), m['chi2'], m['x'])
+        self.history.setCurrentItem(None)
+        self.history.blockSignals(False)
+        if minima:
+            row = next((k for k, m in enumerate(minima) if keep is not None
+                        and np.array_equal(m['x'], keep)), 0)
+            self.history.setCurrentItem(self.history.topLevelItem(row))
 
     def fail(self, msg):
         self.running = False
@@ -481,7 +509,8 @@ class DEWindow(QtWidgets.QWidget):
             return
         try:
             self.views[k].draw(self._x, lambda x, st: parts(
-                self.problem)[k].apply(part_x(self.problem, x, k), st))
+                self.problem)[k].apply(part_x(self.problem, x, k), st),
+                part_x(self.problem, self._x, k))
         except Exception as exc:                      # keep the window alive
             self.status.setText('Cannot draw this entry: %s' % exc)
             self.status.setStyleSheet('color: %s' % style.ERROR)
@@ -515,22 +544,29 @@ class DatasetView(QtWidgets.QSplitter):
     """The depth profile and the model against the fitted data of one
     dataset, in a tab of the DE window."""
 
-    def __init__(self, stack, data, vectors, grids, norms):
+    def __init__(self, stack, data, vectors, grids, norms, fit=None):
         """stack: the view's own copy of the model; data, vectors, grids,
-        norms: see DEWindow.start."""
+        norms: see DEWindow.start; fit: the view's own copy of its
+        dataset's fit.problem.FitProblem, for the residuals."""
         super().__init__(QtCore.Qt.Orientation.Vertical)
         self.stack = stack
         self.data, self.vectors, self.model_Q = data, vectors, grids
         self.norms = norms
+        self.fit = fit
         self.drawn = None              # parameters drawn last
+        self._xp = None                # the fit's parameters drawn
+        self._resid = None             # residuals of _xp, when first shown
+        self._profile = None           # profile_data of the drawn stack
         self.addWidget(self._build_profile_plot())
         self.addWidget(self._build_reflectance_plot())
         self.setSizes([380, 470])
 
-    def draw(self, values, apply):
+    def draw(self, values, apply, part_values=None):
         """The model with the stack's parameter values `values`, written
-        into the view's stack by apply(values, stack)."""
+        into the view's stack by apply(values, stack); part_values: those
+        of the view's fit problem, for the residuals."""
         self.drawn = values
+        self._xp, self._resid = part_values, None
         apply(values, self.stack)
         self.stack.build_sublayers()
         self._draw_profile()
@@ -599,6 +635,8 @@ class DatasetView(QtWidgets.QSplitter):
             pos=0, angle=0, pen=pg.mkPen('#4b4e55', width=0.7)))
         self.prof_lines = []                  # interface lines
         self.prof_layers = LayerLabels(p)     # band and name of each layer
+        self.prof_cursor = Crosshair(w, p,
+                                     lambda x: profile_readout(self, x))
         v.addWidget(w)
         return box
 
@@ -609,8 +647,10 @@ class DatasetView(QtWidgets.QSplitter):
         bar = QtWidgets.QHBoxLayout()
         bar.addWidget(QtWidgets.QLabel('Reflectivity plot:'))
         self.quantity = QtWidgets.QComboBox()
-        self.quantity.addItems([q[0] for q in REFL_QUANTITIES])
-        self.quantity.setToolTip('Fitted data (markers) and model (lines)')
+        self.quantity.addItems([q[0] for q in REFL_QUANTITIES] + [RESIDUALS])
+        self.quantity.setToolTip(
+            'Fitted data (markers) and model (lines); Residuals: '
+            '(R_data − R_model) / σ of each fitted point, with the fit\'s σ')
         self.quantity.currentIndexChanged.connect(self._redraw_reflectance)
         bar.addWidget(self.quantity)
         self.formula = QtWidgets.QLabel()
@@ -681,6 +721,7 @@ class DatasetView(QtWidgets.QSplitter):
         p.showAxis('right', any(self.prof_boxes[i].isChecked() for i in RIGHT))
         p.enableAutoRange(axis='y')
         self.prof_vb2.enableAutoRange(axis='y')
+        self.prof_cursor.refresh()
 
     def _redraw_reflectance(self, *_):
         # imported here: the Experimental tab imports this module
@@ -693,6 +734,10 @@ class DatasetView(QtWidgets.QSplitter):
         if self._model is None:
             return
         k = self.quantity.currentIndex()
+        if k == len(REFL_QUANTITIES):
+            self._draw_residuals()
+            return
+        self.show_err.setEnabled(True)
         name, label, formula = REFL_QUANTITIES[k]
         is_refl = label is None
         # log / R·Q⁴ only apply to raw reflectivities
@@ -725,6 +770,63 @@ class DatasetView(QtWidgets.QSplitter):
                            log)
         self.refl_note.setText('Fitted data: %s' % note if note else '')
         self.refl_note.setVisible(bool(note))
+        p.enableAutoRange()
+
+    def residuals(self):
+        """[(channel name, Q, (R_data - R_model) / sigma)] of each fitted
+        channel at the parameters drawn, the fit's points and sigma (under
+        the log R cost, which has none: dR, |R| where dR <= 0, with the
+        error floor), computed once per entry drawn."""
+        if self._resid is None and self.fit is not None and \
+                self._xp is not None:
+            f = self.fit
+            out = []
+            for m, (name, idx, R, sigma) in zip(f.model(self._xp),
+                                                f.channels):
+                if sigma is None:
+                    d = self.data.get(name[1:], {})
+                    dR = np.asarray(d.get('dR', np.abs(R)), dtype=float)
+                    if dR.shape != R.shape:
+                        dR = np.abs(R)
+                    sigma = np.where(np.isfinite(dR) & (dR > 0), dR,
+                                     np.abs(R))
+                    if f.error_floor > 0:
+                        sigma = np.hypot(sigma, f.error_floor * R)
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    out.append((name, f.Q[idx], (R - m) / sigma))
+            self._resid = out
+        return self._resid or []
+
+    def _draw_residuals(self):
+        """Each fitted channel's residuals, in its colour, with its chi^2/N
+        in the legend; lines at 0 and +-1 sigma."""
+        p = self.refl_plot
+        for w in (self.logy, self.rq4, self.show_err):
+            w.setEnabled(False)
+        self.formula.setText(RESIDUAL_FORMULA)
+        p.setLabel('left', 'residual (σ)')
+        p.setLogMode(x=False, y=False)
+        self.zero.setVisible(True)
+        for y in (-1.0, 1.0):
+            ln = pg.InfiniteLine(pos=y, angle=0, pen=pg.mkPen(
+                style.MUTED, width=0.8, style=QtCore.Qt.PenStyle.DashLine))
+            p.addItem(ln)
+            self._refl_items.append(ln)
+        res = self.residuals()
+        for name, Q, r in res:
+            col = line_colours.get(name[1:]) or line_colours.get('asym')
+            ok = np.isfinite(r)
+            pts = pg.PlotDataItem(Q[ok], r[ok], pen=pg.mkPen(col, width=0.6),
+                                  symbol='o', symbolSize=4,
+                                  symbolPen=pg.mkPen(col), symbolBrush=col)
+            p.addItem(pts)
+            p.legend.addItem(pts, '%s  χ²/N %.3g' % (
+                name, float(np.mean(r[ok]**2)) if ok.any() else np.nan))
+            self._refl_items.append(pts)
+        self.refl_note.setText('' if res else
+                               'No residuals: this fit has no fitted points '
+                               'here.')
+        self.refl_note.setVisible(not res)
         p.enableAutoRange()
 
     def _add_data(self, name, col, Q, y, dy, log):

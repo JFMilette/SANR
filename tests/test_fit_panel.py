@@ -112,8 +112,9 @@ def test_stop_and_continue(app):
                     exp.fit_window.btn_stop.isEnabled():
                 exp.stop_fit()
         assert exp._fit is None
-    exp.start_fit()
+    exp.btn_fit.click()                 # the button, as in the GUI
     win = exp.fit_window
+    assert win is not None and win.method == 'de'
     assert not win.btn_continue.isEnabled()
     run_until(3)
     gen = int(win.entries[-1][0]) if win.entries[-1][0].isdigit() else \
@@ -157,7 +158,7 @@ def test_local_lbfgs_fit(app):
     assert exp.session_state('.')['fit']['lbfgs_maxiter'] == 50
 
 
-def test_multistart_in_fit_window(app):
+def test_multistart_in_fit_window(app, monkeypatch):
     """The multistart page's Run follows the starts in the fit window and
     lists the minima there, as in its table; one is sent to the Simulation
     tab from the window."""
@@ -165,6 +166,23 @@ def test_multistart_in_fit_window(app):
     exp = tab(QA, QA, licorne=False)
     exp.fit_workers.setValue(1)
     exp.ms_starts.setValue(4)
+    from fit.de.de_window import DEWindow
+    fills = []                      # (running, starts listed) per refill
+    fill = DEWindow._fill_minima
+
+    def record(self, minima):
+        fill(self, minima)
+        fills.append((self.running, sum(m['hits'] for m in minima)))
+    monkeypatch.setattr(DEWindow, '_fill_minima', record)
+    rows = []           # starts in the page's table, Apply enabled
+    status = type(exp)._ms_status
+
+    def record_table(self, info):
+        status(self, info)
+        if info['phase'] == 'done':
+            rows.append((sum(m['hits'] for m in self._ms_minima),
+                         self.btn_ms_apply.isEnabled()))
+    monkeypatch.setattr(type(exp), '_ms_status', record_table)
     exp.start_multistart()
     win = exp.fit_window
     assert win.isVisible() and win.running and win.unit == 'minimum'
@@ -172,6 +190,10 @@ def test_multistart_in_fit_window(app):
     t0 = time.monotonic()
     while exp._ms is not None and time.monotonic() - t0 < 60:
         app.processEvents()
+    # the list grew start by start while it ran, not only at the end
+    assert [n for running, n in fills if running] == [1, 2, 3, 4, 5]
+    # and so did the page's table, its buttons waiting for the end
+    assert rows == [(n, False) for n in range(1, 6)]
     assert exp._ms is None and not win.running
     m = exp._ms_minima
     assert len(win.entries) == len(m) == exp.ms_table.rowCount()
@@ -185,3 +207,121 @@ def test_multistart_in_fit_window(app):
     assert exp.simulation.stack.layers[1].thickness == \
         pytest.approx(m[-1]['x'][0])
     assert 'Sent <b>minimum %d' % len(m) in exp.ms_report.text()
+
+
+def test_each_fit_a_tab(app):
+    """With page_tabs, every fit opens a tab of its own, named short; the
+    older one stays, can still send its entries but not continue, and
+    its × closes it."""
+    import time
+    exp = tab(QA, QA, licorne=False)
+    exp.sets[0]['name'] = 'a dataset with a long name'
+    exp.refresh_tree()
+    exp.fit_set.setCurrentIndex(0)
+    exp.fit_workers.setValue(1)
+    exp.lb_maxiter.setValue(20)
+    tabs = QtWidgets.QTabWidget()
+    tabs.addTab(QtWidgets.QWidget(), 'tool')
+    exp.page_tabs = tabs
+
+    def fit():
+        exp.start_lbfgs()
+        t0 = time.monotonic()
+        while exp._fit is not None and time.monotonic() - t0 < 60:
+            app.processEvents()
+        return exp.fit_window
+    first = fit()
+    second = fit()
+    assert first is not second and tabs.count() == 3
+    assert tabs.currentWidget() is second
+    assert tabs.tabText(1) == 'L-BFGS-B 1 · a dataset with a…'
+    assert tabs.tabText(2).startswith('L-BFGS-B 2 · ')
+    assert 'a dataset with a long name' in tabs.tabToolTip(1)
+    assert not first.btn_continue.isEnabled()
+    # the old tab's entry is sent, with its own problem
+    exp.simulation.stack.layers[1].thickness = 1.0
+    first.history.setCurrentItem(first.history.topLevelItem(0))
+    first.btn_send.click()
+    assert exp.simulation.stack.layers[1].thickness == \
+        pytest.approx(first.entries[0][2][0])
+    exp.close_page(first)
+    assert tabs.count() == 2 and exp.fit_window is second
+    exp.close_page(second)
+    assert tabs.count() == 1 and exp.fit_window is None
+    assert not exp.btn_lbfgs_window.isEnabled()
+
+
+def test_residuals_plot(app):
+    """The fit tab's last plot: (R_data - R_model) / sigma of every fitted
+    point with the fit's sigma, so their mean square is the cost listed for
+    the entry (chi^2, error floor included); under log R, dR is used."""
+    import time
+    from fit.de.de_window import RESIDUALS
+    from tabs.simulation import REFL_QUANTITIES
+    for cost, floor in ((0, 2.0), (1, 0.0)):
+        exp = tab(QA, QB, licorne=False)
+        exp.fit_workers.setValue(1)
+        exp.lb_maxiter.setValue(5)
+        exp.fit_cost.setCurrentIndex(cost)
+        exp.fit_floor.setValue(floor)
+        exp.start_lbfgs()
+        t0 = time.monotonic()
+        while exp._fit is not None and time.monotonic() - t0 < 60:
+            app.processEvents()
+        win = exp.fit_window
+        view = win.views[0]
+        view.quantity.setCurrentText(RESIDUALS)
+        assert view.quantity.currentIndex() == len(REFL_QUANTITIES)
+        assert view.formula.text() == '(R_data − R_model) / σ'
+        assert not view.logy.isEnabled() and not view.show_err.isEnabled()
+        res = view.residuals()
+        assert [n for n, *_ in res] == ['R+', 'R-']
+        assert [len(q) for _, q, _ in res] == [len(QA), len(QB)]
+        r = np.concatenate([r for *_, r in res])
+        label, last, x = win.entries[-1]
+        if cost == 0:
+            assert np.mean(r**2) == pytest.approx(last, rel=1e-9)
+        else:                         # data: R = 0.1, dR = 0.01
+            m = np.concatenate(win.problem.model(x))
+            assert np.allclose(r, (0.1 - m) / 0.01)
+        legend = [lab.text for _, lab in view.refl_plot.legend.items]
+        assert legend[0].startswith('R+  χ²/N')
+        # another entry: computed again for it
+        win.history.setCurrentItem(win.history.topLevelItem(0))
+        assert view.residuals() is not res
+        view.quantity.setCurrentIndex(0)
+        assert view.logy.isEnabled() and view.show_err.isEnabled()
+
+
+def test_strategy_reaches_the_fit_and_the_session(app, monkeypatch):
+    """The DE page's Strategy goes to the DE fit and is kept in the
+    session."""
+    import time
+    from fit.de import de_window
+    seen = []
+
+    class Thread(de_window.DEThread):
+        def __init__(self, problem, method='de', **options):
+            seen.append(options.get('strategy'))
+            super().__init__(problem, method, **options)
+    import fit.panel as P
+    monkeypatch.setattr(P, 'DEThread', Thread)
+    exp = tab(QA, QA, licorne=False)
+    exp.fit_workers.setValue(1)
+    exp.fit_maxiter.setValue(1)
+    exp.fit_pop.setValue(5)
+    exp.fit_polish.setChecked(False)
+    i = exp.fit_strategy.findData('rand1bin')
+    assert exp.fit_strategy.currentData() == 'best1bin' and i > 0
+    exp.fit_strategy.setCurrentIndex(i)
+    exp.start_fit()
+    t0 = time.monotonic()
+    while exp._fit is not None and time.monotonic() - t0 < 60:
+        app.processEvents()
+    assert seen == ['rand1bin'] and exp._fit is None
+    assert 'Done</b>' in exp.fit_window.status.text()
+    state = exp.session_state('.')
+    assert state['fit']['strategy'] == 'rand1bin'
+    exp.fit_strategy.setCurrentIndex(0)
+    exp.restore_state(state, '.')
+    assert exp.fit_strategy.currentData() == 'rand1bin'

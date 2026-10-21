@@ -29,7 +29,8 @@ in progress, 0 for the first population, 'evals' of its 'size' members
 evaluated), 'polish' after each iteration of its
 polish (maxiter None), 'lbfgs' after each L-BFGS-B iteration, at most every
 PROGRESS_EVERY s per start besides 'begin', each generation's end and the
-polish's first; then 'done' (best: its end cost) once its end is in.
+polish's first; then 'done' (best: its end cost, u: its end point) once
+its end is in.
 'best' is the lowest cost of the start so far (None before any).  A
 start's reports may arrive after its 'done'.
 """
@@ -207,7 +208,7 @@ def run_multistart(problem, n_starts=24, method='lbfgs', seed=None,
         ends.append(end)
         if progress is not None:
             progress(dict(start=end[0], phase='done', step=None,
-                          maxiter=None, best=end[2]))
+                          maxiter=None, best=end[2], u=end[1]))
         if callback is not None:
             callback(len(ends), len(items))
     if workers > 1:

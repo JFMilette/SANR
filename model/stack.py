@@ -215,6 +215,74 @@ The background is added once per pair, after the scale factor: R+ = (n, None)
 is scale (R++ + R+-) + background (times a fixed per-pair norm before the
 background if given).  model.polarisation names the usual pairs.
 
+Q SHIFT -- Stack.q_shift (A^-1, fittable like the scale and background)
+moves the model along Q: the reflectivity at a measured Q is the sample's
+at Q - q_shift (positive: the curve moves to higher Q), e.g. for a small
+misalignment of the Q axis.  The resolution keeps the instrument's sigma_Q
+at the measured Q; R is even in Q, so a point shifted below zero takes
+the value at |Q - q_shift|.  Licorne's convolution weights depend only on
+the spacing of the points and their sigma, which a shift leaves alone: they
+stay those of the measured Q (its cached kernel), applied to the shifted
+reflectivity, so fitting the shift costs nothing extra there.
+
+THICKNESS SPREAD -- Stack.thickness_spread = sigma_t >= 0, a fraction (0.07
+= 7 %).  The film's thickness varies across the illuminated area over
+lateral distances much larger than the neutron's transverse coherence
+length, so each region reflects independently and the measured specular
+reflectivity is the area-weighted incoherent sum of the regions'
+reflectivities, not the reflectivity of the averaged profile (Majkrzak,
+O'Donovan & Berk 2006, sec. 1.4.4; Majkrzak et al. 2014, 2022).  Every
+interior layer (all but the fronting and backing) is scaled by one factor
+f, Gaussian of mean 1 and standard deviation sigma_t: a growth-rate
+variation correlated across the layers.  Roughness, SLDs, magnetisation and
+angles are unchanged; only the thicknesses scale:
+
+    R_spread(Q) = SUM_k w_k R(Q; d_j -> f_k d_j),
+    f_k = 1 + sqrt(2) sigma_t x_k,   w_k = h_k / sqrt(pi)
+
+with x_k, h_k the n-point Gauss-Hermite nodes and weights
+(numpy.polynomial.hermite.hermgauss; Abramowitz & Stegun 25.4.46); the w_k
+sum to 1.  Stack.thickness_spread_nodes is n, an odd int >= 3, or 'auto':
+n = clamp(odd_ceil(0.4 phi^2 + 3), 5, 41) with phi = Qmax D sigma_t (D the
+interior thickness, Qmax the largest Q computed + 3 sigma_Q), which keeps
+the largest relative error in R below 2e-3 (tests/test_thickness_spread.py:
+two films of D = 300 A to Q = 0.2 need 5, 7, 11, 19, 23 and 33 nodes at
+sigma_t = 3, 5, 7, 10, 12 and 15 %; the count grows as phi^2, so the
+linear rule of plans/thickness_spread_plan_v1.md, fitted to a stack with
+shallower fringes, gave 9 nodes and 7e-3 at 7 %).  fit.problem freezes it
+for a fit, from the upper bound of sigma_t (the cost must not jump where n
+changes).  The outer Gauss-Hermite nodes reach far into the tails: a node
+whose factor f_k <= 0.05 (a thickness near zero, unphysical) is left out
+and the others' weights renormalised; their weight is the Gaussian's tail
+there (<= 2e-10 up to 15 %, a few 1e-6 at 20 %), and more than
+SPREAD_DROP_MAX of it is refused (ValueError: a spread above ~25 %).  The average is linear, so it commutes with the resolution (both
+schemes), the Q shift, the norms, scale and background: it is taken on the
+ideal reflectivity, inside the function the resolution averages, each
+node's slabs built once per parameter change (Stack._spread_sequences) by
+build_sublayers itself, so both roughness schemes (the Licorne windows and
+renormalisation included) scale as the nominal stack would.
+critical_edges() depends only on the fronting and backing: the quadrature
+grid is the same for every node.  sigma_t = 0 is the code path without it,
+untouched; profile() and the slabs drawn stay the nominal (f = 1) ones.
+Every f_k must be > 0.05 (ValueError otherwise).  It is not part of
+LICORNE_EXACT: Licorne has no such parameter.
+
+  C. F. Majkrzak, K. V. O'Donovan, N. F. Berk, "Polarized neutron
+    reflectometry", in Neutron Scattering from Magnetic Materials
+    (Elsevier, 2006), sec. 1.4.4.
+  C. F. Majkrzak et al., "Determination of the effective transverse
+    coherence of the neutron wave packet as employed in reflectivity
+    investigations of condensed-matter structures. I. Measurements",
+    Phys. Rev. A 89 (2014).
+  C. F. Majkrzak et al., "The effect of transverse wavefront width on
+    specular neutron reflection", J. Appl. Cryst. 55 (2022).
+  S. L. Morelhao, C. I. Fornari, P. H. O. Rappl, E. Abramof, J. Appl.
+    Cryst. 50, 399-410 (2017), doi:10.1107/S1600576717000760 (thickness
+    distributions in Bi2Te3 films).
+  A. R. J. Nelson, S. W. Prescott, J. Appl. Cryst. 52, 193-200 (2019),
+    doi:10.1107/S1600576718017296 (refnx MixedReflectModel, incoherent
+    sums).
+
 With a non-magnetic fronting this holds for any backing, and all pairs share
 one transfer-matrix evaluation.  With a magnetic fronting the two eigenspins
 (+-M_f) have different k_z there, so a component of P0 or P transverse to M_f
@@ -253,7 +321,12 @@ FIT_PARAMS = ('thickness', 'NSLD_real', 'NSLD_img', 'MSLD_rho', 'MSLD_theta',
               'MSLD_phi', 'roughness_sigma', 'MSLD_sigma')
 # Stack attributes a fit may vary, in Stack.fit the same way; their
 # free_parameters() entries have layer index None.
-STACK_FIT_PARAMS = ('scale', 'background')
+STACK_FIT_PARAMS = ('scale', 'background', 'q_shift', 'thickness_spread')
+# THICKNESS SPREAD: the node choices and the 'auto' rule's limits
+SPREAD_NODE_CHOICES = ('auto', 5, 7, 9, 11, 15, 21)
+SPREAD_NODES_MIN, SPREAD_NODES_MAX = 5, 41
+SPREAD_F_MIN = 0.05             # nodes with a smaller factor are left out
+SPREAD_DROP_MAX = 1e-4          # the weight they may carry
 
 
 # Default fit bounds, the same for every layer: attr -> (min, max).
@@ -268,6 +341,8 @@ DEFAULT_BOUNDS = {
     'MSLD_sigma':      (0.0, 10.0),        # Angstrom
     'scale':           (0.5, 1.5),
     'background':      (0.0, 1e-5),
+    'q_shift':         (-0.002, 0.002),    # A^-1
+    'thickness_spread': (0.0, 0.2),        # fraction
 }
 
 
@@ -375,6 +450,34 @@ def _check_P(P, name):
     if np.linalg.norm(P) > 1 + 1e-9:
         raise ValueError('|%s| = %.4g > 1' % (name, np.linalg.norm(P)))
     return P
+
+
+def spread_nodes(n, s):
+    """[(w_k, f_k)] of n Gauss-Hermite nodes at sigma_t s (THICKNESS
+    SPREAD): those with f_k > SPREAD_F_MIN, renormalised; ValueError if the
+    others weigh more than SPREAD_DROP_MAX."""
+    x, h = np.polynomial.hermite.hermgauss(int(n))
+    s = float(s)
+    f = 1.0 + np.sqrt(2.0) * s * x
+    w = h / np.sqrt(np.pi)
+    keep = f > SPREAD_F_MIN
+    lost = float(w[~keep].sum())
+    if lost > SPREAD_DROP_MAX:
+        raise ValueError(
+            'thickness spread %.3g %%: a weight of %.2g of the thickness '
+            'distribution lies at thicknesses below %g of the nominal; '
+            'lower the spread' % (100 * s, lost, SPREAD_F_MIN))
+    return list(zip(w[keep] / w[keep].sum(), f[keep]))
+
+
+def _node_sum(seqs, R):
+    """SUM_k w_k R(seq_k) over the thickness-spread nodes, in node order
+    (THICKNESS SPREAD)."""
+    out = None
+    for w, seq in seqs:
+        r = w * R(seq)
+        out = r if out is None else out + r
+    return out
 
 
 def _check_pairs(pairs):
@@ -676,6 +779,13 @@ class Stack:
         self._slab_arrays = None
         self.scale = 1.0                     # factor on every channel
         self.background = 0.0                # constant added to every channel
+        self.q_shift = 0.0                   # A^-1, see Q SHIFT
+        self.thickness_spread = 0.0          # fraction, see THICKNESS SPREAD
+        self.thickness_spread_nodes = 'auto'  # or an odd int >= 3
+        # incremented whenever self.sublayers is replaced: the key of the
+        # thickness-spread nodes' slabs (_spread_sequences)
+        self._sub_gen = 0
+        self._spread_cache = None
         self.fit = {}                        # STACK_FIT_PARAMS, as Layer.fit
         # True (default): Q is measured inside the fronting; False: vacuum Q
         self.q_in_fronting = True
@@ -746,6 +856,9 @@ class Stack:
         return {'tail': self.tail,
                 'scale': self.scale,
                 'background': self.background,
+                'q_shift': self.q_shift,
+                'thickness_spread': self.thickness_spread,
+                'thickness_spread_nodes': self.thickness_spread_nodes,
                 'fit': copy.deepcopy(self.fit),
                 'q_in_fronting': self.q_in_fronting,
                 'resolution': copy.deepcopy(self.resolution),
@@ -771,6 +884,9 @@ class Stack:
                 interface_order=d.get('interface_order', 'additive'))
         s.background = d['background']
         s.scale = float(d.get('scale', 1.0))
+        s.q_shift = float(d.get('q_shift', 0.0))
+        s.thickness_spread = float(d.get('thickness_spread', 0.0))
+        s.thickness_spread_nodes = d.get('thickness_spread_nodes', 'auto')
         s.fit = copy.deepcopy(d.get('fit', {}))
         s.q_in_fronting = bool(d['q_in_fronting'])
         res = copy.deepcopy(d['resolution'])
@@ -1042,6 +1158,7 @@ class Stack:
                                        self._magnetic_steps(c, F)))
 
     def _set_sublayers(self, th, v_n, v_rho, v_theta, v_phi):
+        self._sub_gen = getattr(self, '_sub_gen', 0) + 1
         self.sublayers = [
             Layer(name='%s_%03d' % (self.layers[0].name or 'slab', i),
                   thickness=float(th[i]), NSLD_real=v_n[i].real,
@@ -1476,10 +1593,13 @@ class Stack:
         M[0, 3] = muc * tm
         return np.ascontiguousarray(M.transpose(2, 3, 0, 1))
 
-    def build_transfer_matrix(self, Q):
+    def build_transfer_matrix(self, Q, seq=None):
         """Product matrix A = A_N ... A_1 (deepest leftmost) of the sliced
         sublayers.  Shape (nQ,4,4).  The fronting and backing are never part
-        of the product; they enter through the boundary condition.
+        of the product; they enter through the boundary condition.  seq: a
+        (slabs, their arrays) pair as _set_sublayers stores it in
+        _slab_arrays (a thickness-spread node, _spread_sequences) instead
+        of self.sublayers.
 
         All slab matrices are built in one vectorised call, then multiplied
         pairwise (tree reduction): ~log2(N) batched matmuls instead of N.
@@ -1487,15 +1607,20 @@ class Stack:
         same product instead, 1.5-3x faster.
         """
         Q = np.atleast_1d(np.asarray(Q))     # may be complex: only Q**2 is used
-        if self.sublayers is None:
-            self.build_sublayers()
-        seq = self.sublayers
+        if seq is not None:
+            seq, arrays = seq
+        else:
+            if self.sublayers is None:
+                self.build_sublayers()
+            seq, arrays = self.sublayers, None
         if not seq:
             M = np.broadcast_to(np.eye(4, dtype=np.complex128),
                                 Q.shape + (4, 4)).copy()
         else:
             cached = getattr(self, '_slab_arrays', None)
-            if cached is not None and cached[0] is seq:
+            if arrays is not None:
+                slabs = arrays
+            elif cached is not None and cached[0] is seq:
                 slabs = cached[1]
             else:
                 slabs = ([complex(l.NSLD_real, l.NSLD_img) for l in seq],
@@ -1551,10 +1676,11 @@ class Stack:
         return np.array([float(cos_turns(f.MSLD_theta)),
                          float(sin_turns(f.MSLD_theta)), 0.0])
 
-    def _reflect(self, Q2):
+    def _reflect(self, Q2, seq=None):
         """Reflection matrix r [:, out, in] in the film-normal (z) basis for
-        the squared vacuum Q, plus the fronting's q+- (see _surround_K)."""
-        M = self.build_transfer_matrix(np.sqrt(Q2 + 0j))
+        the squared vacuum Q, plus the fronting's q+- (see _surround_K);
+        seq: see build_transfer_matrix."""
+        M = self.build_transfer_matrix(np.sqrt(Q2 + 0j), seq)
         A, B = M[:, :2, :2], M[:, :2, 2:]
         C, D = M[:, 2:, :2], M[:, 2:, 2:]
         Kf, qf_p, qf_m = self._surround_K(self.fronting, Q2)
@@ -1605,20 +1731,93 @@ class Stack:
         NORMALISATION).  sigma: sigma_Q at each Q instead of the
         resolution's (e.g. Stack.data_sigma); Q may then repeat.
         warn=False silences the warning about a polarisation transverse to
-        a magnetic fronting's M."""
+        a magnetic fronting's M.  q_shift: see Q SHIFT."""
         pairs = _check_pairs(pairs)
         m = self.fronting_direction()
+        trace, lab = self._trace, self._lab_channels
+        if self.thickness_spread:
+            # THICKNESS SPREAD: the nodes' average ideal reflectivity
+            Q = np.atleast_1d(np.asarray(Q, dtype=float))
+            s = self.resolution_sigma(Q) if sigma is None else \
+                np.broadcast_to(np.asarray(sigma, dtype=float), Q.shape)
+            qmax = float(np.max(np.abs(Q - self.q_shift))
+                         + 3 * np.max(s, initial=0.0)) if Q.size else 0.0
+            seqs = self._spread_sequences(qmax)
+
+            def trace(q, pairs):
+                return _node_sum(seqs, lambda seq: self._trace(q, pairs, seq))
+
+            def lab(q):
+                return _node_sum(seqs, lambda seq: self._lab_channels(q, seq))
         if m is None:
-            R = self._resolve(Q, lambda q: self._trace(q, pairs), sigma)
+            R = self._resolve(Q, lambda q: trace(q, pairs), sigma,
+                              self.q_shift)
         else:
             w = self._lab_weights(pairs, m, warn)
-            R = _weigh(self._resolve(Q, self._lab_channels, sigma), w)
+            R = _weigh(self._resolve(Q, lab, sigma, self.q_shift), w)
         if norms is not None:
             norms = np.asarray(norms, dtype=float)
             if norms.shape != (len(pairs),):
                 raise ValueError('one norm per pair')
             R = norms * R
         return self.scale * R + self.background
+
+    def spread_count(self, qmax, spread=None):
+        """The number of thickness-spread nodes (THICKNESS SPREAD) for the
+        largest Q qmax and sigma_t `spread` (default the stack's)."""
+        n = self.thickness_spread_nodes
+        if n != 'auto':
+            n = int(n)
+            if n < 3 or n % 2 == 0:
+                raise ValueError('thickness_spread_nodes must be an odd '
+                                 'integer >= 3 or \'auto\', not %r' % (n,))
+            return n
+        s = self.thickness_spread if spread is None else float(spread)
+        D = sum(l.thickness for l in self.layers[1:-1])
+        x = 0.4 * (qmax * D * s) ** 2 + 3
+        k = int(np.ceil(x))
+        k += 1 - k % 2                       # the smallest odd int >= x
+        return min(max(k, SPREAD_NODES_MIN), SPREAD_NODES_MAX)
+
+    def spread_nodes(self, qmax, spread=None):
+        """[(w_k, f_k)] of the thickness spread (THICKNESS SPREAD) at
+        sigma_t `spread` (default the stack's): the nodes with f_k > 0.05,
+        their weights renormalised."""
+        return spread_nodes(self.spread_count(qmax, spread),
+                            self.thickness_spread if spread is None
+                            else spread)
+
+    def _spread_sequences(self, qmax):
+        """[(w_k, seq_k)]: each thickness-spread node's slabs (seq as
+        build_transfer_matrix takes it), built by build_sublayers with every
+        interior thickness times f_k, then the stack restored exactly (the
+        saved thicknesses, the nominal slabs).  Cached until the slabs are
+        rebuilt (_sub_gen), the spread or the nodes change."""
+        nodes = self.spread_nodes(qmax)
+        if self.sublayers is None:
+            self.build_sublayers()
+        key = (getattr(self, '_sub_gen', 0), float(self.thickness_spread),
+               tuple(float(f) for _, f in nodes))
+        cache = getattr(self, '_spread_cache', None)
+        if cache is not None and cache[0] == key:
+            return cache[1]
+        inner = self.layers[1:-1]
+        d0 = [float(l.thickness) for l in inner]
+        saved = (self.sublayers, self._slab_arrays,
+                 getattr(self, '_sub_gen', 0))
+        out = []
+        try:
+            for w, f in nodes:
+                for l, d in zip(inner, d0):
+                    l.thickness = d * f
+                self.build_sublayers()
+                out.append((float(w), self._slab_arrays))
+        finally:
+            for l, d in zip(inner, d0):
+                l.thickness = d
+            self.sublayers, self._slab_arrays, self._sub_gen = saved
+        self._spread_cache = (key, out)
+        return out
 
     def critical_edges(self):
         """Q of the critical edges, where R has a square-root kink: total
@@ -1634,19 +1833,25 @@ class Stack:
              for sb in (1, -1) for sf in (1, -1)]
         return sorted({float(np.sqrt(16 * np.pi * x)) for x in v if x > 0})
 
-    def _resolve(self, Q, ideal, sigma=None):
+    def _resolve(self, Q, ideal, sigma=None, shift=0.0):
         """Average ideal(Q) -> (nQ, k) over the Q resolution (see
-        RESOLUTION), or over Gaussians of the given sigma_Q."""
+        RESOLUTION), or over Gaussians of the given sigma_Q; the sample's
+        ideal at Q - shift (see Q SHIFT), sigma that of the measured Q."""
         Q = np.atleast_1d(np.asarray(Q, dtype=float))
         sigma = self.resolution_sigma(Q) if sigma is None else \
             np.broadcast_to(np.asarray(sigma, dtype=float), Q.shape)
         if not np.any(sigma > 0):
-            return ideal(Q)
+            return ideal(np.abs(Q - shift) if shift else Q)
         scheme = self.resolution.get('scheme', 'quadrature')
         if scheme not in RES_SCHEMES:
             raise ValueError('unknown resolution scheme %r' % (scheme,))
         if scheme == 'licorne':
-            return self._resolve_licorne(Q, sigma, ideal)
+            # the measured Q's weights (cached), the shifted reflectivity
+            return self._resolve_licorne(
+                Q, sigma, ideal if not shift else
+                lambda q: ideal(np.abs(q - shift)))
+        if shift:
+            Q = np.abs(Q - shift)
         x = np.linspace(-RES_SPAN, RES_SPAN, RES_NODES)
         w = np.exp(-0.5 * x**2)
         # reflectivity is even in Q; keep the nodes off Q = 0
@@ -1687,16 +1892,16 @@ class Stack:
         R[order] = Rs
         return R
 
-    def _trace(self, Q, pairs):
+    def _trace(self, Q, pairs, seq=None):
         """Non-magnetic fronting: Tr{rho r rho0 r^+} of every pair from ONE
         transfer-matrix evaluation, any backing; no background or resolution.
-        Shape (nQ, len(pairs))."""
+        Shape (nQ, len(pairs)).  seq: see build_transfer_matrix."""
         Q = np.atleast_1d(np.asarray(Q, dtype=float))
         f = self.fronting
         Q2 = Q**2 + 0j
         if self.q_in_fronting:
             Q2 = Q2 + 16*np.pi*(f.NSLD_real + 1j*f.NSLD_img)
-        r = self._reflect(Q2)[0]
+        r = self._reflect(Q2, seq)[0]
         rho0 = np.stack([_density(P0) for P0, _ in pairs])
         rho = np.stack([np.eye(2) if P is None else _density(P)
                         for _, P in pairs])
@@ -1705,9 +1910,10 @@ class Stack:
         A = rho[:, None] @ (r[None] @ rho0[:, None])
         return (A * r.conj()[None]).real.sum((-2, -1)).T
 
-    def _lab_channels(self, Q):
+    def _lab_channels(self, Q, seq=None):
         """Magnetic fronting: the channels ++, +-, -+, -- along its M, no
-        background or resolution.  Shape (nQ, 4).
+        background or resolution.  Shape (nQ, 4).  seq: see
+        build_transfer_matrix.
 
         Channel 'ab' = incident a, reflected b, flux-normalised:
         R_ab = |r_ab|^2 Re(q_b)/Re(q_a), which is what makes R+- = R-+.
@@ -1731,7 +1937,7 @@ class Stack:
         Ui = np.array([[1, np.conj(e)], [1, -np.conj(e)]]) / np.sqrt(2)
 
         def lab(Q2):
-            r, qp, qm = self._reflect(Q2)
+            r, qp, qm = self._reflect(Q2, seq)
             return Ui @ r @ U, qp, qm
 
         if not self.q_in_fronting:

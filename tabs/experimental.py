@@ -1385,10 +1385,12 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                          line=self.show_line.isChecked()),
             fit=dict(dataset=self.fit_set.currentText(), joint=self._joint,
                      cost=self.fit_cost.currentIndex(),
+                     target=self.fit_target.currentData(),
                      maxiter=self.fit_maxiter.value(),
                      mutation=[self.fit_mut_lo.value(),
                                self.fit_mut_hi.value()],
                      population=self.fit_pop.value(), tol=self.fit_tol.value(),
+                     strategy=self.fit_strategy.currentData(),
                      polish=self.fit_polish.isChecked(),
                      lbfgs_maxiter=self.lb_maxiter.value(),
                      workers=self.fit_workers.value()))
@@ -1456,12 +1458,16 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
             self.fit_set.setCurrentIndex(max(0, self.fit_set.findText(
                 fit.get('dataset', ''))))
             self.fit_cost.setCurrentIndex(fit.get('cost', 0))
+            self.fit_target.setCurrentIndex(max(0, self.fit_target.findData(
+                fit.get('target', 'channels'))))
             self.fit_maxiter.setValue(fit.get('maxiter', 200))
             lo, hi = fit.get('mutation', (0.5, 1.0))
             self.fit_mut_lo.setValue(lo)
             self.fit_mut_hi.setValue(hi)
             self.fit_pop.setValue(fit.get('population', 15))
             self.fit_tol.setValue(fit.get('tol', 0.01))
+            self.fit_strategy.setCurrentIndex(max(0, self.fit_strategy.findData(
+                fit.get('strategy', 'best1bin'))))
             self.fit_polish.setChecked(fit.get('polish', True))
             self.lb_maxiter.setValue(fit.get('lbfgs_maxiter', 1000))
             self.fit_workers.setValue(fit.get('workers',

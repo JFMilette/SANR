@@ -38,6 +38,14 @@ population's costs), 'spread' (their std / |mean|: the run stops once it
 is <= 'tol', with atol 0), 'tol'}, then {'phase': 'polish', 'iteration',
 'best'} as the polish starts (iteration 0) and after each of its iterations.
 
+STRATEGY -- scipy's way of building each trial vector (STRATEGIES), from
+the greediest to the one that explores most: 'best1bin' (the default:
+trial = best + F (r1 - r2), so a population seeded with a good current
+point collapses onto its basin within a few generations), 'currenttobest1bin'
+(each member moves part way to the best), 'randtobest1bin' (from a random
+member, part way to the best), 'rand1bin' (trial = r0 + F (r1 - r2): no
+pull towards the best, slower to converge, much wider search).
+
 LOCAL -- run_lbfgs runs L-BFGS-B alone from the current values (the Fit
 tool box's local page): the same cost, bounds and workers as the polish.
 """
@@ -48,6 +56,13 @@ import numpy as np
 from scipy.optimize import differential_evolution, minimize
 
 from fit.workers import Wrapper, start as start_pool, stop as stop_pool
+
+
+# STRATEGY: scipy name, label, from the greediest to the most exploring
+STRATEGIES = [('best1bin', 'best1bin (greedy, fast)'),
+              ('currenttobest1bin', 'current-to-best1bin'),
+              ('randtobest1bin', 'rand-to-best1bin'),
+              ('rand1bin', 'rand1bin (explores most)')]
 
 
 class FitCancelled(Exception):
@@ -102,7 +117,7 @@ class _PoolMap:
 def run_de(problem, maxiter=200, popsize=15, tol=1e-3, mutation=(0.5, 1),
            polish=True, seed=None, callback=None, cancelled=None, workers=1,
            full_output=False, x0=None, atol=0.0, init='latinhypercube',
-           status=None, state=None, resume=None):
+           status=None, state=None, resume=None, strategy='best1bin'):
     """Differential evolution on `problem`.
 
     callback(x, cost, generation) is called after every generation with the
@@ -118,7 +133,9 @@ def run_de(problem, maxiter=200, popsize=15, tol=1e-3, mutation=(0.5, 1),
     scipy's (stop once the population's cost spread <= atol + tol x |its
     mean|; init 'latinhypercube' or 'sobol').  status(info): see STATUS;
     the polish: see POLISH.  state, resume: see CONTINUE (with resume, x0,
-    init and popsize are unused)."""
+    init and popsize are unused).  strategy: see STRATEGY."""
+    if strategy not in [k for k, _ in STRATEGIES]:
+        raise ValueError('unknown strategy %r' % strategy)
     if resume is not None:
         pop = np.clip(np.asarray(resume['population'], dtype=float), 0.0, 1.0)
         start = dict(init=pop)
@@ -165,7 +182,7 @@ def run_de(problem, maxiter=200, popsize=15, tol=1e-3, mutation=(0.5, 1),
         res = differential_evolution(
             cost, [(0.0, 1.0)] * len(problem.params), **start,
             maxiter=maxiter, popsize=popsize, tol=tol, atol=atol,
-            mutation=mutation,
+            mutation=mutation, strategy=strategy,
             polish=False,
             seed=seed, callback=cb,
             workers=pool if pool is not None else 1,

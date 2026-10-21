@@ -109,3 +109,119 @@ def test_error_floor_reaches_the_problems(app, monkeypatch):
     assert np.allclose(pp.fit.channels[0][3], np.hypot(0.001, 0.005))
     assert np.allclose(pp.data[0][1], 0.001)        # the fitted floor wins
     assert pp.names[-1] == 'log10_error_floor'
+
+
+def test_chain_curves_over_the_bands(app):
+    """Each chain's best kept state is drawn in its Traces colour on the
+    Reflectance, SA and SLD plots of a dataset's tab, and the tab's
+    "chains" box shows or hides them; its tooltip lists their chi^2/N."""
+    from fit.dream.dream_fit import chain_best, chain_curves, profile_bands
+    from fit.dream.dream_fit import posterior_problem
+    from fit.dream.dream_window import CHAIN_COLOURS
+    from test_dream_fit import film, free, measure
+    data = measure(film(), ['+', '-'])
+    for d, name in zip(data, ('R+', 'R-')):
+        d['name'] = name                # as the app names them: SA exists
+    pp = posterior_problem(free(film(), ()), data)
+    res = sample(pp, n_gen=300, seed=0, stop_when_converged=False)
+    best = chain_best(res)
+    assert best.shape == (8, 3)
+    z = profile_bands(res, pp)[0]
+    cc = chain_curves(res, pp, z)
+    assert [c['chain'] for c in cc] == list(range(8))
+    for c, x in zip(cc, best):
+        R = pp.fit.model(x)
+        assert all(np.array_equal(a, b) for a, b in zip(c['R'], R))
+        assert np.allclose(c['A'], (R[0] - R[1]) / (R[0] + R[1]))
+        assert c['chi2'] == pytest.approx(pp.chi2_per_point(x))
+        assert c['nuc'].shape == c['mag'].shape == z.shape
+    win = DreamWindow()
+    win.start(pp, 300, 'test')
+    win.finish(res)
+    win.tabs.setCurrentIndex(3)
+    page, pred, prof, view, box = win.part_pages[0]
+    assert page.currentIndex() == 1, page.widget(0).text()
+    chains = [it for kind, _, it in pred.items if kind == 'chains']
+    assert len(chains) == 8 * 2                     # R+ and R-, per chain
+    assert chains[3].opts['pen'].color().name() == CHAIN_COLOURS[3]
+    assert len(prof._chain_items) == 8 * 2          # NSLD and MSLD
+    assert box.isChecked() and 'chain 8: χ²/N' in box.toolTip()
+    view.setCurrentText('SLD')
+    win.show()
+    app.processEvents()
+    assert all(it.isVisible() for it in prof._chain_items)
+    box.setChecked(False)
+    assert not any(it.isVisible() for it in prof._chain_items)
+    view.setCurrentText('SA')
+    sa = [it for kind, _, it in pred.items if kind == 'chains']
+    assert len(sa) == 8 and not any(it.isVisible() for it in sa)
+    box.setChecked(True)
+    assert all(it.isVisible() for it in sa)
+    # Load into model: the MAP, or one chain's best kept state
+    assert win.send_from.count() == 9
+    assert win.send_from.itemText(0).startswith('MAP — χ²/N')
+    assert win.send_from.itemText(3).startswith('chain 3 — χ²/N')
+    sent = []
+    win.sendRequested.connect(lambda *a: sent.append(a))
+    win.btn_map.click()
+    win.send_from.setCurrentIndex(3)
+    win.btn_map.click()
+    assert np.array_equal(sent[0][0], res.best()[0]) and sent[0][2] == 'MAP'
+    assert np.array_equal(sent[1][0], best[2]) and sent[1][1:] == (0, 'chain 3')
+    win.close()
+
+
+def test_log_p_line_never_widens_the_window(app):
+    """With log p shown, the trace line lists every chain's chi^2/N and is
+    rewritten at each live update: it wraps, so 26 chains (classic DREAM
+    on 25 parameters) do not force the window wider than a laptop screen
+    (it reached 1507 px before, and the window stopped responding)."""
+    pp = small_problem()
+    win = DreamWindow()
+    win.resize(900, 700)
+    win.start(pp, 30000, 'test')
+    win.show()
+    win.tabs.setCurrentWidget(win.trace)
+    base = win.minimumSizeHint().width()
+    N = 26
+    g = np.arange(100) * 8
+    X = np.random.default_rng(0).normal(size=(100, N, pp.ndim))
+    lp = -650 + np.random.default_rng(1).normal(size=(100, N))
+    win.snapshot(g, X, lp, None)
+    win.trace.combo.setCurrentIndex(0)                  # log p
+    win.trace.chain_chi2 = list(1.2345 + 0.001 * np.arange(N))
+    win.trace._draw()
+    win.status.setText('Generation 12345 / 30000 — acceptance 0.123 — '
+                       'max R̂ 1.234 — elapsed 1 h 05 min' * 3)
+    app.processEvents()
+    assert 'χ²/N per chain now' in win.trace.info.text()
+    assert win.minimumSizeHint().width() == base and win.width() == 900
+    win.close()
+
+
+def test_log_p_line_never_widens_the_window(app):
+    """With log p shown, the trace line lists every chain's chi^2/N and is
+    rewritten at each live update: it wraps, so 26 chains (classic DREAM
+    on 25 parameters) do not force the window wider than a laptop screen
+    (it reached 1507 px before, and the window stopped responding)."""
+    pp = small_problem()
+    win = DreamWindow()
+    win.resize(900, 700)
+    win.start(pp, 30000, 'test')
+    win.show()
+    win.tabs.setCurrentWidget(win.trace)
+    base = win.minimumSizeHint().width()
+    N = 26
+    g = np.arange(100) * 8
+    X = np.random.default_rng(0).normal(size=(100, N, pp.ndim))
+    lp = -650 + np.random.default_rng(1).normal(size=(100, N))
+    win.snapshot(g, X, lp, None)
+    win.trace.combo.setCurrentIndex(0)                  # log p
+    win.trace.chain_chi2 = list(1.2345 + 0.001 * np.arange(N))
+    win.trace._draw()
+    win.status.setText('Generation 12345 / 30000 — acceptance 0.123 — '
+                       'max R̂ 1.234 — elapsed 1 h 05 min' * 3)
+    app.processEvents()
+    assert 'χ²/N per chain now' in win.trace.info.text()
+    assert win.minimumSizeHint().width() == base and win.width() == 900
+    win.close()

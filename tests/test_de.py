@@ -274,3 +274,19 @@ def test_lbfgs_alone_from_the_current_values():
     x, c, it, msg = run_lbfgs(prob, cancelled=lambda: True)
     assert msg == 'stopped' and it == 0 and np.allclose(x, [78.0, 4.5])
     assert np.isclose(c, seen[0][1])
+
+
+@pytest.mark.parametrize('strategy', ['best1bin', 'currenttobest1bin',
+                                      'randtobest1bin', 'rand1bin'])
+def test_each_strategy_recovers_phi(strategy):
+    """Every strategy of the DE page reaches the minimum of a 1-parameter
+    fit (rand1bin more slowly), and an unknown one is refused."""
+    Q = np.linspace(0.004, 0.12, 150)
+    data = measure(film(phi=0.1), Q, in_plane(0.0))
+    st = film(phi=0.0)
+    vary(st, 'MSLD_phi', 0.0, 0.25)
+    prob = FitProblem(st, data)
+    x, cost, *_ = run_de(prob, seed=0, strategy=strategy, maxiter=60)
+    assert abs(x[0] - 0.1) <= 1e-3 and cost < 1e-6
+    with pytest.raises(ValueError, match='unknown strategy'):
+        run_de(prob, strategy='best3bin')

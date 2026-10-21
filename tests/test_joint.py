@@ -74,6 +74,31 @@ def test_own_and_fixed():
                for n in RHO})
 
 
+def test_fixed_at_a_value_of_its_own():
+    """A 'fixed' parameter takes the value given for that dataset; one
+    given for a parameter that is fitted there is ignored; the values are
+    one row per dataset, also when given as one row for all."""
+    jp = JointProblem([(n, FitProblem(stack(), data(r)))
+                       for n, r in RHO.items()],
+                      {'A': {'Fe.thickness': 'fixed'},
+                       'B': {'Fe.thickness': 'fixed'}},
+                      values={'B': {'Fe.thickness': 70.0,
+                                    'Fe.MSLD_rho': 9e-6}})
+    assert jp.names == ['Fe.MSLD_rho']
+    assert jp.fixed.shape == (2, 2)
+    assert np.allclose(jp.part_x([4e-6], 0), [75.0, 4e-6])   # current
+    assert np.allclose(jp.part_x([4e-6], 1), [70.0, 4e-6])   # its own
+    with pytest.raises(ValueError, match='unknown parameter'):
+        JointProblem([(n, FitProblem(stack(), data(r)))
+                      for n, r in RHO.items()],
+                     {'B': {'Fe.thickness': 'fixed'}},
+                     values={'B': {'nope': 1.0}})
+    one = JointProblem([(n, FitProblem(stack(), data(r)))
+                        for n, r in RHO.items()],
+                       {'B': {'Fe.thickness': 'fixed'}}, fixed=[60.0, 1e-6])
+    assert np.allclose(one.fixed, [[60.0, 1e-6], [60.0, 1e-6]])
+
+
 def test_single_problem_helpers():
     fp = FitProblem(stack(), data(5e-6), 'chi2')
     assert parts(fp) == [fp] and part_index(fp) == [0, 1]
@@ -151,9 +176,11 @@ def gui():
     return sim, exp
 
 
-def choose_joint(exp, modes):
+def choose_joint(exp, modes, values=None):
     from fit.panel import JOINT
     exp._joint = dict(sets=['A', 'B'], modes=modes)
+    if values is not None:
+        exp._joint['values'] = values
     exp._refresh_fit_sets()
     exp.fit_set.setCurrentIndex(exp.fit_set.findData(JOINT))
 
@@ -176,7 +203,8 @@ def test_dialog_selection():
         ['own', 'own']
     assert dlg.selection() == {'sets': ['A', 'B'],
                                'modes': {'A': {'L.MSLD_rho': 'own'},
-                                         'B': {'L.MSLD_rho': 'own'}}}
+                                         'B': {'L.MSLD_rho': 'own'}},
+                               'values': {}}
     a = dlg.cells['A', 'L.MSLD_rho']
     a.setCurrentIndex(a.findData('shared'))            # A alone
     assert every.currentData() == 'mixed'
@@ -188,6 +216,59 @@ def test_dialog_selection():
     assert dlg.all_combos[1].currentData() == 'mixed'
     dlg.all_combos[0].setCurrentIndex(dlg.all_combos[0].findData('fixed'))
     assert {dlg.mode(n, 'L.thickness') for n in 'ABC'} == {'fixed'}
+
+
+def test_dialog_values_of_not_fitted():
+    """Beside "Not fitted", a box in the Simulation tab's units: empty
+    keeps the Simulation tab's value (shown greyed), a number is that
+    dataset's value, "All datasets" writes every one, text is refused."""
+    gui()
+    from PyQt6 import QtCore
+    from fit.datasets_dialog import DatasetsDialog
+    params = ['L.thickness', 'L.MSLD_rho']
+    info = {'L.thickness': (1.0, 'Å', 75.0),
+            'L.MSLD_rho': (1e6, '10⁻⁶ Å⁻²', 2e-6)}
+    dlg = DatasetsDialog(['A', 'B'], ['A', 'B'], {}, params, info=info,
+                         values={'A': {'L.thickness': 60.0}})
+    dlg.show()
+    e = dlg.edits['B', 'L.MSLD_rho']
+    assert not e.isVisible() and e.placeholderText() == '2'
+    c = dlg.cells['B', 'L.MSLD_rho']
+    c.setCurrentIndex(c.findData('fixed'))
+    assert e.isVisible()
+    e.setText('3.5')                                   # 10⁻⁶ Å⁻²
+    e.editingFinished.emit()
+    assert dlg.values['B']['L.MSLD_rho'] == pytest.approx(3.5e-6)
+    # A's thickness value is kept but unused until it is not fitted
+    assert dlg.selection()['values'] == {'B': {'L.MSLD_rho': 3.5e-6}}
+    every = dlg.all_combos[0]
+    every.setCurrentIndex(every.findData('fixed'))
+    assert dlg.edits['A', 'L.thickness'].text() == '60'
+    assert dlg.all_edits[0].isVisible() and dlg.all_edits[0].text() == ''
+    dlg.all_edits[0].setText('80')
+    dlg.all_edits[0].editingFinished.emit()
+    assert [dlg.edits[n, 'L.thickness'].text() for n in 'AB'] == ['80'] * 2
+    dlg.edits['A', 'L.thickness'].setText('')          # back to current
+    dlg.edits['A', 'L.thickness'].editingFinished.emit()
+    assert dlg.all_edits[0].text() == ''
+    assert dlg.selection()['values'] == {
+        'B': {'L.thickness': 80.0, 'L.MSLD_rho': pytest.approx(3.5e-6)}}
+    seen = []
+    import fit.datasets_dialog as D
+    orig = D.QtWidgets.QMessageBox.information
+    D.QtWidgets.QMessageBox.information = staticmethod(
+        lambda *a: seen.append(a[2]))
+    try:
+        dlg.edits['B', 'L.thickness'].setText('abc')
+        dlg.accept()
+    finally:
+        D.QtWidgets.QMessageBox.information = orig
+    assert 'Not a number' in seen[0] and dlg.result() == 0
+    assert 'border' in dlg.edits['B', 'L.thickness'].styleSheet()
+    dlg.edits['B', 'L.thickness'].setText('81')        # typed, not entered
+    dlg.accept()
+    assert dlg.result() == 1 and dlg.values['B']['L.thickness'] == 81.0
+    assert QtCore is not None
 
 
 def test_joint_entry_problem_and_session(tmp_path):
@@ -214,6 +295,21 @@ def test_joint_entry_problem_and_session(tmp_path):
     exp.refresh_tree()
     assert exp.fit_set.currentText() == 'Joint: A + B2'
     assert exp._joint['modes'] == {'B2': {pn[1]: 'own'}}
+    # a value for a parameter not fitted in B reaches the problem and the
+    # session, and follows a rename
+    exp.sets[1]['name'] = 'B'
+    exp.refresh_tree()
+    choose_joint(exp, {'B': {pn[0]: 'fixed'}}, {'B': {pn[0]: 42.0}})
+    problem, *_ = exp._problem(exp.fit_report, 'chi2')
+    assert problem.names == [pn[0], pn[1]]
+    assert problem.part_x(problem.x0() * 0 + problem.lo, 1)[0] == 42.0
+    state = exp.session_state(str(tmp_path))
+    assert state['fit']['joint']['values'] == {'B': {pn[0]: 42.0}}
+    exp.restore_state(state, str(tmp_path))
+    exp._rename_fit_set('B', 'B3')
+    assert exp._joint['values'] == {'B3': {pn[0]: 42.0}}
+    exp.sets[1]['name'] = 'B3'
+    exp.refresh_tree()
     # a dataset gone: no joint fit left
     del exp.sets[1]
     exp.refresh_tree()
@@ -246,7 +342,7 @@ def test_windows_have_a_tab_per_dataset():
     view = win.views[1]
     assert view.stack.layers[1].MSLD_rho == pytest.approx(3e-6)
     # B's thickness is not fitted: the value the fit started from
-    assert view.stack.layers[1].thickness == pytest.approx(problem.fixed[0])
+    assert view.stack.layers[1].thickness == pytest.approx(problem.fixed[1, 0])
     assert win.params.topLevelItem(2).text(4) == 'B'
     sent = []
     win.sendRequested.connect(lambda *a: sent.append(a))
@@ -266,8 +362,19 @@ def test_windows_have_a_tab_per_dataset():
     assert not dw.part_box.isHidden()
     dw.finish(res)
     dw.tabs.setCurrentIndex(4)
-    page = dw.part_pages[1][0]
+    page, pred, prof, view, _ = dw.part_pages[1]
     assert page.currentIndex() == 1, page.widget(0).text()
+    # one plot at a time: Reflectance first, then SLD, then SA if any
+    plots = prof.parentWidget()
+    assert view.currentText() == 'Reflectance' and \
+        plots.currentWidget() is pred and pred.which == 'R'
+    view.setCurrentText('SLD')
+    assert plots.currentWidget() is prof
+    sa = view.model().item(2).isEnabled()
+    assert sa == pred.has_asymmetry()
+    if sa:
+        view.setCurrentText('SA')
+        assert plots.currentWidget() is pred and pred.which == 'SA'
     got = []
     dw.boundsRequested.connect(lambda *a: got.append(a))
     dw.part_box.setCurrentIndex(1)

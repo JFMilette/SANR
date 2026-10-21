@@ -35,8 +35,10 @@ RESOLUTION) and the quadrature scheme, every point is averaged over its own
 dQ (Stack.data_sigma; the dQ table where it has none): the model is then ONE
 call on every channel's points one after the other, a Q repeated in two
 channels or two stitched angles taken with each one's dQ.  With the
-'licorne' scheme the 'data' mode takes sigma_Q from the dQ table on the
-grid, like the other modes.
+'licorne' scheme (any of its modes 1-3) each grid is convolved with the dQ
+of its own points: those of the channel whose finite Q are the grid (the
+dQ table where a point has none, or where no channel's Q are the grid,
+e.g. a grid shared by channels whose dQ differ: the first one's is used).
 
 COST -- mean over all points of the squared residual, plus, for parameters
 with a prior from other measurements (fit.priors), -2 (log p - its maximum)
@@ -53,6 +55,40 @@ value sits at its expected one); residuals() never includes it:
 DREAM (fit.dream.dream_fit) uses the 'chi2' residuals as a Gaussian
 likelihood.
 
+TARGET -- what the residuals compare (DE, L-BFGS-B and multistart; DREAM
+always samples the channels):
+  'channels' : every channel's R (the default).
+  'sum'      : (R+ + R-)/2 of the channels named 'R+' and 'R-' (else 'R++'
+               and 'R--'), error sqrt(dR+^2 + dR-^2)/2.  Its magnetic part
+               is only of second order in M (the first-order cross term
+               cancels): nearly the nuclear reflectivity, for the NSLD of
+               datasets whose magnetism differs.  Nearly only: a 20 % MSLD
+               error costs ~2 % of what it costs the channels at MSLD /
+               NSLD ~ 0.06, ~20 % at 0.25 (tests/test_fit_target.py), so
+               the MSLD should still sit near its value.
+  'asym'     : the spin asymmetry SA = (R+ - R-)/(R+ + R-) of the same pair,
+               error 2 sqrt((R- dR+)^2 + (R+ dR-)^2)/(R+ + R-)^2; first
+               order in M, and the scale cancels in it (up to the
+               background): for the MSLD.  With the 'log' cost its residual
+               is SA_model - SA (SA can be negative: no log).
+The two channels are combined at their common Q points (row by row when
+their fitted points are the same, else matched to 1e-6 Q), only where
+both are fitted; the model is computed as for 'channels' and combined the
+same way.  The dataset's other channels (spin-flip R+-, R-+) are still
+fitted one by one, as with 'channels' (`others`); a dataset without the
+pair cannot be fitted.  Fitting 'sum' and
+'asym' together would hold the same information as the two channels:
+each alone is a deliberate choice of part of it.
+
+THICKNESS SPREAD -- with the stack's thickness_spread_nodes 'auto', the
+node count (model.stack THICKNESS SPREAD) would change with sigma_t and
+the cost jump where it does: the fit's copy of the stack gets it frozen
+once, from the upper bound of sigma_t (its value when not fitted) and the
+largest Q computed (+ 3 sigma_Q and the largest |Q shift| allowed); the
+caller's stack keeps 'auto'.  A message says how many nodes, i.e. how many
+times slower each evaluation is.  fit.joint gives every dataset the
+largest count.
+
 A FitProblem holds a copy of the stack and plain arrays: it is pickled to
 the worker processes of either method.
 """
@@ -63,9 +99,14 @@ import warnings
 import numpy as np
 
 from fit.priors import prior_terms
+from model.stack import spread_nodes as gauss_hermite_nodes
 
 
 COSTS = ('chi2', 'log')
+TARGETS = ('channels', 'sum', 'asym')
+# the (up, down) channels a 'sum' or 'asym' target combines, by preference
+TARGET_PAIRS = (('R+', 'R-'), ('R++', 'R--'))
+TARGET_NAMES = {'sum': '(R+ + R−)/2', 'asym': 'the spin asymmetry'}
 
 
 def parameter_names(stack, params):
@@ -100,9 +141,12 @@ class FitProblem:
     normalised free parameters."""
 
     def __init__(self, stack, data, cost='chi2', qmin=-np.inf, qmax=np.inf,
-                 grid=None, error_floor=0.0):
+                 grid=None, error_floor=0.0, target='channels'):
         if cost not in COSTS:
             raise ValueError('unknown cost %r' % cost)
+        if target not in TARGETS:
+            raise ValueError('unknown target %r' % target)
+        self.target = target
         # the caller's stack may be edited while the fit runs
         self.stack = copy.deepcopy(stack)
         self.cost = cost
@@ -142,6 +186,7 @@ class FitProblem:
         Qs = []
         dQs = []                           # each channel's dQ, NaN if none
         full = []                          # (finite Q, fitted ones among them)
+        full_dq = []                       # dQ of each channel's finite Q
         for k, e in enumerate(data):
             Q, R, dR = (np.asarray(e[c], dtype=float) for c in ('Q', 'R', 'dR'))
             dQ = np.asarray(e['dQ'], dtype=float) if e.get('dQ') is not None \
@@ -169,6 +214,7 @@ class FitProblem:
                 dQs.append(dQ[ok])
                 fin = np.isfinite(Q)
                 full.append((Q[fin], np.flatnonzero(ok[fin])))
+                full_dq.append(dQ[fin])
         if not self.channels:
             raise ValueError('no data points to fit in the chosen Q range')
         self.Q, inv = np.unique(np.concatenate(Qs), return_inverse=True)
@@ -177,6 +223,21 @@ class FitProblem:
         self.channels = [(n, idx, R, s) for (n, R, s), idx
                          in zip(self.channels, np.split(inv, splits))]
         self.npoints = sum(len(ch[2]) for ch in self.channels)
+        # 'sum' / 'asym': (up k, down k, their points, value, error or
+        # None), and the channels fitted on their own besides
+        self.combined = None
+        self.others = list(range(len(self.channels)))
+        if target != 'channels':
+            self.combined = self._combine_data()
+            self.others = [k for k in self.others
+                           if k not in self.combined[:2]]
+            self.npoints = len(self.combined[4]) + sum(
+                len(self.channels[k][2]) for k in self.others)
+            if any(p[:2] == (None, 'scale') for p in self.params) and \
+                    target == 'asym':
+                warnings.warn('the spin asymmetry hardly depends on the '
+                              'scale (only through the background): fix it',
+                              stacklevel=2)
         self.grid = None if grid is None else np.asarray(grid, dtype=float)
         self.groups = self._groups(Qs, full)
         # sigma_Q of each group's points, None: the resolution's own
@@ -184,6 +245,11 @@ class FitProblem:
         if self._pointwise():
             self.sigmas = [self.stack.data_sigma(self.groups[0][0],
                                                  np.concatenate(dQs))]
+        elif self._licorne_data():
+            self.sigmas = [self._grid_sigma(g, members, full, full_dq)
+                           for g, members in self.groups]
+
+        self.spread_nodes = self._freeze_spread_nodes()
 
         # said once here; the cost function itself never warns
         m = self.stack.fronting_direction()
@@ -198,6 +264,84 @@ class FitProblem:
                     'transverse to its magnetisation; that part precesses '
                     'and is averaged out, only the projection on M_f is '
                     'fitted' % ', '.join(lost), stacklevel=2)
+
+    def _bound(self, attr, which):
+        """The stack parameter attr's fit bound (which: 3 min, 4 max) if it
+        is varied, else None."""
+        for p in self.params:
+            if p[:2] == (None, attr):
+                return p[which]
+        return None
+
+    def _freeze_spread_nodes(self):
+        """The thickness spread's node count, frozen on the fit's copy of
+        the stack when it is 'auto' (see THICKNESS SPREAD); None without a
+        spread."""
+        st = self.stack
+        hi = self._bound('thickness_spread', 4)
+        s = st.thickness_spread if hi is None else hi
+        if not s > 0:
+            return None
+        shift = [abs(st.q_shift)] + [abs(b) for b in (
+            self._bound('q_shift', 3), self._bound('q_shift', 4))
+            if b is not None]
+        qmax = sigma = 0.0
+        for (Q, _), sg in zip(self.groups, self.sigmas):
+            qmax = max(qmax, float(np.max(np.abs(Q))))
+            sg = st.resolution_sigma(Q) if sg is None else sg
+            sigma = max(sigma, float(np.max(sg, initial=0.0)))
+        self.spread_qmax = qmax + max(shift) + 3 * sigma
+        n = st.thickness_spread_nodes = st.spread_count(self.spread_qmax, s)
+        # a spread too wide for its upper bound: refused now, not in the
+        # middle of the fit
+        gauss_hermite_nodes(n, s)
+        warnings.warn('thickness spread: %d nodes, each evaluation about '
+                      '%d× slower' % (n, n), stacklevel=3)
+        return n
+
+    def _combine_data(self):
+        """The pair of a 'sum' / 'asym' target and its data (see TARGET)."""
+        names = [ch[0] for ch in self.channels]
+        pair = next((p for p in TARGET_PAIRS if all(n in names for n in p)),
+                    None)
+        if pair is None:
+            raise ValueError('fitting %s needs both R+ and R− (or R++ and '
+                             'R−−) fitted; the channels are %s'
+                             % (TARGET_NAMES[self.target], ', '.join(names)))
+        a, b = (names.index(n) for n in pair)
+        qa, qb = self.Q[self.channels[a][1]], self.Q[self.channels[b][1]]
+        if len(qa) == len(qb) and np.array_equal(qa, qb):
+            ia = ib = np.arange(len(qa))
+        else:
+            # each up point with the nearest down point, if within 1e-6 Q
+            j = np.abs(qa[:, None] - qb[None, :]).argmin(axis=1)
+            near = np.abs(qb[j] - qa) <= 1e-6 * np.abs(qa)
+            ia, ib = np.flatnonzero(near), j[near]
+            ib, first = np.unique(ib, return_index=True)
+            ia = ia[first]
+            n = len(qa) + len(qb) - 2 * len(ia)
+            if n:
+                warnings.warn('%s and %s: %d point(s) without a partner at '
+                              'the same Q are left out'
+                              % (pair[0], pair[1], n), stacklevel=3)
+        Ra, Rb = self.channels[a][2][ia], self.channels[b][2][ib]
+        sa, sb = self.channels[a][3], self.channels[b][3]
+        T = Ra + Rb
+        ok = T > 0
+        if self.target == 'sum':
+            v = T / 2
+            s = None if sa is None else np.hypot(sa[ia], sb[ib]) / 2
+        else:
+            with np.errstate(divide='ignore', invalid='ignore'):
+                v = (Ra - Rb) / T
+                s = None if sa is None else \
+                    2 * np.hypot(Rb * sa[ia], Ra * sb[ib]) / T**2
+        if s is not None:
+            ok &= np.isfinite(s) & (s > 0)
+        if not ok.any():
+            raise ValueError('no Q point where %s and %s can be combined'
+                             % pair)
+        return (a, b, ia[ok], ib[ok], v[ok], None if s is None else s[ok])
 
     def _groups(self, Qs, full):
         """[(Q grid, [(channel k, indices of its points in the grid or None,
@@ -249,6 +393,23 @@ class FitProblem:
                           'own', stacklevel=3)
         return list(grids.values())
 
+    def _licorne_data(self):
+        """The 'licorne' scheme with the data's dQ (see RESOLUTION)."""
+        res = self.stack.resolution
+        return bool(res.get('enabled')) and res.get('mode') == 'data' and \
+            res.get('scheme') == 'licorne'
+
+    def _grid_sigma(self, g, members, full, full_dq):
+        """sigma_Q at the points of Licorne grid g: the dQ of the first
+        member channel whose finite Q are g, None (the dQ table) if none
+        is."""
+        for k, *_ in members:
+            q, dq = full[k][0], full_dq[k]
+            order = np.argsort(q, kind='stable')
+            if np.array_equal(q[order], g):
+                return self.stack.data_sigma(g, dq[order])
+        return None
+
     def _pointwise(self):
         """Each point averaged over its own dQ (see RESOLUTION)."""
         res = self.stack.resolution
@@ -291,8 +452,11 @@ class FitProblem:
         return out
 
     def residuals(self, x):
-        out = []
-        for m, (_, _, R, sigma) in zip(self.model(x), self.channels):
+        model = self.model(x)
+        out = [] if self.combined is None else \
+            [self._combined_residuals(model)]
+        for k in self.others:
+            m, (_, _, R, sigma) = model[k], self.channels[k]
             if self.cost == 'log':
                 with np.errstate(divide='ignore', invalid='ignore'):
                     out.append(np.log10(m) - np.log10(R))
@@ -302,6 +466,19 @@ class FitProblem:
         # a model that cannot be evaluated (NaN, R <= 0 in log) is heavily
         # penalised rather than aborting the fit
         return np.where(np.isfinite(r), r, 1e3)
+
+    def _combined_residuals(self, model):
+        """Residuals of a 'sum' / 'asym' target (see TARGET)."""
+        a, b, ia, ib, v, s = self.combined
+        ma, mb = model[a][ia], model[b][ib]
+        with np.errstate(divide='ignore', invalid='ignore'):
+            if self.target == 'sum':
+                m = (ma + mb) / 2
+                if self.cost == 'log':
+                    return np.log10(m) - np.log10(v)
+            else:
+                m = (ma - mb) / (ma + mb)
+            return m - v if s is None else (m - v) / s
 
     def prior_penalty(self, x):
         """sum of -2 (log p - its maximum) over the parameters' priors."""

@@ -223,6 +223,49 @@ def test_fit_problem_grids():
         assert len(FitProblem(st, data).groups) == 1
 
 
+
+def test_fit_problem_data_dq():
+    """'data' mode with the 'licorne' scheme: each grid is convolved with
+    its own points' dQ, not the dQ table; in a joint fit each dataset with
+    its own; a point without dQ takes the table."""
+    import copy
+    from fit.joint import JointProblem
+    from fit.problem import FitProblem
+    st = fixture1_stack()
+    st.layers[2].fit_entry('thickness')['vary'] = True
+    table = st.resolution_sigma(Q1)
+    st.resolution.update(mode='data', data_q=Q1, data_dq=table,
+                         licorne_fun=3)
+    one = np.ones_like(Q1)
+
+    def data(f):
+        return [dict(Q=Q1, R=one, dR=0.1 * one, dQ=f * table, P0=X, P=None,
+                     name='R+'),
+                dict(Q=Q1, R=one, dR=0.1 * one, dQ=f * table, P0=-X,
+                     P=None, name='R-')]
+    a, b = FitProblem(st, data(0.5)), FitProblem(st, data(2.0))
+    assert np.allclose(a.sigmas[0], 0.5 * table)
+    assert np.allclose(b.sigmas[0], 2.0 * table)
+    x = [p[2] for p in a.params]
+    ref = st.reflectivities(Q1, [(X, None), (-X, None)], sigma=0.5 * table)
+    for m, r in zip(a.model(x), ref.T):
+        assert np.allclose(m, r, rtol=1e-12)
+    assert not np.allclose(a.model(x)[0], b.model(x)[0])
+    joint = JointProblem([('A', a), ('B', b)])
+    assert [np.allclose(p.sigmas[0], f * table)
+            for p, f in zip(joint.parts, (0.5, 2.0))] == [True, True]
+    # missing dQ: the table there
+    d = data(0.5)
+    for c in d:
+        c['dQ'] = copy.copy(c['dQ'])
+        c['dQ'][:10] = np.nan
+    s = FitProblem(st, d).sigmas[0]
+    assert np.allclose(s[:10], table[:10]) and \
+        np.allclose(s[10:], 0.5 * table[10:])
+    # the 'tof' mode is untouched
+    st.resolution['mode'] = 'tof'
+    assert FitProblem(st, data(0.5)).sigmas == [None]
+
 def test_fit_window_keeps_full_grid():
     """Licorne computes the model on every point of q.dat and only then
     takes the fitted ones (fit_reflection.m): the Q range and the points

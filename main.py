@@ -16,10 +16,15 @@ reflectivity plot (line_colours.py), remembered the same way.
 The mouse wheel never changes a spin box or a combo box (NoWheelOnInputs): it
 scrolls the panel under the pointer, so a value cannot be changed by accident.
 
+Each fit (DE, L-BFGS-B, multistart) and DREAM run opens a tab of its own
+after the three tools, named short (fit.panel.FitPanel._tab_name); older ones
+stay until their × closes them (FitPanel.close_page), not while they run.
+
 File -> Import Licorne session reads a saved Licorne session folder
 (model.licorne_io.load_licorne_session) into the same form: its rexp<k>.dat
 channels as one dataset, Licorne's rtheory<k>.dat as a second one drawn as
-lines.
+lines.  File -> Import profile reads a layer table (model.profile_io) as the
+model's layers, the other settings kept.
 """
 
 import json
@@ -34,6 +39,7 @@ import line_colours
 import style
 from model.licorne_io import load_licorne_session
 from model.polarisation import default_vectors
+from model.profile_io import load_profile
 from tabs import ExperimentalTab, SimulationTab
 from tabs.experimental import file_ref
 from tabs.geometry import GeometryTab
@@ -63,6 +69,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.experimental, 'Experimental data')
         self.geometry = GeometryTab(self.simulation)
         self.tabs.addTab(self.geometry, 'Geometry')
+        # fits and DREAM runs open as tabs after these, with a close button
+        self.tabs.setTabsClosable(True)
+        for i in range(self.tabs.count()):
+            for side in (QtWidgets.QTabBar.ButtonPosition.LeftSide,
+                         QtWidgets.QTabBar.ButtonPosition.RightSide):
+                self.tabs.tabBar().setTabButton(i, side, None)
+        self.experimental.page_tabs = self.tabs
+        self.tabs.tabCloseRequested.connect(
+            lambda i: self.experimental.close_page(self.tabs.widget(i)))
 
         menu = self.menuBar().addMenu('&File')
         menu.addAction('&Open session…', QtGui.QKeySequence.StandardKey.Open,
@@ -72,6 +87,7 @@ class MainWindow(QtWidgets.QMainWindow):
         menu.addSeparator()
         menu.addAction('&Import experimental data…', self.import_data)
         menu.addAction('Import &Licorne session…', self.import_licorne)
+        menu.addAction('Import &profile…', self.import_profile)
 
         menu = self.menuBar().addMenu('&Settings')
         self.dark_mode = menu.addAction('&Dark mode')
@@ -162,6 +178,33 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(
                 self, 'Import Licorne session',
                 'Imported, with these notes:\n\n' + '\n\n'.join(notes))
+
+    def import_profile(self):
+        """Replace the model's layers with a profile table
+        (model.profile_io.load_profile); every other setting of the
+        Simulation tab stays."""
+        if self.experimental.busy():
+            QtWidgets.QMessageBox.information(
+                self, 'Import profile',
+                'Stop the running fit or sampling first.')
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, 'Import profile', '',
+            'Profiles (*.dat *.txt);;All files (*)', options=DIALOG_OPTIONS)
+        if not path:
+            return
+        try:
+            d = self.simulation.session_state()
+            d['layers'] = [dict(vars(l)) for l in load_profile(path)]
+            d['ties'] = []
+            d['simulation']['selected_layer'] = 1
+            self.simulation.restore_state(d)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self, 'Import profile',
+                'Could not import %s:\n%s' % (path, exc))
+            return
+        self.tabs.setCurrentWidget(self.simulation)
 
     def _licorne_state(self, lic, folder):
         """Session dict of a load_licorne_session result; the tabs' display

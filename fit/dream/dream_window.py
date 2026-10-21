@@ -17,16 +17,24 @@ max R-hat), Stop, and its results, all drawn with pyqtgraph:
               thinned chains, at most every CORNER_EVERY s while shown) once
               the adaptation phase is over; redrawn from the full chains at
               the end
-then one tab per fitted dataset (several in a joint fit, fit.joint), with
-  Predictive  data with the 68 / 95 % bands and median of the model R of
-              200 posterior draws, and the spin asymmetry if R+ / R- (or
-              R++ / R--) share their Q points
-  Profile     68 / 95 % bands and median of the slab NSLD and in-plane
-              MSLD of 200 draws, below it
+then one tab per fitted dataset (several in a joint fit, fit.joint),
+showing one plot at a time, chosen in its combo (PART_VIEWS):
+  SLD          68 / 95 % bands and median of the slab NSLD and in-plane
+               MSLD of 200 posterior draws
+  Reflectance  data with the 68 / 95 % bands and median of the model R of
+               200 draws (the default)
+  SA           the same for the spin asymmetry, when R+ / R- (or R++ / R--)
+               share their Q points (the entry is greyed out otherwise)
+and, over the bands of all three, each chain's best kept state
+(fit.dream.dream_fit.chain_curves) as a thin line in its Traces colour
+(the SLD: NSLD solid, MSLD dashed), shown with the tab's "chains" box,
+whose tooltip gives each chain's chi^2/N: chains in other minima show
+where in Q or z they differ.
 
 Values are shown in the Simulation tab's units (SLDs in 1e-6 A^-2, angles
 in degrees).  A dataset's tab is computed when first shown.
-"Load MAP into model" sends the best state visited to the Simulation tab;
+"Load into model" sends the state chosen beside it to the Simulation tab:
+the MAP (the best state visited) or one chain's best kept state;
 "Apply ±σ to bounds" sets Min / Max of every sampled parameter there to
 median -/+ k sigma (16 / 84 % widths); in a joint fit both write the
 values as the dataset chosen beside them sees them.  "Save chains..."
@@ -41,13 +49,15 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from fit.dream.dream_fit import (FLOOR_NAME, SIGMA_NAME, chains_split,
-                         format_summary,
+from fit.dream.dream_fit import (FLOOR_NAME, SIGMA_NAME, chain_best,
+                         chain_curves,
+                         chains_split, format_summary,
                          posterior_warnings, predictive_bands, profile_bands,
                          sample, save_result, summary_table)
 import line_colours
 import style
-from tabs.simulation import PARAM_DISPLAY, PROFILE_QUANTITIES, shown_names
+from tabs.simulation import (PARAM_DISPLAY, PROFILE_QUANTITIES, Crosshair,
+                             fmt, shown_names)
 
 # where saved chains go, with the sessions (sessions/ of the repo)
 SESSIONS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
@@ -61,11 +71,21 @@ CHAIN_COLOURS = ['#5b9bd5', '#e0a458', '#4fc08d', '#e36fa8', '#b392f0',
                  '#d95f02', '#66a61e', '#e6ab02', '#9aa0a6', '#1b9e77']
 NSLD_COLOUR, MSLD_COLOUR = PROFILE_QUANTITIES[0][2], PROFILE_QUANTITIES[1][2]
 CORRELATION = pg.colormap.get('CET-D1A')
+CHAIN_WIDTH = 1.0                        # px, a chain's curve over the bands
 ADAPT_BRUSH = pg.mkBrush(154, 160, 166, 40)
 # speed for the time left: over the last minute (progress signals are
 # 0.2 s apart); the cost of a generation hardly changes along a run, so a
 # long window only smooths out changes of the machine's load
 RATE_POINTS = 300
+
+
+def chain_pen(j, dash=False):
+    """Pen of chain j's curves: its Traces colour."""
+    return pg.mkPen(CHAIN_COLOURS[j % len(CHAIN_COLOURS)], width=CHAIN_WIDTH,
+                    style=QtCore.Qt.PenStyle.DashLine if dash
+                    else QtCore.Qt.PenStyle.SolidLine)
+# the plots of a dataset's tab, one shown at a time (its combo)
+PART_VIEWS = ['SLD', 'Reflectance', 'SA']
 
 
 def duration(seconds):
@@ -139,6 +159,7 @@ def placeholder(text):
 
 
 # ------------------------------------------------------------ thread ----
+
 class DreamThread(QtCore.QThread):
     """Runs fit.dream.dream_fit.sample off the GUI thread."""
 
@@ -220,7 +241,12 @@ class TracePanel(QtWidgets.QWidget):
         self.combo.setToolTip('Parameter to show (↑ / ↓ to step through)')
         self.combo.setMinimumContentsLength(24)
         self.combo.currentIndexChanged.connect(self._draw)
-        self.info = QtWidgets.QLabel()
+        # wraps rather than widening the window: with log p it lists every
+        # chain's chi^2/N (26 chains: wider than a laptop screen), rewritten
+        # at each live update
+        self.info = QtWidgets.QLabel(wordWrap=True)
+        self.info.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
+                                QtWidgets.QSizePolicy.Policy.Preferred)
         bar = QtWidgets.QHBoxLayout()
         bar.addWidget(QtWidgets.QLabel('Parameter'))
         for step, glyph, tip in ((-1, '◀', 'Previous parameter'),
@@ -405,7 +431,7 @@ class CornerPanel(QtWidgets.QWidget):
         for c in (self.cx, self.cy):
             c.setMinimumContentsLength(16)
             c.currentIndexChanged.connect(self._draw_pair)
-        self.pread = QtWidgets.QLabel()
+        self.pread = QtWidgets.QLabel(wordWrap=True)
         bar = QtWidgets.QHBoxLayout()
         bar.addWidget(QtWidgets.QLabel('X'))
         bar.addWidget(self.cx, 1)
@@ -449,7 +475,7 @@ class CornerPanel(QtWidgets.QWidget):
         split.addWidget(left)
         split.addWidget(right)
         split.setSizes([380, 620])
-        self.note = QtWidgets.QLabel()
+        self.note = QtWidgets.QLabel(wordWrap=True)
         self.note.setProperty('role', 'muted')
         v = QtWidgets.QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -595,9 +621,10 @@ def band(plot, x, lo, hi, colour, alpha, log=False, edges=False):
 class PredictivePanel(QtWidgets.QWidget):
     """Data with, for posterior draws, the 95 % band of replicated data
     (model + measurement noise, light, edged), the 68 / 95 % bands of the
-    model alone (darker) and its median.  Each kind of band can be hidden
-    with its check box; hiding a channel in the legend hides its bands,
-    error bars and median with its points."""
+    model alone (darker) and its median: of the reflectivities, or of the
+    spin asymmetry (set_which).  Each kind of band can be hidden with its
+    check box; hiding a channel in the legend hides its bands, error bars
+    and median with its points."""
 
     KEY = ('Light band with edges: 95 % of replicated data (model + noise '
            'dR).   Darker bands: model 95 % / 68 % (parameter uncertainty).  '
@@ -627,6 +654,9 @@ class PredictivePanel(QtWidgets.QWidget):
         row.addStretch(1)
         row.addWidget(line_colours.button())
         self._bands = None                    # what show_bands drew last
+        self._chains = []                     # chain_curves drawn over them
+        self.show_chains = True               # set_chains
+        self.which = 'R'                      # 'R' or 'SA' (set_which)
         line_colours.notifier().changed.connect(self._line_colours)
         v = QtWidgets.QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -638,8 +668,22 @@ class PredictivePanel(QtWidgets.QWidget):
         toggles them) and, for a band, its check box is ticked."""
         for kind, ch, it in self.items:
             pts = self.points.get(ch)
-            it.setVisible((pts is None or pts.isVisible()) and
-                          (kind == 'data' or self.boxes[kind].isChecked()))
+            on = self.show_chains if kind == 'chains' else \
+                kind == 'data' or self.boxes[kind].isChecked()
+            it.setVisible((pts is None or pts.isVisible()) and on)
+
+    def set_chains(self, on):
+        """Show each chain's curves (chain_curves) or not."""
+        self.show_chains = on
+        self._refresh()
+
+    def _add_chains(self, plot, ch, curves):
+        """Chain j's curve curves[j] (Q, y), under the median."""
+        for c, (Q, y) in zip(self._chains, curves):
+            it = pg.PlotDataItem(Q, y, pen=chain_pen(c['chain']),
+                                 connect='finite')
+            plot.addItem(it)
+            self.items.append(('chains', ch, it))
 
     def _band(self, kind, ch, *args, **kw):
         self.items += [(kind, ch, it) for it in band(*args, **kw)]
@@ -650,19 +694,37 @@ class PredictivePanel(QtWidgets.QWidget):
 
     def _line_colours(self):
         if self._bands is not None:
-            self.show_bands(self._bands)
+            self._draw()
 
-    def show_bands(self, b):
-        self._bands = b
+    def set_which(self, which):
+        """Draw the reflectivities ('R') or the spin asymmetry ('SA')."""
+        self.which = which
+        if self._bands is not None:
+            self._draw()
+
+    def has_asymmetry(self):
+        return self._bands is not None and \
+            self._bands['asymmetry'] is not None
+
+    def show_bands(self, b, chains=()):
+        """predictive_bands b, and chain_curves `chains` over them."""
+        self._bands, self._chains = b, list(chains)
+        self._draw()
+
+    def _draw(self):
+        b = self._bands
         view = self.view
         view.clear()
         self.items, self.points = [], {}
         view.addLabel(self.KEY, row=0, col=0, color=style.MUTED, size='9pt')
-        p = plot_item('', 'R')
+        if self.which == 'SA' and b['asymmetry'] is not None:
+            self._show_asymmetry(b['asymmetry'])
+            return
+        p = plot_item('Q (Å⁻¹)', 'R')
         p.setLogMode(y=True)
         p.addLegend(offset=(-10, 10))
         view.addItem(p, 1, 0)
-        for c in b['channels']:
+        for i, c in enumerate(b['channels']):
             col = line_colours.get(c['name'][1:])     # 'R++' -> '++'
             Q, R, dR = c['Q'], c['R'], c['dR']
             lo95, lo68, med, hi68, hi95 = np.maximum(c['bands'], 1e-300)
@@ -690,25 +752,23 @@ class PredictivePanel(QtWidgets.QWidget):
             p.addItem(pts)
             pts.visibleChanged.connect(self._refresh)
             self.points[name] = pts
+            # a log axis cannot draw R <= 0
+            self._add_chains(p, name, [(Q, np.where(ch['R'][i] > 0,
+                                                    ch['R'][i], np.nan))
+                                       for ch in self._chains])
             self._add(p, name, pg.PlotDataItem(Q, med,
                                                pen=pg.mkPen(col, width=1.5)))
-        a = b['asymmetry']
-        if a is None:
-            p.setLabel('bottom', 'Q (Å⁻¹)')
-            self._refresh()
-            return
+        self._refresh()
+
+    def _show_asymmetry(self, a):
         s = plot_item('Q (Å⁻¹)', 'spin asymmetry')
-        s.setXLink(p)
-        view.addItem(s, 2, 0)
-        view.ci.layout.setRowStretchFactor(1, 3)
-        view.ci.layout.setRowStretchFactor(2, 2)
+        self.view.addItem(s, 1, 0)
         lo95, lo68, med, hi68, hi95 = a['bands']
         plo, phi = a['predictive'][0], a['predictive'][4]
         self._band('predictive', None, s, a['Q'], plo, phi, '#4c8dff', A_PRED,
                    edges=True)
         self._band('model', None, s, a['Q'], lo95, hi95, '#4c8dff', A_95)
         self._band('model', None, s, a['Q'], lo68, hi68, '#4c8dff', A_68)
-        self._refresh()
         ok = np.isfinite(a['A'])
         s.addItem(pg.ErrorBarItem(x=a['Q'][ok], y=a['A'][ok],
                                   height=2 * a['dA'][ok], beam=0,
@@ -716,6 +776,8 @@ class PredictivePanel(QtWidgets.QWidget):
         s.addItem(pg.PlotDataItem(a['Q'][ok], a['A'][ok], pen=None,
                                   symbol='o', symbolSize=4, symbolPen=None,
                                   symbolBrush='#9aa0a6'))
+        self._add_chains(s, None, [(a['Q'], c['A']) for c in self._chains])
+        self._refresh()
         s.addItem(pg.PlotDataItem(a['Q'], med, pen=pg.mkPen('#4c8dff',
                                                             width=1.5)))
         # noisy points at small R have huge asymmetry errors: frame the
@@ -730,21 +792,61 @@ class PredictivePanel(QtWidgets.QWidget):
 
 
 class ProfilePanel(pg.GraphicsLayoutWidget):
-    """68 / 95 % bands and median of the slab SLDs of posterior draws."""
+    """68 / 95 % bands and median of the slab SLDs of posterior draws, with
+    a cursor reading the median and 68 % band of each at the mouse's z."""
 
-    def show_bands(self, z, nuc, mag):
-        self.clear()
-        p = plot_item('depth z (Å)', 'SLD (10⁻⁶ Å⁻²)')
-        p.addLegend(offset=(-10, 10))
-        self.addItem(p)
-        for bands, col, name in ((nuc, NSLD_COLOUR, 'NSLD'),
-                                 (mag, MSLD_COLOUR,
-                                  'MSLD in plane (ρ cos θ)')):
-            lo95, lo68, med, hi68, hi95 = bands / 1e-6
+    def __init__(self):
+        super().__init__()
+        self.plot = plot_item('depth z (Å)', 'SLD (10⁻⁶ Å⁻²)')
+        self.plot.addLegend(offset=(-10, 10))
+        self.addItem(self.plot)
+        self._bands = None             # z, [(name, colour, bands)] drawn
+        self._chain_items = []         # the chains' curves (chain_curves)
+        self.show_chains = True
+        self.cursor = Crosshair(self, self.plot, self._readout)
+
+    def set_chains(self, on):
+        """Show each chain's profile (chain_curves) or not."""
+        self.show_chains = on
+        for it in self._chain_items:
+            it.setVisible(on)
+
+    def show_bands(self, z, nuc, mag, chains=()):
+        """profile_bands (z, nuc, mag), and chain_curves `chains` on the
+        same z over them: NSLD solid, MSLD dashed."""
+        p = self.plot
+        p.clear()                      # the cursor's items stay
+        self._chain_items = []
+        for c in chains:
+            for y, dash in ((c['nuc'], False), (c['mag'], True)):
+                it = pg.PlotDataItem(z, y / 1e-6,
+                                     pen=chain_pen(c['chain'], dash))
+                it.setVisible(self.show_chains)
+                p.addItem(it)
+                self._chain_items.append(it)
+        self._bands = z, [('NSLD', NSLD_COLOUR, nuc / 1e-6),
+                          ('MSLD in plane (ρ cos θ)', MSLD_COLOUR,
+                           mag / 1e-6)]
+        for name, col, bands in self._bands[1]:
+            lo95, lo68, med, hi68, hi95 = bands
             band(p, z, lo95, hi95, col, A_95)
             band(p, z, lo68, hi68, col, A_68)
             p.addItem(pg.PlotDataItem(z, med, pen=pg.mkPen(col, width=1.5),
                                       name=name))
+        self.cursor.refresh()
+
+    def _readout(self, x):
+        """Cursor text: z, then each median [68 % band]."""
+        if self._bands is None:
+            return None, []
+        z, curves = self._bands
+        rows = []
+        for name, col, bands in curves:
+            lo, med, hi = (np.interp(x, z, b, left=np.nan, right=np.nan)
+                           for b in bands[1:4])
+            rows.append((name, '%s  [%s, %s]' % (fmt(med), fmt(lo), fmt(hi)),
+                         col, med, self.plot.vb))
+        return 'z = %.4g Å' % x, rows
 
 
 # ------------------------------------------------------------ window ----
@@ -752,8 +854,9 @@ class DreamWindow(QtWidgets.QWidget):
     """One DREAM run: progress while it samples, its results after."""
 
     stopRequested = QtCore.pyqtSignal()
-    # MAP state x, dataset whose values are sent
-    sendRequested = QtCore.pyqtSignal(object, int)
+    # state x, dataset whose values are sent, what it is ('MAP',
+    # 'chain 3')
+    sendRequested = QtCore.pyqtSignal(object, int, str)
     boundsRequested = QtCore.pyqtSignal(object, object, int)   # min, max
     continueRequested = QtCore.pyqtSignal()
 
@@ -770,7 +873,7 @@ class DreamWindow(QtWidgets.QWidget):
 
         self.header = QtWidgets.QLabel(wordWrap=True)
         self.bar = QtWidgets.QProgressBar()
-        self.status = QtWidgets.QLabel()
+        self.status = QtWidgets.QLabel(wordWrap=True)
         self.btn_stop = QtWidgets.QPushButton('Stop')
         self.btn_stop.setToolTip('Stop and keep the generations done so far')
         self.btn_stop.clicked.connect(self.stopRequested)
@@ -798,19 +901,25 @@ class DreamWindow(QtWidgets.QWidget):
         # 'Corner', then each dataset's (start), drawn when first shown
         self.pages = {'Corner': self._page(self.corner)}
         self.tabs.addTab(self.pages['Corner'], 'Corner')
-        self.part_pages = []           # (page, PredictivePanel, ProfilePanel)
+        # (page, PredictivePanel, ProfilePanel, plot combo, chains box)
+        self.part_pages = []
         self._drawn = set()
         self.tabs.currentChanged.connect(self._draw_tab)
 
         self.btn_save = QtWidgets.QPushButton('Save chains…')
         self.btn_save.clicked.connect(self._save)
-        self.btn_map = QtWidgets.QPushButton('Load MAP into model')
-        self.btn_map.setToolTip('Send the best state visited to the '
+        # what "Load into model" sends: the MAP, or a chain's best kept
+        # state (chain_best), set by finish
+        self.send_from = QtWidgets.QComboBox()
+        self.send_from.setToolTip(
+            'MAP: the best state visited by any chain.  Chain k: the best '
+            'state chain k kept (after the discarded half),\nas drawn with '
+            '"chains" on the dataset tabs and in its Traces colour')
+        self._send_states = []          # (label, x) of each entry
+        self.btn_map = QtWidgets.QPushButton('Load into model')
+        self.btn_map.setToolTip('Send the state chosen beside it to the '
                                 'Simulation tab')
-        self.btn_map.clicked.connect(
-            lambda: self.sendRequested.emit(self.result.best()[0],
-                                            max(self.part_box.currentIndex(),
-                                                0)))
+        self.btn_map.clicked.connect(self._send_state)
         self.bounds_k = QtWidgets.QDoubleSpinBox()
         self.bounds_k.setRange(0.1, 10.0)
         self.bounds_k.setSingleStep(0.5)
@@ -828,7 +937,7 @@ class DreamWindow(QtWidgets.QWidget):
         self.btn_bounds.clicked.connect(self._apply_bounds)
         self.part_box = QtWidgets.QComboBox()
         self.part_box.setToolTip('Joint fit: the dataset whose values "Apply '
-                                 '±σ to bounds" and "Load MAP into model" '
+                                 '±σ to bounds" and "Load into model" '
                                  'write')
         self.part_label = QtWidgets.QLabel('Dataset')
         bottom = QtWidgets.QHBoxLayout()
@@ -839,6 +948,7 @@ class DreamWindow(QtWidgets.QWidget):
         bottom.addWidget(self.btn_bounds)
         bottom.addSpacing(12)
         bottom.addWidget(self.btn_save)
+        bottom.addWidget(self.send_from)
         bottom.addWidget(self.btn_map)
 
         v = QtWidgets.QVBoxLayout(self)
@@ -863,13 +973,32 @@ class DreamWindow(QtWidgets.QWidget):
         self.part_pages = []
         for name in names:
             pred, prof = PredictivePanel(), ProfilePanel()
-            split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
-            split.addWidget(pred)
-            split.addWidget(prof)
-            split.setStretchFactor(0, 3)
-            split.setStretchFactor(1, 2)
-            page = self._page(split)
-            self.part_pages.append((page, pred, prof))
+            plots = QtWidgets.QStackedWidget()
+            plots.addWidget(pred)
+            plots.addWidget(prof)
+            view = QtWidgets.QComboBox()
+            view.addItems(PART_VIEWS)
+            view.setCurrentIndex(PART_VIEWS.index('Reflectance'))
+            view.currentTextChanged.connect(
+                lambda t, plots=plots, pred=pred, prof=prof: (
+                    plots.setCurrentWidget(prof if t == 'SLD' else pred),
+                    pred.set_which('SA' if t == 'SA' else 'R')))
+            chains = QtWidgets.QCheckBox('chains', checked=True)
+            chains.toggled.connect(
+                lambda on, pred=pred, prof=prof: (pred.set_chains(on),
+                                                  prof.set_chains(on)))
+            row = QtWidgets.QHBoxLayout()
+            row.addWidget(QtWidgets.QLabel('Plot'))
+            row.addWidget(view)
+            row.addWidget(chains)
+            row.addStretch(1)
+            box = QtWidgets.QWidget()
+            v = QtWidgets.QVBoxLayout(box)
+            v.setContentsMargins(0, 0, 0, 0)
+            v.addLayout(row)
+            v.addWidget(plots, 1)
+            page = self._page(box)
+            self.part_pages.append((page, pred, prof, view, chains))
             self.tabs.addTab(page, name)
         self.part_box.clear()
         self.part_box.addItems(names)
@@ -909,9 +1038,9 @@ class DreamWindow(QtWidgets.QWidget):
         for b in (self.btn_save, self.btn_map, self.btn_bounds,
                   self.btn_continue):
             b.setEnabled(False)
+        self.send_from.clear()
+        self._send_states = []
         self._previous = None
-        self.show()
-        self.raise_()
 
     def continue_start(self, n_gen):
         """The shown run goes on up to generation n_gen: back to the
@@ -1048,11 +1177,36 @@ class DreamWindow(QtWidgets.QWidget):
                      '— see Summary</span>'
                      % (BAD, len(warn), '' if len(warn) == 1 else 's'))
         self.converged.setText(text)
+        self._fill_send_from(result)
         self.btn_map.setEnabled(True)
         self.btn_bounds.setEnabled(True)
         for page in self._all_pages():
             page.widget(0).setText('Computing…')
         self._draw_tab(self.tabs.currentIndex())
+
+    def _fill_send_from(self, result):
+        """The MAP, then each chain's best kept state with its chi^2/N."""
+        self._send_states = [('MAP', result.best()[0])]
+        for j, x in enumerate(chain_best(result)):
+            self._send_states.append(('chain %d' % (j + 1), x))
+        self.send_from.clear()
+        for k, (label, x) in enumerate(self._send_states):
+            self.send_from.addItem(
+                '%s — χ²/N %.4g' % (label, self.problem.chi2_per_point(x)))
+            if k:
+                pm = QtGui.QPixmap(10, 10)
+                pm.fill(QtGui.QColor(CHAIN_COLOURS[(k - 1)
+                                                   % len(CHAIN_COLOURS)]))
+                self.send_from.setItemIcon(k, QtGui.QIcon(pm))
+        self.send_from.setCurrentIndex(0)
+
+    def _send_state(self):
+        k = self.send_from.currentIndex()
+        if not 0 <= k < len(self._send_states):
+            return
+        label, x = self._send_states[k]
+        self.sendRequested.emit(np.array(x), max(self.part_box.currentIndex(),
+                                                 0), label)
 
     def _chain_chi2(self, X, logp):
         """Each chain's chi^2/N at states X (N, d) for the trace page."""
@@ -1086,11 +1240,28 @@ class DreamWindow(QtWidgets.QWidget):
                 self.corner.set_result(self.result, self.infos)
             else:
                 k = [p for p, *_ in self.part_pages].index(page)
-                _, pred, prof = self.part_pages[k]
+                _, pred, prof, view, box = self.part_pages[k]
+                z, nuc, mag = profile_bands(self.result, self.problem,
+                                            part=k)
+                chains = chain_curves(self.result, self.problem, z, part=k)
                 pred.show_bands(predictive_bands(self.result, self.problem,
-                                                 part=k))
-                prof.show_bands(*profile_bands(self.result, self.problem,
-                                               part=k))
+                                                 part=k), chains)
+                prof.show_bands(z, nuc, mag, chains)
+                box.setToolTip(
+                    'Each chain\'s best kept state over the bands, in its '
+                    'Traces colour (SLD: NSLD solid, MSLD dashed):<br>'
+                    + '<br>'.join(
+                        '<span style="color:%s">■</span> chain %d: χ²/N %.4g'
+                        % (CHAIN_COLOURS[c['chain'] % len(CHAIN_COLOURS)],
+                           c['chain'] + 1, c['chi2']) for c in chains))
+                # SA only when the dataset has an asymmetry
+                sa = view.model().item(PART_VIEWS.index('SA'))
+                sa.setEnabled(pred.has_asymmetry())
+                sa.setToolTip('' if pred.has_asymmetry() else
+                              'Needs R+ / R- (or R++ / R--) on the same Q '
+                              'points')
+                if view.currentText() == 'SA' and not pred.has_asymmetry():
+                    view.setCurrentText('Reflectance')
         except Exception as exc:
             page.widget(0).setText('Cannot draw: %s' % exc)
             return
