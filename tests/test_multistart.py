@@ -238,3 +238,88 @@ def test_de_progress(monkeypatch):
     one = [i['evals'] for i in de if i['step'] == 1]
     assert one[-1] == de[0]['size']
     assert 'polish' in phases
+
+
+def test_de_without_polish():
+    """de_options polish=False: the short DE ends without a polish."""
+    from test_dream_fit import small_problem
+    seen = []
+    run_multistart(small_problem().fit, n_starts=1, method='de', seed=0,
+                   de_options=dict(maxiter=3, init='sobol', polish=False),
+                   progress=seen.append)
+    assert 'polish' not in [i['phase'] for i in seen]
+
+
+def test_least_squares(monkeypatch):
+    """'lsq': least squares on the residuals, whose sum of squares is the
+    cost (priors included), ends in the same minimum as L-BFGS-B, from
+    worker processes too; its iterations are reported and capped."""
+    import copy
+    import fit.multistart as ms
+    from fit.de.de_fit import lsq_residuals
+    from fit.priors import Prior
+    from test_dream_fit import small_problem
+    fp = small_problem().fit
+    best = run_multistart(fp, n_starts=4, method='lsq', seed=2)
+    lb = run_multistart(fp, n_starts=4, method='lbfgs', seed=2)
+    assert best[0]['chi2'] == pytest.approx(lb[0]['chi2'], abs=1e-6)
+    assert run_multistart(fp, n_starts=3, method='lsq', seed=1,
+                          workers=2)[0]['chi2'] < 1e-6
+    pp = copy.deepcopy(fp)
+    x = pp.to_x(np.full(len(pp.params), 0.5))
+    pp.priors = [Prior(dict(kind='gauss', mu=v * 1.1 + 1e-7, tau=abs(v) / 5
+                            + 1e-7)) for v in x]
+    u = np.full(len(pp.params), 0.4)
+    r = lsq_residuals(pp, u)
+    assert np.sum(r**2) == pytest.approx(pp(u), rel=1e-12)
+    monkeypatch.setattr(ms, 'PROGRESS_EVERY', 0.0)
+    monkeypatch.setattr(ms, 'LSQ_MAXITER', 2)
+    seen = []
+    run_multistart(fp, n_starts=0, method='lsq', progress=seen.append)
+    it = [i for i in seen if i['phase'] == 'lsq']
+    assert [i['step'] for i in it] == [0, 1, 2] and it[0]['maxiter'] == 2
+
+
+def test_global_methods_stop_and_workers():
+    """fit.de.global_fit: every method reaches the minimum, the pooled ones
+    from worker processes too; a stop returns the best point so far."""
+    from fit.de.global_fit import POOLED, run_global
+    from test_dream_fit import small_problem
+    fp = small_problem().fit
+    opts = dict(basinhopping=dict(niter=3), direct=dict(maxiter=30),
+                shgo=dict(n=16), dual_annealing=dict(maxiter=20))
+    for method, o in opts.items():
+        for workers in (1, 2) if method in POOLED else (1,):
+            seen, hist = [], []
+            x, cost, steps, msg = run_global(
+                fp, method, workers=workers, seed=0, status=seen.append,
+                callback=lambda x, c, k: hist.append((c, k)), **o)
+            assert cost < 1e-3 and msg != 'stopped', method
+            assert hist[0][1] == 0 and hist[-1][1] == steps
+            assert all(i['phase'] == 'global' for i in seen)
+    n = [0]
+
+    def cancelled():
+        n[0] += 1
+        return n[0] > 30
+    x, cost, steps, msg = run_global(fp, 'dual_annealing', cancelled=cancelled)
+    assert msg == 'stopped' and np.isfinite(cost)
+
+
+def test_shgo_minima():
+    """SHGO ends with its global and local minima, best first: both basins
+    of TwoMinima; the other methods give none."""
+    from fit.de.global_fit import run_global
+    from fit.multistart import merge
+    p = TwoMinima()
+    got = []
+    x, cost, _, _ = run_global(p, 'shgo', n=64, minima=got.append)
+    (ends,) = got
+    m = merge(p, ends)
+    assert [r['chi2'] for r in m] == sorted(r['chi2'] for r in m)
+    assert m[0]['chi2'] == pytest.approx(cost)
+    assert np.allclose(m[0]['u'], [0.8, 0.7], atol=0.01)
+    assert any(np.allclose(r['u'], [0.2, 0.3], atol=0.01) for r in m[1:])
+    got = []
+    run_global(p, 'direct', maxiter=10, minima=got.append)
+    assert not got

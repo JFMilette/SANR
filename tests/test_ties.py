@@ -203,3 +203,36 @@ def test_simulation_tab_total_tie(monkeypatch):
     assert sim.stack.ties[0]['members'] == [[1, 'thickness'], [2, 'thickness']]
     lab = sim.editor.rows['thickness'][4]
     assert lab.text().endswith('⛓') and '45 Å' in lab.toolTip()
+
+
+def test_simulation_tab_total_tie_value(monkeypatch):
+    """The fixed total's field starts at the members' sum, follows the
+    boxes ticked, cannot go below the sum of all but the deepest, and a
+    value typed in is reached by changing the deepest member."""
+    from PyQt6 import QtWidgets
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    from tabs import SimulationTab
+    sim = SimulationTab()
+    sim.restore_state(trilayer().to_dict())
+    sim.list.setCurrentRow(1)                                 # A
+    seen = {}
+
+    def accept(dlg):
+        spin = dlg.findChild(QtWidgets.QDoubleSpinBox)
+        boxes = {b.text(): b for b in dlg.findChildren(QtWidgets.QCheckBox)}
+        boxes['B'].setChecked(True)
+        seen['A+B'] = spin.value()
+        boxes['C'].setChecked(True)
+        seen['A+B+C'], seen['min'] = spin.value(), spin.minimum()
+        spin.setValue(70.0)
+        boxes['C'].setChecked(False)              # the typed value is kept
+        seen['kept'], seen['min B'] = spin.value(), spin.minimum()
+        return 1
+    monkeypatch.setattr(QtWidgets.QDialog, 'exec', accept)
+    sim.editor._tie_with('thickness')
+    assert seen == {'A+B': 45.0, 'A+B+C': 55.0, 'min': 45.0,
+                    'kept': 70.0, 'min B': 30.0}
+    st = sim.stack
+    assert st.ties[0]['members'] == [[1, 'thickness'], [2, 'thickness']]
+    assert st.layers[1].thickness == 30.0 and st.layers[2].thickness == 40.0
+    assert '70 Å' in sim.editor.rows['thickness'][4].toolTip()

@@ -20,6 +20,11 @@ Each fit (DE, L-BFGS-B, multistart) and DREAM run opens a tab of its own
 after the three tools, named short (fit.panel.FitPanel._tab_name); older ones
 stay until their × closes them (FitPanel.close_page), not while they run.
 
+Built as a program (make_windows_installer.py, PyInstaller), the session
+dialogs open in Documents/SANR, created when needed, as the program's own
+folder is not writable; `SANR --self-test <file>` checks the build
+(selftest.py).
+
 File -> Import Licorne session reads a saved Licorne session folder
 (model.licorne_io.load_licorne_session) into the same form: its rexp<k>.dat
 channels as one dataset, Licorne's rtheory<k>.dat as a second one drawn as
@@ -29,6 +34,7 @@ model's layers, the other settings kept.
 
 import json
 import math
+import multiprocessing
 import os
 import sys
 
@@ -46,9 +52,17 @@ from tabs.geometry import GeometryTab
 
 APP_ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icons',
                         'app.png')
-# where the session dialogs open (sessions/ of the repo)
-SESSIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            'sessions')
+# where the session dialogs open: sessions/ of the repo, or Documents/SANR
+# for a built program (its folder is not writable)
+if getattr(sys, 'frozen', False):
+    SESSIONS_DIR = os.path.join(os.path.expanduser('~'), 'Documents', 'SANR')
+    try:
+        os.makedirs(SESSIONS_DIR, exist_ok=True)
+    except OSError:
+        SESSIONS_DIR = os.path.expanduser('~')
+else:
+    SESSIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                'sessions')
 MODEL_FILTER = 'Session / model files (*.json);;All files (*)'
 # The native macOS dialog greys out *.json files with this filter; use Qt's own.
 DIALOG_OPTIONS = QtWidgets.QFileDialog.Option.DontUseNativeDialog
@@ -373,4 +387,10 @@ def main():
 
 
 if __name__ == '__main__':
+    # a built program's worker processes (fit.workers) run this file again:
+    # this hands them to multiprocessing instead of starting another SANR
+    multiprocessing.freeze_support()
+    if len(sys.argv) == 3 and sys.argv[1] == '--self-test':
+        import selftest
+        sys.exit(selftest.run(sys.argv[2]))
     main()

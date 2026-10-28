@@ -89,7 +89,8 @@ computed (+ 3 sigma_Q and the largest |Q shift| allowed); the caller's
 stack keeps 'auto'.  The target and distribution are model choices, not
 fit parameters: compare them by separate fits (BIC, bounds, DREAM).  A message says how many nodes, i.e. how many
 times slower each evaluation is.  fit.joint gives every dataset the
-largest count.
+largest count.  With a mixture of models (model.stack MIXTURE) there is
+no thickness spread: a stack with both is refused here.
 
 A FitProblem holds a copy of the stack and plain arrays: it is pickled to
 the worker processes of either method.
@@ -251,6 +252,7 @@ class FitProblem:
             self.sigmas = [self._grid_sigma(g, members, full, full_dq)
                            for g, members in self.groups]
 
+        self.stack.check_spread_or_mixture()
         self.spread_nodes = self._freeze_spread_nodes()
 
         # said once here; the cost function itself never warns
@@ -281,9 +283,6 @@ class FitProblem:
         spread."""
         st = self.stack
         hi = self._bound('thickness_spread', 4)
-        s = st.thickness_spread if hi is None else hi
-        if not s > 0:
-            return None
         shift = [abs(st.q_shift)] + [abs(b) for b in (
             self._bound('q_shift', 3), self._bound('q_shift', 4))
             if b is not None]
@@ -293,15 +292,17 @@ class FitProblem:
             sg = st.resolution_sigma(Q) if sg is None else sg
             sigma = max(sigma, float(np.max(sg, initial=0.0)))
         self.spread_qmax = qmax + max(shift) + 3 * sigma
+        s = st.thickness_spread if hi is None else hi
+        if not s > 0:
+            return None
         n = st.thickness_spread_nodes = st.spread_count(self.spread_qmax, s)
         # a spread too wide for its upper bound (a Gaussian reaching zero
         # thickness): refused now, not in the middle of the fit
         spread_factors(s, st.thickness_spread_dist, n)
-        t = st.thickness_spread_target
         warnings.warn('thickness spread (%s, %s): %d nodes, each evaluation '
                       'about %d× slower'
-                      % ('whole stack' if t == 'stack' else st.layers[t].name,
-                         st.thickness_spread_dist, n, n), stacklevel=3)
+                      % (st.spread_target_name(), st.thickness_spread_dist,
+                         n, n), stacklevel=3)
         return n
 
     def _combine_data(self):

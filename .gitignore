@@ -35,3 +35,6 @@ benchmarks/multistart_*.txt
 sessions/*
 !sessions/session_Cr2Te3.json
 !sessions/session_Cr2Te3_2.json
+
+# Windows kernel and installer build (make_windows_installer.py)
+*.pyd

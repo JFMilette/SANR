@@ -158,6 +158,141 @@ def test_local_lbfgs_fit(app):
     assert exp.session_state('.')['fit']['lbfgs_maxiter'] == 50
 
 
+def test_least_squares_fit(app):
+    """The least-squares method: run_lsq in the fit window, counted in
+    iterations from the start (0), as fit as L-BFGS-B, from worker
+    processes too; its report its own; its Max iter and the method chosen
+    kept in the session."""
+    import time
+    exp = tab(QA, QA, licorne=False)
+    ends = {}
+    for workers in (1, 2):
+        exp.fit_workers.setValue(workers)
+        exp.lsq_maxiter.setValue(50)
+        exp.fit_report.setText('untouched')
+        exp.btn_lsq.click()
+        win = exp.fit_window
+        assert win.method == 'lsq' and win.unit == 'iteration'
+        t0 = time.monotonic()
+        while exp._fit is not None and time.monotonic() - t0 < 60:
+            app.processEvents()
+        assert exp._fit is None and not win.running
+        labels = [e[0] for e in win.entries]
+        assert labels[0] == '0' and all(l.isdigit() for l in labels[:-1])
+        assert 'Done</b> after' in exp.lsq_report.text()
+        assert exp.fit_report.text() == 'untouched'
+        assert exp.btn_lsq.isEnabled() and exp.btn_lsq_window.isEnabled()
+        ends[workers] = win.entries[-1][1]
+    assert ends[2] == pytest.approx(ends[1], rel=1e-3, abs=1e-6)
+    exp.lb_maxiter.setValue(1000)
+    exp.start_lbfgs()
+    t0 = time.monotonic()
+    while exp._fit is not None and time.monotonic() - t0 < 60:
+        app.processEvents()
+    assert ends[1] <= exp.fit_window.entries[-1][1] * (1 + 1e-3) + 1e-6
+    exp.fit_method.setCurrentIndex(exp.fit_method.findData('lsq'))
+    state = exp.session_state('.')
+    assert state['fit']['lsq_maxiter'] == 50 and \
+        state['fit']['method'] == 'lsq'
+
+
+def test_global_methods(app):
+    """Basin hopping, dual annealing, SHGO and DIRECT run from their pages
+    in the fit window, counted in their own units from the start (0), and
+    get near the minimum L-BFGS-B finds; their options reach run_global
+    and are kept in the session."""
+    import time
+    from fit.de.global_fit import UNITS
+    exp = tab(QA, QA, licorne=False)
+    exp.fit_workers.setValue(1)
+    exp.lb_maxiter.setValue(1000)
+    exp.start_lbfgs()
+    t0 = time.monotonic()
+    while exp._fit is not None and time.monotonic() - t0 < 60:
+        app.processEvents()
+    best = exp.fit_window.entries[-1][1]
+    w = exp._global_widgets
+    w['basinhopping']['niter'].setValue(3)
+    w['dual_annealing']['maxiter'].setValue(20)
+    w['shgo']['n'].setValue(16)
+    w['direct']['maxiter'].setValue(30)
+    for k, method in enumerate(('basinhopping', 'dual_annealing', 'shgo',
+                                'direct')):
+        exp.fit_report.setText('untouched')
+        exp._global_buttons[k].click()
+        win = exp.fit_window
+        assert win.method == method and win.unit == UNITS[method]
+        t0 = time.monotonic()
+        while exp._fit is not None and time.monotonic() - t0 < 120:
+            app.processEvents()
+        assert exp._fit is None and not win.running
+        labels = [e[0] for e in win.entries]
+        if method == 'shgo':                # ends with its minima instead
+            assert labels[0] == '1 — global'
+        else:
+            assert labels[0] == '0' and all(l.isdigit() for l in labels[:-1])
+        assert 'Done</b> after' in exp._global_reports[method].text()
+        assert exp.fit_report.text() == 'untouched'
+        assert exp._global_windows[k].isEnabled()
+        assert min(e[1] for e in win.entries) <= best * 1.5 + 1e-3, method
+    assert exp._global_options('direct')['maxfun'] is None
+    w['shgo']['sampling_method'].setCurrentIndex(1)
+    w['direct']['locally_biased'].setChecked(False)
+    state = exp.session_state('.')
+    w['shgo']['sampling_method'].setCurrentIndex(0)
+    w['direct']['locally_biased'].setChecked(True)
+    w['basinhopping']['niter'].setValue(100)
+    exp.restore_state(state, '.')
+    assert exp._global_options('shgo')['sampling_method'] == 'halton'
+    assert exp._global_options('direct')['locally_biased'] is False
+    assert exp._global_options('basinhopping')['niter'] == 3
+
+
+def test_shgo_minima_in_window_and_table(app):
+    """At its end, SHGO's global and local minima are the fit window's
+    entries (global first) and fill the multistart table."""
+    import time
+    exp = tab(QA, QA, licorne=False)
+    exp.fit_workers.setValue(1)
+    exp._global_widgets['shgo']['n'].setValue(16)
+    exp.start_fit('shgo')
+    t0 = time.monotonic()
+    while exp._fit is not None and time.monotonic() - t0 < 120:
+        app.processEvents()
+    win = exp.fit_window
+    labels = [e[0] for e in win.entries]
+    assert labels[0] == '1 — global'
+    assert all(l.endswith('— local') for l in labels[1:])
+    costs = [e[1] for e in win.entries]
+    assert costs == sorted(costs)
+    assert 'global' in win.status.text()
+    assert exp.ms_table.rowCount() == len(labels)
+    assert exp.ms_report.text().startswith('SHGO:')
+    assert win.btn_send.isEnabled()
+
+
+def test_method_box_shows_its_options(app):
+    """The Method box shows only the chosen method's options; Start DREAM
+    from the multistart table switches it to DREAM; it is restored from
+    the session."""
+    exp = tab(QA, QA, licorne=False)
+    keys = [exp.fit_method.itemData(k) for k in range(exp.fit_method.count())]
+    assert keys == ['de', 'basinhopping', 'dual_annealing', 'shgo',
+                    'direct', 'lbfgs', 'lsq', 'multistart', 'dream']
+    for key in keys:
+        exp.fit_method.setCurrentIndex(exp.fit_method.findData(key))
+        assert [k for k, p in exp._method_pages.items()
+                if not p.isHidden()] == [key]
+    state = exp.session_state('.')
+    exp.fit_method.setCurrentIndex(0)
+    exp.restore_state(state, '.')
+    assert exp.fit_method.currentData() == 'dream'
+    exp.fit_method.setCurrentIndex(0)
+    exp.start_dream = lambda: None
+    exp._ms_dream()
+    assert exp.fit_method.currentData() == 'dream'
+
+
 def test_multistart_in_fit_window(app, monkeypatch):
     """The multistart page's Run follows the starts in the fit window and
     lists the minima there, as in its table; one is sent to the Simulation
@@ -325,3 +460,20 @@ def test_strategy_reaches_the_fit_and_the_session(app, monkeypatch):
     exp.fit_strategy.setCurrentIndex(0)
     exp.restore_state(state, '.')
     assert exp.fit_strategy.currentData() == 'rand1bin'
+
+
+def test_multistart_de_follows_polish_box(app, monkeypatch):
+    """The short DEs of the multistart polish only if the DE page's polish
+    box is ticked."""
+    import fit.panel as P
+    seen = []
+    monkeypatch.setattr(P.MultistartThread, 'start',
+                        lambda self: seen.append(self.options))
+    exp = tab(QA, QA, licorne=False)
+    exp.ms_method.setCurrentIndex(exp.ms_method.findData('de'))
+    for ticked in (False, True):
+        exp.fit_polish.setChecked(ticked)
+        exp.start_multistart()
+        assert seen[-1]['method'] == 'de'
+        assert seen[-1]['de_options']['polish'] is ticked
+        exp._ms = None

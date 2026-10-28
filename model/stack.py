@@ -241,7 +241,11 @@ scaled by one factor f of mean 1 and standard deviation sigma_t:
       gradient of one source; the layers below it shift in depth by the
       change of its thickness.  It can trade off against the roughness of
       that layer's interfaces and the thicknesses of its neighbours: check
-      such fits with DREAM.
+      such fits with DREAM;
+  a tuple of interior layer indices (sorted, set_spread_target): those
+      layers together, one factor f for all of them (as 'stack' does for
+      every layer), e.g. the layers grown by one source.  Independent
+      factors per layer would need n^k nodes and are not offered.
 Roughness, SLDs, magnetisation and angles are unchanged; only thicknesses
 scale:
 
@@ -318,6 +322,28 @@ the resolution on, the weights are applied AFTER averaging each lab channel:
 in vacuum-referenced Q a flipped channel is NaN below a fronting edge and is
 averaged over the nodes where it is defined.
 
+MIXTURE -- Stack.mixture = [{'name', 'weight', 'fit'}]: other models
+mixed incoherently with this one, e.g. regions of a film with 0, 1 or 2
+extra layers (lateral domains larger than the coherence length, as for the
+thickness spread; refnx's MixedReflectModel):
+
+    R(Q) = w_0 R_this(Q) + SUM_m w_m R_m(Q)
+
+on the ideal reflectivity, before the resolution, Q shift, norms, scale and
+background (this stack's, applied once).  Each model m is a Stack in
+Stack._mix_stacks[name] (the caller links them: tabs.simulation keeps the
+models; to_dict saves only the entries), with its own layers, computed
+without a thickness spread; it must have the same fronting and backing.
+The thickness spread and the mixture are two descriptions of the same
+lateral variation, one or the other: a stack with both raises ValueError
+(check_spread_or_mixture).  w_m is clipped to
+[0, 1]; w_0 = 1 - SUM w_m, or 0 with the w_m divided by their sum when that
+sum is above 1.  Each w_m can be fitted: a free_parameters() entry
+(('mix', k), 'weight', ...), Stack.owner a MixOwner.  Every parameter ticked
+Fit in this stack (mixture_shared) is shared: before each evaluation
+sync_mixture copies its value into the layer of the same name of every
+model that has one (a layer it lacks is skipped).  An entry whose model is not linked is left out.
+
 SURROUND -- a magnetic fronting/backing is off-diagonal in the film-normal
 basis, so its wavevector is a 2x2 operator (Stack._surround_K), not one
 scalar per spin.
@@ -372,6 +398,7 @@ DEFAULT_BOUNDS = {
     'background':      (0.0, 1e-5),
     'q_shift':         (-0.002, 0.002),    # A^-1
     'thickness_spread': (0.0, 0.15),       # fraction (Gaussian)
+    'weight':          (0.0, 1.0),         # MIXTURE
 }
 
 
@@ -785,6 +812,24 @@ class TotalOwner:
         return self._layer.fit_entry(attr)
 
 
+class MixOwner:
+    """What Stack.owner returns for ('mix', k): mixture entry k, its
+    weight and fit entry (MIXTURE)."""
+
+    def __init__(self, stack, k):
+        object.__setattr__(self, '_entry', stack.mixture[k])
+        object.__setattr__(self, 'fit', {'weight': stack.mixture[k]['fit']})
+
+    def __getattr__(self, name):
+        return self._entry[name]
+
+    def __setattr__(self, name, value):
+        self._entry[name] = float(value)
+
+    def fit_entry(self, attr):
+        return self._entry['fit']
+
+
 # ---------------------------------------------------------------- Stack ----
 class Stack:
     """[fronting, L1, ..., LN, backing].  Fronting and backing are
@@ -826,6 +871,8 @@ class Stack:
         self._sub_gen = 0
         self._spread_cache = None
         self.fit = {}                        # STACK_FIT_PARAMS, as Layer.fit
+        self.mixture = []                    # MIXTURE entries
+        self._mix_stacks = {}                # name -> Stack, linked by caller
         # True (default): Q is measured inside the fronting; False: vacuum Q
         self.q_in_fronting = True
         # instrumental resolution (see RESOLUTION): enabled, mode and the
@@ -910,6 +957,7 @@ class Stack:
                 'licorne_outer': self.licorne_outer,
                 'step_fallback': self.step_fallback,
                 'ties': copy.deepcopy(self.ties),
+                'mixture': copy.deepcopy(self.mixture),
                 'layers': [dict(vars(l), fit=copy.deepcopy(l.fit))
                            for l in self.layers]}
 
@@ -945,6 +993,7 @@ class Stack:
         s.licorne_outer = d.get('licorne_outer', 'infinite')
         s.step_fallback = bool(d.get('step_fallback', True))
         s.ties = copy.deepcopy(d.get('ties', []))
+        s.mixture = copy.deepcopy(d.get('mixture', []))
         return s
 
     # -- fitting ------------------------------------------------------------
@@ -1022,7 +1071,10 @@ class Stack:
     def entry_name(self, i):
         """Name of the free_parameters() entry of a tie: tie_name for
         ('tie', k), 'A.thickness in total(A.thickness, B.thickness)' for
-        member m of a 'total' tie, ('tie', k, m)."""
+        member m of a 'total' tie, ('tie', k, m); 'mixture <model>' for a
+        mixture weight ('mix', k)."""
+        if i[0] == 'mix':
+            return 'mixture %s' % self.mixture[i[1]]['name']
         if len(i) == 2:
             return self.tie_name(i[1])
         j, a = self.ties[i[1]]['members'][i[2]]
@@ -1092,8 +1144,20 @@ class Stack:
 
     # -- thickness spread target (THICKNESS SPREAD) ---------------------------
     def set_spread_target(self, target):
-        """'stack', or the index of an interior layer (not the fronting or
-        the backing); ValueError otherwise."""
+        """'stack', the index of an interior layer (not the fronting or
+        the backing) or a list / tuple of them (stored as a sorted tuple);
+        ValueError otherwise."""
+        if isinstance(target, (list, tuple)):
+            n = len(self.layers) - 2
+            if not target or any(
+                    isinstance(i, bool) or not isinstance(i, (int, np.integer))
+                    or not 1 <= i <= n for i in target):
+                raise ValueError(
+                    'the thickness spread\'s layers must be interior layer '
+                    'indices 1 .. %d, at least one, not %r' % (n, target))
+            self.thickness_spread_target = tuple(sorted({int(i)
+                                                         for i in target}))
+            return
         if target != 'stack':
             if isinstance(target, bool) or not isinstance(
                     target, (int, np.integer)) or \
@@ -1108,7 +1172,15 @@ class Stack:
     def _spread_layers(self):
         """Indices of the layers the thickness spread scales."""
         t = getattr(self, 'thickness_spread_target', 'stack')
-        return list(range(1, len(self.layers) - 1)) if t == 'stack' else [t]
+        if t == 'stack':
+            return list(range(1, len(self.layers) - 1))
+        return list(t) if isinstance(t, tuple) else [t]
+
+    def spread_target_name(self):
+        """'whole stack', the layer's name or 'Fe + Co' for its layers."""
+        if self.thickness_spread_target == 'stack':
+            return 'whole stack'
+        return ' + '.join(self.layers[i].name for i in self._spread_layers())
 
     def spread_summary(self):
         """What a thickness spread means in the stack's own terms, for the
@@ -1139,15 +1211,49 @@ class Stack:
         if t == 'stack':
             return False
         where = {id(l): i for i, l in enumerate(self.layers)}
-        i = where.get(id(old_layers[t])) if t < len(old_layers) else None
-        if i is not None and 1 <= i <= len(self.layers) - 2:
-            self.thickness_spread_target = i
+        new = [where.get(id(old_layers[k])) if k < len(old_layers) else None
+               for k in (t if isinstance(t, tuple) else (t,))]
+        new = [i for i in new
+               if i is not None and 1 <= i <= len(self.layers) - 2]
+        if new:                        # a removed one of several: the rest
+            self.thickness_spread_target = tuple(sorted(new)) \
+                if isinstance(t, tuple) else new[0]
             return False
         self.thickness_spread_target = 'stack'
         self.thickness_spread = 0.0
         if 'thickness_spread' in self.fit:
             self.fit['thickness_spread']['vary'] = False
         return True
+
+    def untick_all(self):
+        """Nothing varied: every layer's and the stack's Fit ticks off (ties
+        follow their members), values and bounds kept.  Returns how many
+        were ticked."""
+        n = 0
+        for fit in [l.fit for l in self.layers] + [self.fit]:
+            for e in fit.values():
+                n += bool(e.get('vary'))
+                e['vary'] = False
+        return n
+
+    def tick_all(self, attr):
+        """Fit ticked on `attr` of every layer it belongs to: 'thickness'
+        of every film layer, 'NSLD_real' of every layer but the fronting
+        (usually a known medium), 'roughness_sigma' of every interface with a
+        roughness model (with 'none' sigma does nothing), values and bounds
+        kept as when ticked by hand.  Returns how many were newly
+        ticked."""
+        n = 0
+        for i, l in enumerate(self.layers):
+            if not self.fit_allowed(i, attr) or \
+                    (attr == 'NSLD_real' and i == 0) or \
+                    (attr == 'roughness_sigma'
+                     and l.roughness_model == 'none'):
+                continue
+            e = l.fit_entry(attr)
+            n += not e['vary']
+            e['vary'] = True
+        return n
 
     def free_parameters(self):
         """[(layer index, attr, value, min, max)] of every varied parameter:
@@ -1180,6 +1286,10 @@ class Stack:
             if e and e['vary']:
                 out.append((None, attr, getattr(self, attr), e['min'],
                             e['max']))
+        for k, m in enumerate(self.mixture):
+            if m['fit'].get('vary') and m['name'] in self._mix_stacks:
+                out.append((('mix', k), 'weight', m['weight'],
+                            m['fit']['min'], m['fit']['max']))
         return out
 
     def owner(self, i):
@@ -1189,9 +1299,74 @@ class Stack:
         if i is None:
             return self
         if isinstance(i, tuple):
+            if i[0] == 'mix':
+                return MixOwner(self, i[1])
             return TieOwner(self, i[1]) if len(i) == 2 else \
                 TotalOwner(self, i[1], i[2])
         return self.layers[i]
+
+    # -- mixture (see MIXTURE) ----------------------------------------------
+    def mixture_parts(self):
+        """(w_0, [(w_m, Stack)]) of the linked mixture entries."""
+        parts = [(min(max(float(m['weight']), 0.0), 1.0),
+                  self._mix_stacks[m['name']])
+                 for m in self.mixture if m['name'] in self._mix_stacks]
+        total = sum(w for w, _ in parts)
+        if total > 1:
+            return 0.0, [(w / total, st) for w, st in parts]
+        return 1.0 - total, parts
+
+    def check_spread_or_mixture(self):
+        """ValueError if this stack has both a thickness spread (a value
+        or a Fit tick) and a linked mixture (MIXTURE)."""
+        if self.mixture_parts()[1] and (
+                self.thickness_spread or
+                self.fit.get('thickness_spread', {}).get('vary')):
+            raise ValueError('a thickness spread and a mixture of models '
+                             'cannot be used together: choose one')
+
+    def mixture_shared(self):
+        """[(layer name, attr)] ticked Fit here: what the mixture's models
+        take from this stack."""
+        layers = []
+        for i, l in enumerate(self.layers):
+            for attr in FIT_PARAMS:
+                e = l.fit.get(attr)
+                if e and e['vary'] and self.fit_allowed(i, attr):
+                    layers.append((l.name, attr))
+        for t in self.ties:            # a tie varies all its members
+            if any(self.layers[i].fit.get(a, {}).get('vary')
+                   for i, a in t['members']):
+                layers += [(self.layers[i].name, a) for i, a in t['members']]
+        return layers
+
+    def sync_mixture(self):
+        """Copy the shared values (mixture_shared) into the linked models,
+        rebuilding the slabs of those that changed."""
+        if not self.mixture or not self._mix_stacks:
+            return
+        layers = self.mixture_shared()
+        values = {}
+        for l in self.layers:
+            values.setdefault(l.name, l)        # the first of a name
+        for m in self.mixture:
+            st = self._mix_stacks.get(m['name'])
+            if st is None:
+                continue
+            changed = False
+            by_name = {}
+            for l in st.layers:
+                by_name.setdefault(l.name, l)
+            for name, attr in layers:
+                dst = by_name.get(name)
+                if dst is None:
+                    continue
+                v = getattr(values[name], attr)
+                if getattr(dst, attr) != v:
+                    setattr(dst, attr, v)
+                    changed = True
+            if changed or st.sublayers is None:
+                st.build_sublayers()
 
     # -- geometry -----------------------------------------------------------
     @property
@@ -1840,20 +2015,30 @@ class Stack:
         pairs = _check_pairs(pairs)
         m = self.fronting_direction()
         trace, lab = self._trace, self._lab_channels
-        if self.thickness_spread:
-            # THICKNESS SPREAD: the nodes' average ideal reflectivity
+        self.sync_mixture()
+        w0, mix = self.mixture_parts()
+        if self.thickness_spread or mix:
             Q = np.atleast_1d(np.asarray(Q, dtype=float))
             s = self.resolution_sigma(Q) if sigma is None else \
                 np.broadcast_to(np.asarray(sigma, dtype=float), Q.shape)
             qmax = float(np.max(np.abs(Q - self.q_shift))
                          + 3 * np.max(s, initial=0.0)) if Q.size else 0.0
-            seqs = self._spread_sequences(qmax)
+            trace, lab = self._ideal(qmax)
+        if mix:
+            # MIXTURE: the weighted ideal reflectivities of the models
+            self.check_spread_or_mixture()
+            for _, st in mix:
+                if (st.fronting_direction() is None) != (m is None):
+                    raise ValueError('the mixture\'s models must have the '
+                                     'same fronting as this one')
+            parts = [(w0, trace, lab)] + [(w, st._trace, st._lab_channels)
+                                          for w, st in mix]
 
             def trace(q, pairs):
-                return _node_sum(seqs, lambda seq: self._trace(q, pairs, seq))
+                return sum(w * t(q, pairs) for w, t, _ in parts if w > 0)
 
             def lab(q):
-                return _node_sum(seqs, lambda seq: self._lab_channels(q, seq))
+                return sum(w * f(q) for w, _, f in parts if w > 0)
         if m is None:
             R = self._resolve(Q, lambda q: trace(q, pairs), sigma,
                               self.q_shift)
@@ -1866,6 +2051,21 @@ class Stack:
                 raise ValueError('one norm per pair')
             R = norms * R
         return self.scale * R + self.background
+
+    def _ideal(self, qmax):
+        """(trace(q, pairs), lab(q)): this stack's ideal reflectivity, the
+        thickness-spread nodes' average when it has one (largest Q qmax)."""
+        if not self.thickness_spread:
+            return self._trace, self._lab_channels
+        # THICKNESS SPREAD: the nodes' average ideal reflectivity
+        seqs = self._spread_sequences(qmax)
+
+        def trace(q, pairs):
+            return _node_sum(seqs, lambda seq: self._trace(q, pairs, seq))
+
+        def lab(q):
+            return _node_sum(seqs, lambda seq: self._lab_channels(q, seq))
+        return trace, lab
 
     def spread_count(self, qmax, spread=None):
         """The number of thickness-spread nodes for the largest Q qmax and

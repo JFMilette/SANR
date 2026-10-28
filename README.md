@@ -25,6 +25,22 @@ python make_app.py             # macOS: build SANR.app (Dock name and icon), the
 python -m pytest tests         # the tests (pip install pytest first)
 ```
 
+## Windows installer
+
+`SANR-<version>-setup.exe` installs SANR as a Windows program (Start menu,
+optional desktop icon, uninstaller, no administrator rights needed).  It is
+built on Windows, so GitHub builds it: **Actions → Windows installer → Run
+workflow** (or push a tag `v1.0`, which also makes a draft release); the
+installer is the run's artifact `SANR-windows-installer`.  On a Windows PC
+with Python 3.12, Inno Setup 6 and the Microsoft C++ Build Tools:
+
+```bat
+pip install -r requirements.txt pyinstaller
+python make_windows_installer.py
+```
+
+The installed program keeps its sessions in `Documents\SANR`.
+
 ## Layout
 
 | Path | What it holds |
@@ -59,4 +75,6 @@ python -m pytest tests         # the tests (pip install pytest first)
 | **`scripts/plot_stack.py`** | Stand-alone matplotlib plot of a stack's profile and reflectivity |
 | `scripts/make_rms_reference.py` | Writes `tests/data/rms_additive_reference.npz` |
 | `make_app.py` | Builds `SANR.app` (macOS launcher with the app's name and icon; machine-specific, not in git) |
+| `make_windows_installer.py`, `installer/sanr.iss`, `.github/workflows/windows-installer.yml` | The Windows installer: PyInstaller, then Inno Setup, on GitHub's Windows machines |
+| `selftest.py` | `SANR --self-test <file>`: checks a built program (kernel, a reflectivity, the worker pool) |
 | `sessions/` | Sessions and saved DREAM chains (File → Open session); `session_Cr2Te3*.json` are the examples in git, the rest stay local |

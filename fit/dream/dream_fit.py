@@ -785,6 +785,17 @@ def slab_profile(st, z):
             np.array([Stack.inplane_rho(s) for s in slabs])[k])
 
 
+def profile_layers(result, problem, part=0):
+    """(interfaces Z, layer names) of the MAP stack of dataset `part`, the
+    stack profile_bands draws its bands around."""
+    fit = problem.fit
+    sub = parts(fit)[part]
+    st = copy.deepcopy(sub.stack)
+    sub.apply(part_x(fit, result.best()[0][:len(fit.params)], part), st)
+    return np.asarray(st._interfaces(), dtype=float), \
+        [l.name for l in st.layers]
+
+
 def profile_bands(result, problem, n=200, discard=0.5, seed=0, npts=1500,
                   part=0):
     """(z, nuclear bands, magnetic bands): the slab NSLD and in-plane MSLD

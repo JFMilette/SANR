@@ -242,3 +242,131 @@ def test_new_layer_copies_the_layer_above(app):
     sim.add_layer()
     assert st.layers[1].thickness == 50.0 and \
         not any(e['vary'] for e in st.layers[1].fit.values())
+
+
+def test_untick_all_fit(qtbot=None):
+    """Untick all Fit: nothing varied afterwards (layers, general rows, a
+    tie through its members), even once the boxes are read back; values and
+    bounds kept; greyed out while a fit runs."""
+    import os
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    from PyQt6 import QtWidgets
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    assert app is not None
+    from tabs import SimulationTab
+    win = QtWidgets.QMainWindow()
+    sim = SimulationTab()
+    win.setCentralWidget(sim)
+    st = sim.stack
+    for i, attr in ((1, 'thickness'), (1, 'NSLD_real'), (2, 'thickness')):
+        e = st.layers[i].fit_entry(attr)
+        e.update(vary=True, min=1.0, max=99.0)
+    st.ties = [dict(members=[[1, 'roughness_sigma'], [2, 'roughness_sigma']],
+                    mode='equal')]
+    st.layers[1].fit_entry('roughness_sigma')['vary'] = True
+    sim._load_stack_fit()
+    sim.stack_rows['scale'][3].setChecked(True)
+    sim.stack_rows['background'][3].setChecked(True)
+    sim.refresh_list(select=1)
+    sim.recompute()
+    assert len(st.free_parameters()) == 6
+    sim.btn_untick.click()
+    assert st.free_parameters() == []
+    sim.recompute()                          # the boxes agree
+    assert st.free_parameters() == []
+    assert not any(cb.isChecked() for *_, cb in sim.stack_rows.values())
+    fit_boxes = [row[3] for row in sim.editor.rows.values()]
+    assert fit_boxes and not any(b.isChecked() for b in fit_boxes)
+    assert st.layers[1].fit['thickness']['max'] == 99.0     # bounds kept
+    assert 'Fit unticked on 6 parameters' in win.statusBar().currentMessage()
+    sim.set_locked(True)
+    assert not sim.btn_untick.isEnabled()
+    sim.set_locked(False)
+
+
+def test_tick_all_buttons(app):
+    """Tick thickness / NSLD / roughness: Fit on that quantity of every
+    layer it belongs to (thickness of the film layers only, NSLD of the
+    film layers and the substrate, roughness of every interface but those with model 'none'), the editor
+    showing it, bounds kept; greyed out while a fit runs."""
+    from model.stack import Layer
+    win = QtWidgets.QMainWindow()
+    sim = SimulationTab()
+    win.setCentralWidget(sim)
+    st = sim.stack
+    st.layers = [Layer('air', 0), Layer('a', 50, roughness_sigma=3),
+                 Layer('b', 80, roughness_model='none'),
+                 Layer('c', 20, roughness_sigma=2),
+                 Layer('Si', 0, NSLD_real=2.07e-6, roughness_sigma=4)]
+    st.layers[1].fit_entry('thickness').update(vary=True, max=99.0)
+    sim.refresh_list(select=1)
+    sim.btn_tick['thickness'].click()
+    assert 'Fit ticked on 2 more thicknesses' in \
+        win.statusBar().currentMessage()
+    sim.btn_tick['NSLD_real'].click()
+    sim.btn_tick['roughness_sigma'].click()
+    free = {(i, a) for i, a, *_ in st.free_parameters()}
+    assert free == {(1, 'thickness'), (2, 'thickness'), (3, 'thickness'),
+                    (1, 'NSLD_real'), (2, 'NSLD_real'), (3, 'NSLD_real'),
+                    (4, 'NSLD_real'),
+                    (1, 'roughness_sigma'), (3, 'roughness_sigma'),
+                    (4, 'roughness_sigma')}
+    assert st.layers[1].fit['thickness']['max'] == 99.0     # bounds kept
+    assert sim.editor.rows['thickness'][3].isChecked()
+    assert sim.editor.rows['NSLD_real'][3].isChecked()
+    assert st.tick_all('thickness') == 0                    # all ticked
+    sim.set_locked(True)
+    assert not any(b.isEnabled() for b in sim.btn_tick.values())
+    sim.set_locked(False)
+
+
+def test_models_switch_copy_new_delete_and_session(app, monkeypatch):
+    sim = SimulationTab()
+    st = sim.stack
+    sim.list.setCurrentRow(2)
+    sim.background.setValue(3e-7)
+    sim.recompute()
+    names = [l.name for l in st.layers]
+    sim.copy_model()                         # a copy, shown
+    assert sim.model_names() == ['Model 1', 'Model 1 copy']
+    assert sim.stack is st and sim.list.currentRow() == 2
+    st.layers[1].thickness = 33.0
+    sim.background.setValue(1e-6)
+    sim.refresh_list(select=1)
+    sim.recompute()
+    sim.new_model()                          # default layers, settings kept
+    assert sim.model_box.currentText() == 'Model 3'
+    assert st.background == 1e-6 and len(st.layers) == 5
+    st.layers.pop(2)
+    sim.refresh_list(select=1)
+    sim.model_box.setCurrentIndex(0)         # back to the first, unchanged
+    assert [l.name for l in st.layers] == names
+    assert st.layers[1].thickness == 80.0 and st.background == 3e-7
+    assert sim.list.currentRow() == 2
+    sim.model_box.setCurrentIndex(1)
+    assert st.layers[1].thickness == 33.0 and st.background == 1e-6
+    # the session keeps every model and which one is shown
+    state = sim.session_state()
+    again = SimulationTab()
+    again.restore_state(state)
+    assert again.model_names() == sim.model_names()
+    assert again.model_box.currentIndex() == 1
+    assert again.stack.layers[1].thickness == 33.0
+    again.model_box.setCurrentIndex(2)
+    assert len(again.stack.layers) == 4
+    # a session saved before the models: one model
+    state.pop('simulation')['models']
+    old = dict(state, simulation={'selected_layer': 1})
+    again.restore_state(old)
+    assert again.model_names() == ['Model 1']
+    # delete the shown model: its neighbour is shown
+    monkeypatch.setattr(QtWidgets.QMessageBox, 'question',
+                        lambda *a, **k: QtWidgets.QMessageBox.StandardButton.Yes)
+    sim.delete_model()
+    assert sim.model_names() == ['Model 1', 'Model 3']
+    assert sim.model_box.currentText() == 'Model 1'
+    assert st.layers[1].thickness == 80.0
+    sim.set_locked(True)
+    sim.model_box.setCurrentIndex(1)
+    assert sim.model_box.currentIndex() == 0 and st.layers[1].thickness == 80.0
+    sim.set_locked(False)

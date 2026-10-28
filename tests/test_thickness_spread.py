@@ -719,7 +719,8 @@ def test_v2_simulation_tab_and_report():
     c = sim.spread_target
     names = [c.itemText(k) for k in range(c.count())]
     assert names == ['Whole stack'] + [l.name for l in
-                                       sim.stack.layers[1:-1]]
+                                       sim.stack.layers[1:-1]] + \
+        ['Several layers']
     _, bmin, bmax, cb = sim.stack_rows['thickness_spread']
     sim.spread_dist.setCurrentIndex(sim.spread_dist.findData('lognormal'))
     assert bmax.value() == 50.0                       # widened
@@ -770,3 +771,102 @@ def test_v2_simulation_tab_and_report():
         'RMS thickness variation', 'median factor', 'median thickness',
         'mode factor', 'mode thickness']
     win.close()
+
+
+# several layers ----------------------------------------------------------
+def three_films(scheme='rms'):
+    """vacuum / a / b / c / Si, a 10 % Gaussian spread on 9 nodes."""
+    st = S.Stack([S.Layer('vacuum', 0, 0, 0, 0, 0),
+                  S.Layer('a', 60, 4e-6, 0, 1.2e-6, 0.1, 4.0,
+                          roughness_sublayer=8),
+                  S.Layer('b', 90, 2e-6, 0, 0, 0, 5.0, roughness_sublayer=8),
+                  S.Layer('c', 40, 6e-6, 0, 0, 0, 3.0, roughness_sublayer=8),
+                  S.Layer('Si', 0, 2.07e-6, 0, 0, 0, 3.0,
+                          roughness_sublayer=8)],
+                 roughness_scheme=scheme)
+    st.thickness_spread, st.thickness_spread_nodes = 0.1, 9
+    st.build_sublayers()
+    return st
+
+
+@pytest.mark.parametrize('scheme', ['rms', 'licorne'])
+@pytest.mark.parametrize('dist', ['gaussian', 'lognormal'])
+def test_several_layers_scale_together(scheme, dist):
+    st = three_films(scheme)
+    st.thickness_spread_dist = dist
+    st.set_spread_target([3, 1])
+    assert st.thickness_spread_target == (1, 3)
+    assert st.spread_target_name() == 'a + c'
+    assert np.allclose(st.reflectivities(Q, PAIRS),
+                       explicit_layers(st, Q, PAIRS, Q.max(), [1, 3]),
+                       rtol=1e-12, atol=0)
+    # every interior layer: the whole stack
+    whole = st.reflectivities(Q, PAIRS) * 0 + 0
+    st.set_spread_target('stack')
+    whole = st.reflectivities(Q, PAIRS)
+    st.set_spread_target((1, 2, 3))
+    assert np.array_equal(st.reflectivities(Q, PAIRS), whole)
+    d = S.Stack.from_dict(json.loads(json.dumps(st.to_dict())))
+    assert d.thickness_spread_target == (1, 2, 3)
+    for bad in ([], [0], [4], (1, 'b'), [True]):
+        with pytest.raises(ValueError):
+            st.set_spread_target(bad)
+
+
+def test_several_layers_follow_edits():
+    st = three_films()
+    st.set_spread_target((1, 3))
+    a, c = st.layers[1], st.layers[3]
+    old = list(st.layers)
+    st.layers.insert(2, S.Layer('new', 20, 1e-6, 0, 0, 0, 2.0))
+    assert not st.reindex_spread_target(old)
+    assert st.thickness_spread_target == (1, 4)
+    old = list(st.layers)
+    st.layers.remove(c)                  # one of them: the rest
+    assert not st.reindex_spread_target(old)
+    assert st.thickness_spread_target == (1,)
+    old = list(st.layers)
+    st.layers.remove(a)                  # the last: reset
+    assert st.reindex_spread_target(old)
+    assert st.thickness_spread_target == 'stack' and \
+        st.thickness_spread == 0
+
+
+def test_several_layers_in_the_window():
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    QtWidgets = pytest.importorskip('PyQt6.QtWidgets')
+    from PyQt6 import QtCore
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    assert app is not None
+    from tabs import SimulationTab
+    sim = SimulationTab()                    # L1, L2, L3
+    c, lw = sim.spread_target, sim.spread_layers
+    sim.spread.setValue(5.0)
+    c.setCurrentIndex(c.findData(2))
+    sim.recompute()
+    c.setCurrentIndex(c.findData('several'))
+    assert not lw.isHidden()
+    ticked = [lw.item(r).checkState() == QtCore.Qt.CheckState.Checked
+              for r in range(lw.count())]
+    assert ticked == [False, True, False]    # from the one-layer target
+    lw.item(0).setCheckState(QtCore.Qt.CheckState.Checked)
+    sim.recompute()
+    assert sim.stack.thickness_spread_target == (1, 2)
+    assert 'L1 + L2' in sim.spread_summary.text()
+    for r in range(lw.count()):              # none: kept, and said
+        lw.item(r).setCheckState(QtCore.Qt.CheckState.Unchecked)
+    sim.recompute()
+    assert sim.stack.thickness_spread_target == (1, 2)
+    assert 'at least one' in sim.spread_error.text()
+    lw.item(2).setCheckState(QtCore.Qt.CheckState.Checked)
+    sim.recompute()
+    assert sim.stack.thickness_spread_target == (3,)
+    state = sim.session_state()
+    fresh = SimulationTab()
+    fresh.restore_state(json.loads(json.dumps(state)))
+    assert fresh.stack.thickness_spread_target == (3,)
+    assert fresh.spread_target.currentData() == 'several'
+    c.setCurrentIndex(c.findData('stack'))
+    assert lw.isHidden()
+    sim.recompute()
+    assert sim.stack.thickness_spread_target == 'stack'

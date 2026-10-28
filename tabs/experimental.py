@@ -844,17 +844,18 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self.show_line = QtWidgets.QCheckBox('line')
         self.show_line.setToolTip('Join the data points of each channel '
                                   'with a line, in file order')
+        # one row, to leave the height to the fit box
         opts = QtWidgets.QHBoxLayout()
+        opts.addWidget(QtWidgets.QLabel('Scale'))
         opts.addWidget(self.logy)
         opts.addWidget(self.rq4)
+        opts.addSpacing(12)
+        opts.addWidget(QtWidgets.QLabel('Data'))
+        opts.addWidget(self.show_points)
+        opts.addWidget(self.show_line)
+        opts.addWidget(self.show_err)
         opts.addStretch(1)
-        f.addRow('Scale', opts)
-        data = QtWidgets.QHBoxLayout()
-        data.addWidget(self.show_points)
-        data.addWidget(self.show_line)
-        data.addWidget(self.show_err)
-        data.addStretch(1)
-        f.addRow('Data', data)
+        f.addRow(opts)
         for w in (self.logy, self.rq4, self.show_err, self.show_points,
                   self.show_line):
             w.toggled.connect(self.redraw)
@@ -1393,6 +1394,10 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                      strategy=self.fit_strategy.currentData(),
                      polish=self.fit_polish.isChecked(),
                      lbfgs_maxiter=self.lb_maxiter.value(),
+                     lsq_maxiter=self.lsq_maxiter.value(),
+                     method=self.fit_method.currentData(),
+                     global_methods={m: self._global_options(m)
+                                     for m in self._global_widgets},
                      workers=self.fit_workers.value()))
 
     def restore_state(self, state, base):
@@ -1470,6 +1475,10 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                 fit.get('strategy', 'best1bin'))))
             self.fit_polish.setChecked(fit.get('polish', True))
             self.lb_maxiter.setValue(fit.get('lbfgs_maxiter', 1000))
+            self.lsq_maxiter.setValue(fit.get('lsq_maxiter', 1000))
+            self._set_global_options(fit.get('global_methods'))
+            self.fit_method.setCurrentIndex(max(0, self.fit_method.findData(
+                fit.get('method', 'de'))))
             self.fit_workers.setValue(fit.get('workers',
                                               self.fit_workers.value()))
         self._fit_start = None

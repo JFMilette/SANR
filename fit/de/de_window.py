@@ -1,7 +1,9 @@
 """
 DE window: follows a running differential-evolution fit (fit.de.de_fit, run
 in a DEThread) of the Experimental tab generation by generation, or a local
-L-BFGS-B fit (fit.de.de_fit.run_lbfgs) iteration by iteration, or a
+L-BFGS-B or least-squares fit (fit.de.de_fit.run_lbfgs, run_lsq) iteration
+by iteration, one of scipy's other global methods (fit.de.global_fit) by
+its own steps, or a
 multistart (fit.multistart, run in a fit.panel.MultistartThread) start by
 start.
 
@@ -34,14 +36,16 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from fit.de.de_fit import run_de_restarts, run_lbfgs
+from fit.de.de_fit import run_de_restarts, run_lbfgs, run_lsq
+from fit.de import global_fit
 from fit.joint import JointProblem, part_x, parts
 from fit.multistart import merge
 import line_colours
 import style
-from tabs.simulation import (PARAM_DISPLAY, PROFILE_QUANTITIES,
-                             REFL_QUANTITIES, RIGHT, Crosshair, LayerLabels,
-                             plot_widget, profile_data, profile_readout)
+from tabs.simulation import (PARAM_DISPLAY, PROFILE_EXPORT_NAMES,
+                             PROFILE_QUANTITIES, REFL_QUANTITIES, RIGHT,
+                             Crosshair, LayerLabels, export_name, plot_widget,
+                             profile_data, profile_layers, profile_readout)
 
 
 AT_BOUND = QtGui.QColor('#f87171')
@@ -59,8 +63,10 @@ class DEThread(QtCore.QThread):
     """Runs fit.de.de_fit.run_de_restarts on a FitProblem off the GUI
     thread; with restarts > 1, `minima` gives the distinct ends of the runs
     (fit.multistart.merge) before finished_fit gives the best.  With
-    method='lbfgs', fit.de.de_fit.run_lbfgs instead (progress then counts
-    iterations; nothing to continue)."""
+    method='lbfgs' or 'lsq', fit.de.de_fit.run_lbfgs or run_lsq instead
+    (progress then counts iterations; nothing to continue); with a method
+    of fit.de.global_fit, global_fit.run_global (its UNITS; `minima` gives
+    SHGO's global and local minima before finished_fit)."""
 
     progress = QtCore.pyqtSignal(object, float, int)      # x, cost, generation
     status = QtCore.pyqtSignal(object)        # fit.de.de_fit STATUS info
@@ -80,9 +86,13 @@ class DEThread(QtCore.QThread):
         self._stop = True
 
     def run(self):
-        if self.method == 'lbfgs':
+        if self.method in ('lbfgs', 'lsq') + global_fit.METHODS:
+            run = {'lbfgs': run_lbfgs, 'lsq': run_lsq}.get(
+                self.method, lambda problem, **o: global_fit.run_global(
+                    problem, self.method, minima=lambda ends: self.minima.emit(
+                        merge(problem, ends)), **o))
             try:
-                x, cost, it, msg = run_lbfgs(
+                x, cost, it, msg = run(
                     self.problem, callback=self.progress.emit,
                     status=self.status.emit, cancelled=lambda: self._stop,
                     **self.options)
@@ -206,12 +216,14 @@ class DEWindow(QtWidgets.QWidget):
         dQ)}), vectors (the {channel: [Pi, Pa]} of every model channel),
         grids (the {channel: Q} of the model curves,
         tabs.experimental.model_grid); polish whether the fit ends with a
-        polish; method 'de', 'lbfgs' (a local fit: iterations, no
-        polish) or 'multistart' (the minima, given by show_minima)."""
+        polish; method 'de', 'lbfgs' or 'lsq' (a local fit: iterations,
+        no polish), one of fit.de.global_fit.METHODS (its own steps) or
+        'multistart' (the minima, given by show_minima)."""
         self.problem = problem
         self.method = method
-        self.unit = {'lbfgs': 'iteration',
-                     'multistart': 'minimum'}.get(method, 'generation')
+        self.unit = dict(global_fit.UNITS, lbfgs='iteration',
+                         lsq='iteration', multistart='minimum').get(
+                             method, 'generation')
         self.polish = polish and method == 'de'
         self.cost_label = cost_label
         self.tabs.blockSignals(True)
@@ -259,12 +271,19 @@ class DEWindow(QtWidgets.QWidget):
                                else '', {
                                    'lbfgs': ' (L-BFGS-B from the current '
                                             'values)',
-                                   'multistart': ' from many starts'
+                                   'lsq': ' (least squares from the '
+                                          'current values)',
+                                   'multistart': ' from many starts',
+                                   **{m: ' (%s)' % label for m, label
+                                      in global_fit.LABELS.items()}
                                }.get(method, '')))
         self.status.setStyleSheet('')
         self.progress.setText({
             'lbfgs': 'Cost at the current values…',
-            'multistart': 'First start…'}.get(
+            'lsq': 'Cost at the current values…',
+            'multistart': 'First start…',
+            **{m: 'Cost at the current values…'
+               for m in global_fit.METHODS}}.get(
                 method, 'First generation (the starting population and one '
                         'generation)…'))
         self.progress.show()
@@ -273,6 +292,7 @@ class DEWindow(QtWidgets.QWidget):
         # and the ended ones' costs (set_starts, set_start_status)
         self._ms_count, self._ms_run, self._ms_ended = (0, 0), {}, {}
         self._ms_ends = []          # (start, u, cost) of the ended starts
+        self._end_minima = None     # the minima a fit ends with (set_minima)
         self.btn_stop.setEnabled(True)
         self.btn_continue.setEnabled(False)
         self.btn_send.setEnabled(False)
@@ -302,9 +322,20 @@ class DEWindow(QtWidgets.QWidget):
         run = ('Run %d / %d — ' % (info['run'], info['runs'])
                if info.get('runs', 1) > 1 else '')
         c = self.cost_label
-        if info['phase'] == 'lbfgs':
-            self.progress.setText('L-BFGS-B iteration %d / %d — %s %.6g' % (
+        if info['phase'] in ('lbfgs', 'lsq'):
+            self.progress.setText('%s iteration %d / %d — %s %.6g' % (
+                'L-BFGS-B' if info['phase'] == 'lbfgs' else 'Least-squares',
                 info['iteration'], info['maxiter'], c, info['best']))
+            return
+        if info['phase'] == 'global':
+            step = '%s %d%s' % (self.unit, info['step'],
+                                ' / %d' % info['maxiter']
+                                if info['maxiter'] else '')
+            self.progress.setText('%s — %s%s — best %s %s' % (
+                global_fit.LABELS[info['method']], step,
+                ', %d evaluations' % info['evals']
+                if info['evals'] is not None else '', c,
+                '%.6g' % info['best'] if info['best'] is not None else '…'))
             return
         if info['phase'] == 'polish':
             self.progress.setText(
@@ -323,10 +354,31 @@ class DEWindow(QtWidgets.QWidget):
             % (run, info['generation'], info['maxiter'], c, info['best'],
                info['median'], c, info['spread'], info['tol'], rate))
 
+    def set_minima(self, minima):
+        """The minima a fit ends with (fit.multistart rows, best first:
+        SHGO's global and local minima), shown by finish instead of the
+        history."""
+        self._end_minima = list(minima)
+
     def finish(self, x, cost, gen, msg):
         self.running = False
         self.progress.hide()
         stopped = msg == 'stopped'
+        if self._end_minima and not stopped:
+            m = self._end_minima
+            self._fill_minima(m, lambda k, _: '%d — %s' % (
+                k + 1, 'global' if k == 0 else 'local'))
+            self.status.setText(
+                '<b>Done</b> after %d %s(s) — %d minim%s: global %s %.6g%s'
+                '<br><i>%s</i><br>Select a minimum and send it to the '
+                'Simulation tab.' % (
+                    gen, self.unit, len(m), 'um' if len(m) == 1 else 'a',
+                    self.cost_label, m[0]['chi2'],
+                    ', %d local' % (len(m) - 1) if len(m) > 1 else '',
+                    html_escape(msg)))
+            self.btn_stop.setEnabled(False)
+            self.btn_send.setEnabled(self.history.currentItem() is not None)
+            return
         # the polish (or a stop before the first generation) gives a result
         # that is not in the history yet.  Compared exactly: any tolerance
         # in physical units would hide small SLD moves (~1e-6 A^-2)
@@ -392,6 +444,8 @@ class DEWindow(QtWidgets.QWidget):
                     ', iteration %d' % i['step'] if i['step'] else '', c,
                     i['best']),
                 'lbfgs': lambda: 'iteration %d — %s %.6g' % (
+                    i['step'], c, i['best']),
+                'lsq': lambda: 'least squares, iteration %d — %s %.6g' % (
                     i['step'], c, i['best'])}[i['phase']]()
             lines.append('%s: %s' % ('Current values' if k == 0 else
                                      'Start %d' % k, what))
@@ -414,10 +468,11 @@ class DEWindow(QtWidgets.QWidget):
         self.btn_stop.setEnabled(False)
         self.btn_send.setEnabled(self.history.currentItem() is not None)
 
-    def _fill_minima(self, minima):
+    def _fill_minima(self, minima, label=None):
         """The entries: the minima (fit.multistart rows, best first), the
         one selected before kept selected (by its parameters), else the
-        best; drawn once."""
+        best; drawn once.  label(k, minimum): an entry's label (default:
+        its starts)."""
         e = self._selected()
         keep = None if e is None or self.history.indexOfTopLevelItem(
             self.history.currentItem()) == 0 else e[2]
@@ -425,7 +480,7 @@ class DEWindow(QtWidgets.QWidget):
         self.history.clear()
         self.entries = []
         for k, m in enumerate(minima):
-            self._append('%d — %d start%s%s' % (
+            self._append(label(k, m) if label else '%d — %d start%s%s' % (
                 k + 1, m['hits'], '' if m['hits'] == 1 else 's',
                 ' ✓' if m['from_current'] else ''), m['chi2'], m['x'])
         self.history.setCurrentItem(None)
@@ -551,8 +606,7 @@ class DEWindow(QtWidgets.QWidget):
         sub = parts(self.problem)[k]
         st = copy.deepcopy(sub.stack)
         sub.apply(part_x(self.problem, self._x, k), st)
-        t = st.thickness_spread_target
-        it.setText(0, 'whole stack' if t == 'stack' else st.layers[t].name)
+        it.setText(0, st.spread_target_name())
         it.setText(1, 'Thickness spread (%s)' % {
             'gaussian': 'Gaussian', 'lognormal': 'log-normal'}[
                 st.thickness_spread_dist])
@@ -652,9 +706,17 @@ class DatasetView(QtWidgets.QSplitter):
                                    brush=pg.mkBrush(col + '33'),
                                    pen=pg.mkPen(col, width=0.6))
             curve = pg.PlotDataItem(pen=pg.mkPen(col, width=2))
-            vb = self.prof_vb2 if i in RIGHT else p.vb
-            vb.addItem(bars)
-            vb.addItem(curve)
+            # the bars straight into the view box (the Matplotlib exporter
+            # chokes on BarGraphItem); the curves where pyqtgraph's CSV
+            # export finds them (PlotItem.items), as in the Simulation tab
+            if i in RIGHT:
+                self.prof_vb2.addItem(bars)
+                self.prof_vb2.addItem(curve)
+                p.items.append(curve)
+            else:
+                p.vb.addItem(bars)
+                p.addItem(curve)
+            export_name(curve, PROFILE_EXPORT_NAMES[i])
             self.prof_bars.append(bars)
             self.prof_curves.append(curve)
         p.addItem(pg.InfiniteLine(
@@ -663,6 +725,7 @@ class DatasetView(QtWidgets.QSplitter):
         self.prof_layers = LayerLabels(p)     # band and name of each layer
         self.prof_cursor = Crosshair(w, p,
                                      lambda x: profile_readout(self, x))
+        p.layer_at = lambda z: profile_layers(self, z)
         v.addWidget(w)
         return box
 

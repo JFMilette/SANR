@@ -1,17 +1,21 @@
 """
-The Fit tool box of the Experimental tab: a "Fit — general" page (dataset,
-cost, worker processes, Revert: shared by every method), a "Fit —
-differential evolution" page (fit.de, with restarts), a "Fit — local
-(L-BFGS-B)" page (fit.de.de_fit.run_lbfgs: L-BFGS-B alone from the current
-values, followed in the same fit window as DE), a "Fit — multistart" page
-(fit.multistart: local fits from many starts, followed in the fit window,
-which lists the minima they reach as does the page's table, both
-updated as each start ends; DE restarts fill the table too) and a "Fit — Bayesian (DREAM)"
-page (fit.dream, which can start around a minimum of that table), with
-everything they do: building the fit problem from the chosen dataset
-and the Simulation tab, running it in a background thread, following it in
-its window (a closable tab of the main window, page_tabs) and sending
-results back to the Simulation tab.
+The Fit box of the Experimental tab: the settings every method shares
+(dataset, cost, target, worker processes, error floor, Revert) and a Method
+box, below which only the chosen method's options and buttons are shown
+(_show_method): differential evolution (fit.de, with restarts), scipy's
+basin hopping, dual annealing, SHGO and DIRECT (fit.de.global_fit, followed
+in the same fit window as DE), local
+L-BFGS-B (fit.de.de_fit.run_lbfgs: L-BFGS-B alone from the current values,
+followed in the same fit window as DE), least squares
+(fit.de.de_fit.run_lsq: trust-region least squares on the residuals from the
+current values, likewise), multistart (fit.multistart: local fits from many
+starts, followed in the fit window, which lists the minima they reach as
+does the multistart table, both updated as each start ends; DE restarts
+fill the table too) and Bayesian DREAM (fit.dream, which can start around a
+minimum of that table), with everything they do: building the fit problem
+from the chosen dataset and the Simulation tab, running it in a background
+thread, following it in its window (a closable tab of the main window,
+page_tabs) and sending results back to the Simulation tab.
 
 JOINT FIT -- "Select…" beside the Dataset box (fit.datasets_dialog) picks
 several datasets fitted together with one model, each parameter shared,
@@ -24,7 +28,7 @@ window's tab shown (a multistart's minima too), of the dataset chosen in
 the DREAM window, the first one's from the multistart table.
 
 FitPanel is a mixin of tabs.experimental.ExperimentalTab, which builds the
-tool box with _build_fit_box() and provides the datasets: `sets`,
+fit box with _build_fit_box() and provides the datasets: `sets`,
 `simulation`, `_set_index`, `channel_vectors`, `sim_vectors`,
 `add_simulation` and `_update_live`.
 
@@ -32,6 +36,7 @@ While a fit or a sampling runs (busy()), the Simulation tab is locked
 (SimulationTab.set_locked): its layers can be looked at, not changed.
 """
 
+import copy
 import os
 import warnings
 from html import escape as html_escape
@@ -45,6 +50,7 @@ from fit.datasets_dialog import DatasetsDialog
 from fit.problem import FitProblem, parameter_names
 from fit.de.de_fit import STRATEGIES
 from fit.de.de_window import DEThread, DEWindow
+from fit.de import global_fit
 from fit.dream.dream_fit import (PosteriorProblem, jittered_start, load_run,
                                  prior_tension)
 from fit.dream.dream_window import SESSIONS_DIR, DreamThread, DreamWindow
@@ -63,16 +69,29 @@ FIT_TARGETS = [('channels', 'every channel', ''),
 DREAM_STARTS = [('Latin hypercube', None), ('DE population', 'de'),
                 ('current values', 'current'),
                 ('multistart minimum', 'multistart')]
-MS_METHODS = [('L-BFGS-B', 'lbfgs'), ('short DE', 'de')]
-# height (px) a tool-box page keeps however short the window; taller pages
-# scroll
+# the Method box: key, label
+FIT_METHODS = [('de', 'Differential evolution'),
+               ('basinhopping', 'Basin hopping'),
+               ('dual_annealing', 'Dual annealing'), ('shgo', 'SHGO'),
+               ('direct', 'DIRECT'), ('lbfgs', 'Local (L-BFGS-B)'),
+               ('lsq', 'Least squares'), ('multistart', 'Multistart'),
+               ('dream', 'Bayesian (DREAM)')]
+SHGO_SAMPLING = [('sobol', 'Sobol'), ('halton', 'Halton'),
+                 ('simplicial', 'simplicial')]
+MS_METHODS = [('L-BFGS-B', 'lbfgs'), ('least squares', 'lsq'),
+              ('short DE', 'de')]
+# height (px) the fit box keeps however short the window; taller content
+# scrolls
 FIT_PAGE_MIN = 160
 # chi^2/N of an optimum above which DREAM's error scale is ticked
 SIGMA_SUGGEST = 2.0
 JOINT = 'joint'           # data of the Dataset box's joint-fit entry
 # tab names (_tab_name): the method, a number, the dataset (cut to
 # TAB_NAME_MAX characters) or how many datasets a joint fit has
-TAB_METHODS = {'de': 'DE', 'lbfgs': 'L-BFGS-B', 'multistart': 'Multistart',
+TAB_METHODS = {'de': 'DE', 'lbfgs': 'L-BFGS-B', 'lsq': 'LSQ',
+               'basinhopping': 'BH', 'dual_annealing': 'DA', 'shgo': 'SHGO',
+               'direct': 'DIRECT',
+               'multistart': 'Multistart',
                'dream': 'DREAM'}
 TAB_NAME_MAX = 18
 
@@ -105,7 +124,7 @@ class MultistartThread(QtCore.QThread):
 
 
 class FitPanel:
-    """The Fit tool box and its actions (see the module docstring)."""
+    """The Fit box and its actions (see the module docstring)."""
 
     @staticmethod
     def _grid(pairs, cols=2):
@@ -122,8 +141,8 @@ class FitPanel:
 
     @staticmethod
     def _page():
-        """A tool-box page and its form layout: a flat group box at the top
-        of the page, as in the Simulation tab."""
+        """A page of the fit box and its form layout: a flat group box, as
+        in the Simulation tab."""
         box = QtWidgets.QGroupBox()
         box.setFlat(True)
         f = QtWidgets.QFormLayout(box)
@@ -132,13 +151,11 @@ class FitPanel:
         pl = QtWidgets.QVBoxLayout(page)
         pl.setContentsMargins(0, 0, 0, 0)
         pl.addWidget(box)
-        pl.addStretch(1)
         return page, f
 
     def _build_fit_box(self):
-        """Fit tool box: the settings both methods share, then one page per
-        method."""
-        self.fit_tools = QtWidgets.QToolBox()
+        """Fit box: the settings every method shares and the method
+        chosen, then that method's options."""
         self.fit_set = QtWidgets.QComboBox()
         self.fit_set.setToolTip('Every channel of this dataset is fitted '
                                 '(of every dataset of a joint fit)')
@@ -159,8 +176,8 @@ class FitPanel:
         for key, label, _ in FIT_TARGETS:
             self.fit_target.addItem(label, key)
         self.fit_target.setToolTip(
-            'What DE, L-BFGS-B and multistart compare with the data '
-            '(DREAM always samples every channel):\n'
+            'What every method but DREAM compares with the data (DREAM '
+            'always samples every channel):\n'
             'every channel: each channel (R+, R−, or all four) on its own.\n'
             '(R+ + R−)/2: their mean point by point, where magnetism only '
             'enters at second order:\n  the NSLD, thicknesses and '
@@ -191,7 +208,7 @@ class FitPanel:
         self.fit_restarts.setToolTip(
             'Run the fit this many times (new random population each time) '
             'and keep the best;\nthe distinct minima they end in are listed '
-            'on the multistart page.')
+            'in the multistart table.')
         # mutation F: a random value in [min, max] each generation (dithering,
         # scipy's default 0.5 – 1); min = max is a constant F
         self.fit_mut_lo = dspin(0, 1.99, 2, 0.05)
@@ -233,7 +250,7 @@ class FitPanel:
             'rand1bin: random member + F × (difference of two members); no '
             'pull towards the best:\n  slower to converge, much wider '
             'search (to check whether a fit is stuck).\n'
-            'Also used by the multistart page\'s short DE and DREAM\'s DE '
+            'Also used by the multistart\'s short DE and DREAM\'s DE '
             'start.')
         self.fit_polish = QtWidgets.QCheckBox('polish (L-BFGS-B)')
         self.fit_polish.setChecked(True)
@@ -247,8 +264,8 @@ class FitPanel:
         self.btn_revert.clicked.connect(self.revert_fit)
         self.btn_revert.setEnabled(False)
 
-        # -- shared by both methods
-        page, f = self._page()
+        # -- shared by every method
+        general, f = self._page()
         row = QtWidgets.QHBoxLayout()
         row.addWidget(self.fit_set, 1)
         row.addWidget(self.btn_sets)
@@ -268,7 +285,25 @@ class FitPanel:
         row.addStretch(1)
         row.addWidget(self.btn_revert)
         f.addRow(row)
-        self._add_page(page, 'Fit — general')
+        self.fit_method = QtWidgets.QComboBox()
+        for key, label in FIT_METHODS:
+            self.fit_method.addItem(label, key)
+        self.fit_method.setToolTip(
+            'The fitting method; its options and buttons are shown below.\n'
+            'Differential evolution: a global search over the bounds.\n'
+            'Basin hopping, dual annealing, SHGO, DIRECT: scipy\'s other '
+            'global searches.\n'
+            'Local (L-BFGS-B): a gradient descent from the current values.\n'
+            'Least squares: trust-region least squares on the residuals '
+            'from the current values.\n'
+            'Multistart: local fits from the current values and from points '
+            'spread over the bounds.\n'
+            'Bayesian (DREAM): samples the posterior.')
+        line = QtWidgets.QFrame()
+        line.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        line.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
+        f.addRow(line)
+        f.addRow('Method', self.fit_method)
 
         # -- differential evolution
         page, f = self._page()
@@ -315,39 +350,45 @@ class FitPanel:
         self.page_tabs = None
         self._n_tabs = 0               # fit and DREAM tabs opened so far
         self._fit_out = self.fit_report  # the report of the page that fitted
-        self._add_page(page, 'Fit — differential evolution')
 
-        # -- local
-        self._add_page(self._build_local_page(), 'Fit — local (L-BFGS-B)')
-
-        # -- multistart
-        self._add_page(self._build_multistart_page(), 'Fit — multistart')
-
-        # -- DREAM
-        self._add_page(self._build_dream_page(), 'Fit — Bayesian (DREAM)')
-        self.fit_tools.setCurrentIndex(1)
-        # every page title stays on screen: the pages scroll when the
-        # window is too short for them (FIT_PAGE_MIN at least is kept)
-        tabs = sum(b.sizeHint().height() + 2 for b in
-                   self.fit_tools.findChildren(QtWidgets.QAbstractButton)
-                   if b.parent() is self.fit_tools)
-        self.fit_tools.setMinimumHeight(tabs + FIT_PAGE_MIN)
-        self.fit_tools.setEnabled(self.simulation is not None)
-        return self.fit_tools
-
-    def _add_page(self, page, title):
-        """A tool-box page in a scroll area (vertical only)."""
+        # -- the methods' options, the chosen one's shown below the general
+        # settings
+        self._method_pages = {
+            'de': page, 'lbfgs': self._build_local_page(),
+            'lsq': self._build_lsq_page(),
+            **self._build_global_pages(),
+            'multistart': self._build_multistart_page(),
+            'dream': self._build_dream_page()}
+        content = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(content)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        v.addWidget(general)
+        for key, _ in FIT_METHODS:
+            v.addWidget(self._method_pages[key])
+        v.addStretch(1)
+        self.fit_method.currentIndexChanged.connect(self._show_method)
+        self._show_method()
         area = QtWidgets.QScrollArea()
-        area.setWidget(page)
+        area.setWidget(content)
         area.setWidgetResizable(True)
         area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         area.setHorizontalScrollBarPolicy(
             QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        # its own size must not grow the tool box (the page scrolls instead)
+        # its own size must not grow the tab (it scrolls instead)
         area.setMinimumHeight(FIT_PAGE_MIN)
         area.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
                            QtWidgets.QSizePolicy.Policy.Ignored)
-        self.fit_tools.addItem(area, title)
+        self.fit_tools = QtWidgets.QGroupBox('Fit')
+        QtWidgets.QVBoxLayout(self.fit_tools).addWidget(area)
+        self.fit_tools.setEnabled(self.simulation is not None)
+        return self.fit_tools
+
+    def _show_method(self, *_):
+        """Only the chosen method's options under the general settings."""
+        key = self.fit_method.currentData()
+        for k, page in self._method_pages.items():
+            page.setVisible(k == key)
 
     def _build_local_page(self):
         """The local page: L-BFGS-B alone from the current values, in the
@@ -380,6 +421,186 @@ class FitPanel:
         f.addRow(self.lb_report)
         return page
 
+    def _build_lsq_page(self):
+        """The least-squares page: fit.de.de_fit.run_lsq from the current
+        values, in the fit window."""
+        page, f = self._page()
+        self.lsq_maxiter = QtWidgets.QSpinBox()
+        self.lsq_maxiter.setRange(1, 100000)
+        self.lsq_maxiter.setValue(1000)
+        self.lsq_maxiter.setToolTip('Maximum number of least-squares '
+                                    'iterations')
+        f.addRow(self._grid([('Max iter', self.lsq_maxiter)]))
+        f.addRow(QtWidgets.QLabel(
+            '<i>Trust-region least squares (Gauss-Newton steps) on the '
+            'residuals, from the current values of the Simulation tab, '
+            'within the fit bounds: often fewer steps than L-BFGS-B, but it '
+            'also stops in the minimum nearest the start.</i>',
+            wordWrap=True))
+        row = QtWidgets.QHBoxLayout()
+        self.btn_lsq = QtWidgets.QPushButton('Fit')
+        self.btn_lsq.setToolTip('Fit in the fit window; stop it there')
+        self.btn_lsq_window = QtWidgets.QPushButton('Show')
+        self.btn_lsq_window.setToolTip('Show the last fit')
+        self.btn_lsq_window.setEnabled(False)
+        row.addWidget(self.btn_lsq)
+        row.addWidget(self.btn_lsq_window)
+        f.addRow(row)
+        self.btn_lsq.clicked.connect(self.start_lsq)
+        self.btn_lsq_window.clicked.connect(self._show_fit_window)
+        self.lsq_report = QtWidgets.QLabel(wordWrap=True)
+        self.lsq_report.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        f.addRow(self.lsq_report)
+        return page
+
+    def _build_global_pages(self):
+        """The pages of fit.de.global_fit's methods: {method: page}.  Each
+        method's options widgets, by run_global keyword, are in
+        _global_widgets[method] (read by _global_options)."""
+        def spin(lo, hi, value, tip, step=1, special=None):
+            w = QtWidgets.QSpinBox()
+            w.setRange(lo, hi)
+            w.setSingleStep(step)
+            w.setValue(value)
+            if special:
+                w.setSpecialValueText(special)
+            w.setToolTip(tip)
+            return w
+
+        def check(text, on, tip):
+            w = QtWidgets.QCheckBox(text)
+            w.setChecked(on)
+            w.setToolTip(tip)
+            return w
+
+        T = SciSpinBox(1e6)
+        T.setValue(1.0)
+        T.setToolTip(
+            'Metropolis temperature, in cost units (χ²/N for the χ² cost): '
+            'a hop to a minimum this much worse is accepted with '
+            'probability 1/e.')
+        step = dspin(0.01, 1.0, 2, 0.05)
+        step.setValue(0.1)
+        step.setToolTip(
+            'Largest random step of each parameter, as a fraction of its '
+            'bounds (scipy adapts it to accept half the hops)')
+        temp = dspin(0.02, 5e4, 2, 100)
+        temp.setValue(5230.0)
+        temp.setToolTip('Initial temperature of the annealing (scipy\'s '
+                        'default 5230): higher visits farther')
+        sampling = QtWidgets.QComboBox()
+        for key, label in SHGO_SAMPLING:
+            sampling.addItem(label, key)
+        sampling.setToolTip(
+            'How the sampling points are spread: Sobol or Halton sequences, '
+            'or simplicial (the vertices of a triangulation of the box, '
+            'slow beyond a few parameters)')
+        # method: (options as (label, run_global keyword, widget); boxes
+        # (keyword, check box); note)
+        specs = {
+            'basinhopping': (
+                [('Hops', 'niter', spin(1, 100000, 100, 'Number of hops')),
+                 ('T', 'T', T), ('Step', 'stepsize', step)], [],
+                'From the current values: a random hop, then L-BFGS-B, '
+                'the new minimum kept by a Metropolis test; finds the '
+                'minima near the start one by one.'),
+            'dual_annealing': (
+                [('Max iter', 'maxiter',
+                  spin(1, 100000, 1000, 'Number of annealing iterations')),
+                 ('Initial T', 'initial_temp', temp)],
+                [('local_search', check(
+                    'local search (L-BFGS-B)', True,
+                    'Refine each new minimum the annealing finds with '
+                    'L-BFGS-B'))],
+                'Generalised simulated annealing from the current values '
+                'over the whole bounds.  The annealing runs one point at a '
+                'time; the local search\'s gradients use the workers.'),
+            'shgo': (
+                [('Points', 'n', spin(4, 100000, 128,
+                                      'Sampling points per iteration')),
+                 ('Iterations', 'iters',
+                  spin(1, 100, 1, 'Sampling iterations')),
+                 ('Sampling', 'sampling_method', sampling)], [],
+                'Simplicial homology global optimisation: samples the '
+                'bounds, then runs L-BFGS-B from each candidate minimum.  '
+                'Ends with the global and every local minimum found, in '
+                'the fit window and the multistart table.  The sampling '
+                'uses the workers.'),
+            'direct': (
+                [('Max evals', 'maxfun', spin(
+                    0, 10_000_000, 0, 'Most cost evaluations; auto = '
+                    '1000 per fitted parameter', step=1000, special='auto')),
+                 ('Max iter', 'maxiter', spin(1, 100000, 1000,
+                                              'Most iterations'))],
+                [('locally_biased', check(
+                    'locally biased (DIRECT-L)', True,
+                    'DIRECT-L: refine the best boxes first (faster); '
+                    'unticked, the original DIRECT (more global)'))],
+                'DIviding RECTangles: deterministic, from the centre of '
+                'the bounds, ignores the current values.  One process '
+                '(Workers is not used).')}
+        self._global_widgets, self._global_reports = {}, {}
+        self._global_buttons, self._global_windows = [], []
+        pages = {}
+        for method, (rows, boxes, note) in specs.items():
+            page, f = self._page()
+            f.addRow(self._grid([(label, w) for label, _, w in rows]))
+            for _, w in boxes:
+                f.addRow('', w)
+            f.addRow(QtWidgets.QLabel('<i>%s</i>' % note, wordWrap=True))
+            row = QtWidgets.QHBoxLayout()
+            run = QtWidgets.QPushButton('Fit')
+            run.setToolTip('Fit in the fit window; stop it there')
+            show = QtWidgets.QPushButton('Show')
+            show.setToolTip('Show the last fit')
+            show.setEnabled(False)
+            row.addWidget(run)
+            row.addWidget(show)
+            f.addRow(row)
+            run.clicked.connect(lambda _, m=method: self.start_fit(m))
+            show.clicked.connect(self._show_fit_window)
+            report = QtWidgets.QLabel(wordWrap=True)
+            report.setTextInteractionFlags(
+                QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+            f.addRow(report)
+            self._global_widgets[method] = dict(
+                [(key, w) for _, key, w in rows] + boxes)
+            self._global_reports[method] = report
+            self._global_buttons.append(run)
+            self._global_windows.append(show)
+            pages[method] = page
+        return pages
+
+    def _global_options(self, method):
+        """run_global's options of `method` from its page."""
+        out = {}
+        for key, w in self._global_widgets[method].items():
+            if isinstance(w, QtWidgets.QCheckBox):
+                out[key] = w.isChecked()
+            elif isinstance(w, QtWidgets.QComboBox):
+                out[key] = w.currentData()
+            else:
+                out[key] = w.value()
+        if method == 'direct' and not out['maxfun']:
+            out['maxfun'] = None                    # auto
+        return out
+
+    def _set_global_options(self, saved):
+        """Inverse of _global_options for every method: saved {method:
+        options} from a session (missing ones keep their value)."""
+        for method, opts in (saved or {}).items():
+            for key, v in opts.items():
+                w = self._global_widgets.get(method, {}).get(key)
+                if w is None:
+                    continue
+                if isinstance(w, QtWidgets.QCheckBox):
+                    w.setChecked(bool(v))
+                elif isinstance(w, QtWidgets.QComboBox):
+                    w.setCurrentIndex(max(0, w.findData(v)))
+                else:
+                    w.setValue(0 if v is None else v)
+
     def _build_multistart_page(self):
         """The multistart page: local fits from the current values and
         from points spread over the bounds (fit.multistart), and the table
@@ -396,14 +617,17 @@ class FitPanel:
             self.ms_method.addItem(label, key)
         self.ms_method.setToolTip(
             'L-BFGS-B: a gradient descent from each start (fast).\n'
+            'least squares: trust-region least squares on the residuals '
+            '(Gauss-Newton like, often fewer steps than L-BFGS-B).\n'
             'short DE: 100 generations of differential evolution holding '
-            'the start, then the polish (slower, looks wider).')
+            'the start, then the polish if it is ticked in the DE options\n'
+            '(slower, looks wider).')
         f.addRow(self._grid([('Starts', self.ms_starts),
                              ('Local fit', self.ms_method)]))
         row = QtWidgets.QHBoxLayout()
         self.btn_ms_run = QtWidgets.QPushButton('Run')
         self.btn_ms_run.setToolTip(
-            'Fit from every start with the general page\'s cost and '
+            'Fit from every start with the general cost and '
             'workers')
         self.btn_ms_stop = QtWidgets.QPushButton('Stop')
         self.btn_ms_stop.setEnabled(False)
@@ -438,7 +662,7 @@ class FitPanel:
         self.btn_ms_dream = QtWidgets.QPushButton('Start DREAM here')
         self.btn_ms_dream.setToolTip(
             'Sample with DREAM from jittered copies of the selected minimum '
-            '(the DREAM page\'s settings)')
+            '(the DREAM options)')
         for b in (self.btn_ms_apply, self.btn_ms_dream):
             b.setEnabled(False)
             row.addWidget(b)
@@ -473,7 +697,8 @@ class FitPanel:
             method=self.ms_method.currentData(),
             workers=self.fit_workers.value(),
             de_options=dict(popsize=self.fit_pop.value(), init='sobol',
-                            strategy=self.fit_strategy.currentData()))
+                            strategy=self.fit_strategy.currentData(),
+                            polish=self.fit_polish.isChecked()))
         self._ms.progress.connect(self._ms_progress)
         self._ms.progress.connect(self.fit_window.set_starts)
         self._ms.status.connect(self.fit_window.set_start_status)
@@ -489,7 +714,8 @@ class FitPanel:
         self._ms.failed.connect(self.fit_window.fail)
         self._ms.finished.connect(self._ms_cleanup)
         sim.set_locked(True)
-        for b in (self.btn_fit, self.btn_lbfgs, self.btn_sample,
+        for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
+                  *self._global_buttons, self.btn_sample,
                   self.btn_revert, self.btn_ms_run, self.btn_ms_apply,
                   self.btn_ms_dream):
             b.setEnabled(False)
@@ -522,7 +748,8 @@ class FitPanel:
         self._ms.deleteLater()
         self._ms = None
         self.simulation.set_locked(False)
-        for b in (self.btn_fit, self.btn_lbfgs, self.btn_sample,
+        for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
+                  *self._global_buttons, self.btn_sample,
                   self.btn_ms_run):
             b.setEnabled(True)
         self.btn_ms_stop.setEnabled(False)
@@ -577,7 +804,7 @@ class FitPanel:
 
     def _suggest_sigma(self, problem, x):
         """After an optimum with chi^2/N > 2: tick "fit error scale" on the
-        DREAM page and say why (the user can untick it)."""
+        DREAM options and say why (the user can untick it)."""
         if problem.cost != 'chi2' or problem.target != 'channels':
             return
         c = float(np.mean(problem.residuals(x)**2))
@@ -630,11 +857,11 @@ class FitPanel:
         """Start DREAM around the selected minimum."""
         self.dream_start.setCurrentIndex(
             self.dream_start.findData('multistart'))
-        self.fit_tools.setCurrentIndex(self.fit_tools.count() - 1)
+        self.fit_method.setCurrentIndex(self.fit_method.findData('dream'))
         self.start_dream()
 
     def _build_dream_page(self):
-        """The DREAM page of the fit tool box."""
+        """The DREAM options of the fit box."""
         page, f = self._page()
         self.dream_gen = QtWidgets.QSpinBox()
         self.dream_gen.setRange(100, 1_000_000)
@@ -676,7 +903,7 @@ class FitPanel:
         self.dream_floor = QtWidgets.QCheckBox('fit error floor')
         self.dream_floor.setToolTip(
             'Sample a relative error floor f, log10 f in [-4, -0.5]: errors '
-            'sqrt((s dR)² + (f R)²) (log10_error_floor);\nthe general page\'s '
+            'sqrt((s dR)² + (f R)²) (log10_error_floor);\nthe general '
             'fixed floor is then not used')
         self.dream_note = QtWidgets.QLabel(wordWrap=True)
         self.dream_stop = QtWidgets.QCheckBox('stop when converged')
@@ -940,7 +1167,7 @@ class FitPanel:
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter('always')
                     fits.append((s['name'], FitProblem(
-                        sim.stack, data, cost, qmin, qmax, grid,
+                        self._set_stack(s), data, cost, qmin, qmax, grid,
                         error_floor=self.fit_floor.value() / 100,
                         target=target)))
             except ValueError as exc:
@@ -962,6 +1189,32 @@ class FitPanel:
             else '%s: %s' % (', '.join(who), msg)) + '<br>'
             for msg, who in said.items())
         return problem, inputs, qmin, qmax, note
+
+    def _set_stack(self, s):
+        """The stack dataset s is fitted with: the Simulation tab's, but in
+        the 'data' resolution mode with the dQ table of s itself
+        (tabs.resolution.dq_table, the overlap rule of the table chosen
+        there), so that its points without a dQ and its curves in the fit
+        window take its own dQ, not the chosen dataset's; the Simulation
+        tab's stack itself if s is that dataset or has no dQ."""
+        # imported here: tabs.resolution imports tabs.simulation
+        from tabs.resolution import dq_table
+        st = self.simulation.stack
+        res = st.resolution
+        if not (res.get('enabled') and res.get('mode') == 'data') or \
+                res.get('data_set') == s['name']:
+            return st
+        chans = dict(self.dq_sets()).get(s['name'])
+        if not chans:
+            return st
+        try:
+            q, dq = dq_table(chans, res.get('data_overlap', 'mean'))
+        except ValueError:
+            return st
+        st = copy.deepcopy(st)
+        st.resolution.update(data_q=q.tolist(), data_dq=dq.tolist(),
+                             data_set=s['name'])
+        return st
 
     def _set_fit_start(self, problem):
         """What Revert restores: the stack's varied parameters as the fit
@@ -1019,14 +1272,20 @@ class FitPanel:
         """A local fit: L-BFGS-B alone from the current values."""
         self.start_fit('lbfgs')
 
+    def start_lsq(self):
+        """A local fit: least squares from the current values."""
+        self.start_fit('lsq')
+
     def start_fit(self, method='de'):
-        """Fit with DE (method 'de') or L-BFGS-B alone ('lbfgs'), followed
-        in the fit window; its page's report says how it goes."""
+        """Fit with DE (method 'de'), L-BFGS-B alone ('lbfgs'), least
+        squares ('lsq') or a method of fit.de.global_fit, followed in the
+        fit window; its page's report says how it goes."""
         sim = self.simulation
         if sim is None or self.busy():
             return
-        self._fit_out = out = self.lb_report if method == 'lbfgs' \
-            else self.fit_report
+        self._fit_out = out = dict(
+            self._global_reports, lbfgs=self.lb_report,
+            lsq=self.lsq_report).get(method, self.fit_report)
         mut = (self.fit_mut_lo.value(), self.fit_mut_hi.value())
         if method == 'de' and mut[0] > mut[1]:
             out.setText(self._error('Mutation: min must not exceed max.'))
@@ -1075,7 +1334,9 @@ class FitPanel:
             + (' + prior' if any(problem.priors) else ''),
             polish=self.fit_polish.isChecked(), method=method)
         self._show_fit_window()
-        for b in (self.btn_window, self.btn_lbfgs_window, self.btn_ms_window):
+        for b in (self.btn_window, self.btn_lbfgs_window,
+                  self.btn_lsq_window, *self._global_windows,
+                  self.btn_ms_window):
             b.setEnabled(True)
         # a live simulation dataset, computed from the same pairs as the
         # fit, shows a result sent from the fit window against the data
@@ -1103,15 +1364,21 @@ class FitPanel:
         self._launch_de(self._fit_problem, mut, resume=self._de_state)
 
     def _launch_de(self, problem, mut, resume=None, method='de'):
-        """Run DE (or L-BFGS-B alone, method 'lbfgs') on problem in a
-        DEThread, wired to the fit window."""
+        """Run DE (or L-BFGS-B alone, method 'lbfgs', least squares, 'lsq',
+        or a method of fit.de.global_fit) on problem in a DEThread, wired
+        to the fit window."""
         sim = self.simulation
         title, qmin, qmax = self._fit_what
         self._fit_ok = True
-        if method == 'lbfgs':
-            self._fit = DEThread(problem, method='lbfgs',
-                                 maxiter=self.lb_maxiter.value(),
+        if method in ('lbfgs', 'lsq'):
+            self._fit = DEThread(problem, method=method,
+                                 maxiter=(self.lb_maxiter if method == 'lbfgs'
+                                          else self.lsq_maxiter).value(),
                                  workers=self.fit_workers.value())
+        elif method in global_fit.METHODS:
+            self._fit = DEThread(problem, method=method,
+                                 workers=self.fit_workers.value(),
+                                 **self._global_options(method))
         else:
             self._fit = DEThread(problem, maxiter=self.fit_maxiter.value(),
                                  popsize=self.fit_pop.value(),
@@ -1123,7 +1390,10 @@ class FitPanel:
                                  atol=0.0, init='sobol', resume=resume,
                                  strategy=self.fit_strategy.currentData())
         self._fit.minima.connect(
-            lambda m, p=problem: self._ms_show(p, m, 'DE restarts'))
+            lambda m, p=problem: self._ms_show(
+                p, m, global_fit.LABELS.get(method, 'DE restarts')))
+        if method in global_fit.METHODS:
+            self._fit.minima.connect(self.fit_window.set_minima)
         self._fit.progress.connect(self._fit_progress)
         self._fit.progress.connect(self.fit_window.add_generation)
         self._fit.status.connect(self._fit_status)
@@ -1133,7 +1403,8 @@ class FitPanel:
         self._fit.finished.connect(self._fit_cleanup)
         # a result is only sent to the stack the fit started from
         sim.set_locked(True)
-        for b in (self.btn_fit, self.btn_lbfgs, self.btn_sample,
+        for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
+                  *self._global_buttons, self.btn_sample,
                   self.btn_revert, self.btn_ms_run):
             b.setEnabled(False)
         self._fit_out.setText(
@@ -1234,7 +1505,8 @@ class FitPanel:
         self._dream.finished.connect(self._dream_cleanup)
         if self.simulation is not None:
             self.simulation.set_locked(True)
-        for b in (self.btn_fit, self.btn_lbfgs, self.btn_sample,
+        for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
+                  *self._global_buttons, self.btn_sample,
                   self.btn_revert, self.btn_dream_load, self.btn_ms_run):
             b.setEnabled(False)
         self.dream_report.setText(report)
@@ -1387,6 +1659,7 @@ class FitPanel:
         if w is self.fit_window:
             self.fit_window = None
             buttons = (self.btn_window, self.btn_lbfgs_window,
+                       self.btn_lsq_window, *self._global_windows,
                        self.btn_ms_window)
         elif w is self.dream_window:
             self.dream_window = None
@@ -1411,7 +1684,8 @@ class FitPanel:
         self._dream.deleteLater()
         self._dream = None
         self.simulation.set_locked(False)
-        for b in (self.btn_fit, self.btn_lbfgs, self.btn_sample,
+        for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
+                  *self._global_buttons, self.btn_sample,
                   self.btn_dream_load, self.btn_ms_run):
             b.setEnabled(True)
 
@@ -1542,7 +1816,8 @@ class FitPanel:
         self._fit.deleteLater()
         self._fit = None
         self.simulation.set_locked(False)
-        for b in (self.btn_fit, self.btn_lbfgs, self.btn_sample,
+        for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
+                  *self._global_buttons, self.btn_sample,
                   self.btn_ms_run):
             b.setEnabled(True)
 

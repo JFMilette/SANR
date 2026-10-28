@@ -53,8 +53,10 @@ from fit.dream.dream_fit import (FLOOR_NAME, SIGMA_NAME, chain_best,
                          chain_curves,
                          chains_split, format_summary,
                          posterior_warnings, predictive_bands, profile_bands,
+                         profile_layers,
                          sample, save_result, summary_table)
 import line_colours
+import plot_export
 import style
 from tabs.simulation import (PARAM_DISPLAY, PROFILE_QUANTITIES, Crosshair,
                              fmt, shown_names)
@@ -599,8 +601,11 @@ class CornerPanel(QtWidgets.QWidget):
 A_PRED, A_95, A_68 = 55, 110, 170
 
 
-def band(plot, x, lo, hi, colour, alpha, log=False, edges=False):
-    """Filled band between lo and hi, with thin edge lines if `edges`.
+def band(plot, x, lo, hi, colour, alpha, log=False, edges=False,
+         name=None):
+    """Filled band between lo and hi, with thin edge lines if `edges`;
+    name: its edges' columns in pyqtgraph's CSV export ('<name> low' /
+    '<name> high'), no legend entry.
     FillBetweenItem ignores the plot's log mode, so on a log axis
     (log=True) its edges are PlotCurveItems in log10 coordinates, like the
     error bars."""
@@ -615,6 +620,8 @@ def band(plot, x, lo, hi, colour, alpha, log=False, edges=False):
     fill = pg.FillBetweenItem(a, b, brush=pg.mkBrush(c))
     for it in (fill, a, b):
         plot.addItem(it)
+    if name is not None:
+        a.opts['name'], b.opts['name'] = name + ' low', name + ' high'
     return [fill, a, b]
 
 
@@ -811,10 +818,13 @@ class ProfilePanel(pg.GraphicsLayoutWidget):
         for it in self._chain_items:
             it.setVisible(on)
 
-    def show_bands(self, z, nuc, mag, chains=()):
+    def show_bands(self, z, nuc, mag, chains=(), layers=None):
         """profile_bands (z, nuc, mag), and chain_curves `chains` on the
-        same z over them: NSLD solid, MSLD dashed."""
+        same z over them: NSLD solid, MSLD dashed; layers: profile_layers,
+        for the CSV export's 'layer' column (plot_export)."""
         p = self.plot
+        p.layer_at = None if layers is None else \
+            plot_export.layer_names(*layers)
         p.clear()                      # the cursor's items stay
         self._chain_items = []
         for c in chains:
@@ -829,8 +839,9 @@ class ProfilePanel(pg.GraphicsLayoutWidget):
                            mag / 1e-6)]
         for name, col, bands in self._bands[1]:
             lo95, lo68, med, hi68, hi95 = bands
-            band(p, z, lo95, hi95, col, A_95)
-            band(p, z, lo68, hi68, col, A_68)
+            short = name.split(' (')[0]
+            band(p, z, lo95, hi95, col, A_95, name=short + ' 95%')
+            band(p, z, lo68, hi68, col, A_68, name=short + ' 68%')
             p.addItem(pg.PlotDataItem(z, med, pen=pg.mkPen(col, width=1.5),
                                       name=name))
         self.cursor.refresh()
@@ -1246,7 +1257,9 @@ class DreamWindow(QtWidgets.QWidget):
                 chains = chain_curves(self.result, self.problem, z, part=k)
                 pred.show_bands(predictive_bands(self.result, self.problem,
                                                  part=k), chains)
-                prof.show_bands(z, nuc, mag, chains)
+                prof.show_bands(z, nuc, mag, chains,
+                                profile_layers(self.result, self.problem,
+                                               part=k))
                 box.setToolTip(
                     'Each chain\'s best kept state over the bands, in its '
                     'Traces colour (SLD: NSLD solid, MSLD dashed):<br>'

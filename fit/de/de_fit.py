@@ -47,13 +47,21 @@ member, part way to the best), 'rand1bin' (trial = r0 + F (r1 - r2): no
 pull towards the best, slower to converge, much wider search).
 
 LOCAL -- run_lbfgs runs L-BFGS-B alone from the current values (the Fit
-tool box's local page): the same cost, bounds and workers as the polish.
+tool box's local method): the same cost, bounds and workers as the polish.
+
+LEAST SQUARES -- run_lsq runs scipy's least_squares (trust region
+reflective, within the bounds) from the current values on the residuals
+themselves, scaled so that their sum of squares is the cost (lsq_residuals:
+problem.residuals / sqrt(N), and sqrt(penalty / npoints) for each prior, see
+fit.problem COST): Gauss-Newton steps, often fewer than L-BFGS-B's.  Its
+Jacobian is a forward difference (backward at the upper bound), its
+columns sent to the pool as one batch with workers > 1.
 """
 
 import math
 
 import numpy as np
-from scipy.optimize import differential_evolution, minimize
+from scipy.optimize import differential_evolution, least_squares, minimize
 
 from fit.workers import Wrapper, start as start_pool, stop as stop_pool
 
@@ -84,6 +92,29 @@ class _Cost(Wrapper):
         if self.cancelled is not None and self.cancelled():
             raise FitCancelled
         return self.problem(u)
+
+
+def lsq_residuals(problem, u):
+    """Residuals at normalised u whose sum of squares is problem(u) (see
+    LEAST SQUARES)."""
+    x = problem.to_x(u)
+    r = problem.residuals(x)
+    r = r / math.sqrt(len(r))
+    if any(problem.priors):
+        pen = [p.penalty(v) for p, v in zip(problem.priors, x)
+               if p is not None]
+        r = np.concatenate([r, np.sqrt(np.maximum(pen, 0.0)
+                                       / problem.npoints)])
+    return r
+
+
+class _Residuals(_Cost):
+    """lsq_residuals(problem, u), raising FitCancelled as _Cost does."""
+
+    def __call__(self, u):
+        if self.cancelled is not None and self.cancelled():
+            raise FitCancelled
+        return lsq_residuals(self.problem, u)
 
 
 class _PoolMap:
@@ -260,6 +291,58 @@ def run_lbfgs(problem, maxiter=1000, callback=None, cancelled=None,
         if pool is not None:
             pool.close()
     return problem.to_x(res.x), float(res.fun), best[2], str(res.message)
+
+
+def run_lsq(problem, maxiter=1000, callback=None, cancelled=None,
+            workers=1, status=None, x0=None):
+    """Least squares on `problem`'s residuals (see LEAST SQUARES) from x0
+    (normalised; default the current values), at most maxiter iterations;
+    callback, status ({'phase': 'lsq', ...}), cancelled, workers and the
+    return value as in run_lbfgs."""
+    u0 = problem.x0() if x0 is None else np.clip(x0, 0.0, 1.0)
+    resid = _Residuals(problem, cancelled)
+    best = [problem.to_x(u0), None, 0]                # x, cost, iteration
+
+    def report():
+        if callback is not None:
+            callback(*best)
+        if status is not None:
+            status({'phase': 'lsq', 'iteration': best[2],
+                    'maxiter': maxiter, 'best': best[1]})
+
+    def cb(intermediate_result):
+        best[:] = [problem.to_x(intermediate_result.x),
+                   2 * float(intermediate_result.cost), best[2] + 1]
+        report()
+        if best[2] >= maxiter:
+            raise StopIteration
+
+    def jac(u):
+        # forward differences as scipy's '2-point', backward at the top;
+        # u itself in the same batch
+        h = np.sqrt(np.finfo(float).eps) * np.maximum(1.0, np.abs(u))
+        h = np.where(u + h > 1.0, -h, h)
+        r, *cols = pool(resid, [u] + [u + h[j] * np.eye(len(u))[j]
+                                      for j in range(len(u))])
+        return np.column_stack([(c - r) / hj for c, hj in zip(cols, h)])
+
+    pool = None
+    try:
+        best[1] = float(np.sum(resid(u0)**2))
+        report()
+        pool = _PoolMap(workers, cancelled, resid) if workers > 1 \
+            else None
+        res = least_squares(
+            resid, np.copy(u0), bounds=(0.0, 1.0), method='trf',
+            callback=cb, jac='2-point' if pool is None else jac)
+    except FitCancelled:
+        return best[0], best[1], best[2], 'stopped'
+    finally:
+        if pool is not None:
+            pool.close()
+    msg = 'maximum number of iterations reached' if res.status == -2 \
+        else str(res.message)
+    return problem.to_x(res.x), 2 * float(res.cost), best[2], msg
 
 
 def run_de_restarts(problem, restarts=1, seed=None, callback=None,

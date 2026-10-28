@@ -13,6 +13,22 @@ Simulation tab: build a Stack by hand and look at its profile and reflectivity.
             to select it), grey verticals = nominal interfaces.
 
 save_model / load_model write / read the stack and Q settings as JSON.
+
+MODELS -- the tab holds several models (Stack.to_dict each), the Model box
+above the layer list showing one of them in self.stack: switching keeps the
+shown one as it is and loads the other (restore_state, models=False), so
+each keeps its layers, general parameters, resolution, fit settings and
+selected layer; the polarisation, Q range and display are the tab's.  New
+takes the default layers (make_stack) with the shown model's other settings,
+Copy the whole model.  A session file is the shown model as before, the
+others under 'simulation' -> 'models'; switching is off while a fit runs.
+
+The thickness spread and the mixture of models (model.stack MIXTURE) have
+their own window (General parameters -> Spread / mixture -> Edit…): the
+spread's rows, a row per other model (used, weight, bounds, Fit) and a
+thickness tick per layer (shared by every mixed model).  Each recompute
+links the mixed models (Stack._mix_stacks, from their stored dicts) and
+writes the values they share back into those dicts.
 The Polarisation box links each channel R++, R+-, R-+, R--, R+, R- to an
 incident polarisation Pi and an analysed polarisation Pa (3-vectors in the
 sample frame, length = efficiency, Pa = 0 for no analyser); the plot and
@@ -35,8 +51,9 @@ from model.polarisation import (CHANNEL_NAMES, default_vectors, in_plane,
 from model.stack import (DEFAULT_SMEARING, INTERFACE_ORDERS,
                          ROUGHNESS_SCHEMES, SMEARING_MODES, SPREAD_BOUND,
                          SPREAD_NODE_CHOICES, Layer, Stack, cos_turns,
-                         spread_factors, wrap_turns)
+                         default_fit, spread_factors, wrap_turns)
 import line_colours
+import plot_export                     # noqa: F401 (the CSV export's layers)
 import style
 from fit.priors import complete as complete_prior
 
@@ -52,6 +69,15 @@ PROFILE_QUANTITIES = [
     ('θ', 'MSLD θ, out of plane (deg)', '#e36fa8'),
 ]
 RIGHT = (2, 3)                        # PROFILE_QUANTITIES on the angle axis
+# column names of the profile curves in pyqtgraph's CSV export ('<name>_x'
+# is the depth in A, '<name>_y' the value in the plot's units)
+PROFILE_EXPORT_NAMES = ('NSLD', 'MSLD_rho', 'MSLD_phi_deg', 'MSLD_theta_deg')
+
+
+def export_name(item, name):
+    """Name a plot item for pyqtgraph's CSV export (its column headers)
+    without giving it a legend entry: set after the item is added."""
+    item.opts['name'] = name
 # combo label, axis label (None = raw reflectivities), formula beside the combo.
 # The channels are the Pi / Pa pairs of the Polarisation box.
 REFL_QUANTITIES = [
@@ -358,6 +384,15 @@ def fmt(v):
     return '—' if not np.isfinite(v) else '%.4g' % v
 
 
+def profile_layers(view, z):
+    """The name of the layer at each depth z of a profile plot (its CSV
+    export's 'layer' column; view as for profile_readout)."""
+    if view._profile is None:
+        return [''] * len(z)
+    return plot_export.layer_names(view._profile[1],
+                                   [l.name for l in view.stack.layers])(z)
+
+
 def profile_readout(view, x):
     """Cursor text for a depth profile plot: layer, depth, checked curves.
     view holds the plot as the Simulation tab does: stack, _profile and
@@ -552,7 +587,8 @@ PARAM_DISPLAY = {attr: (label.split(' (')[0], scale,
 PARAM_DISPLAY.update(scale=('Scale', 1.0, ''),
                      background=('Background', 1.0, ''),
                      q_shift=('Q shift', 1.0, 'Å⁻¹'),
-                     thickness_spread=('Thickness spread', 100.0, '%'))
+                     thickness_spread=('Thickness spread', 100.0, '%'),
+                     weight=('Weight', 1.0, ''))
 # the stack rows shown in other units than stored: attr -> factor (shown =
 # factor x stored)
 STACK_ROW_FACTOR = {'thickness_spread': 100.0}
@@ -1060,14 +1096,26 @@ class LayerEditor(QtWidgets.QGroupBox):
             'parameter' % st.layers[i].name)
         total = QtWidgets.QRadioButton(
             'Fixed total: a fit keeps the total thickness of %s and these '
-            'layers\nand varies each; the deepest of them takes what the '
-            'others leave' % st.layers[i].name)
+            'layers\nat the value below and varies each; the deepest of them '
+            'takes what the others leave' % st.layers[i].name)
+        # the total, starting at the members' current sum; another value is
+        # reached by changing the deepest member's thickness
+        total_row = QtWidgets.QHBoxLayout()
+        total_row.addWidget(QtWidgets.QLabel('Total thickness'))
+        total_val = dspin(0.0, 1e6, 4, 1.0, ' Å')
+        total_val.setToolTip(
+            'The total thickness the fit keeps; set by changing the deepest '
+            'member\'s thickness,\nso at least the sum of the others')
+        total_row.addWidget(total_val)
+        total_row.addStretch(1)
+        edited = [False]                # the user's value, kept on toggles
         # an equal thickness tie rarely has overlapping bounds (a layer and
         # its interface): a fixed total is the default
         (total if attr == 'thickness' else equal).setChecked(True)
         if attr == 'thickness':
             v.addWidget(equal)
             v.addWidget(total)
+            v.addLayout(total_row)
         else:
             v.addWidget(QtWidgets.QLabel(
                 'Fit these layers\' value equal to %s\'s, as one parameter:'
@@ -1077,6 +1125,29 @@ class LayerEditor(QtWidgets.QGroupBox):
             b = QtWidgets.QCheckBox(st.layers[j].name)
             v.addWidget(b)
             boxes.append((j, b))
+
+        def members():
+            return sorted([i] + [j for j, b in boxes if b.isChecked()])
+
+        def update_total():
+            """At least the sum of the members but the deepest; the current
+            sum until the user types a value."""
+            mem = members()
+            rest = sum(st.layers[j].thickness for j in mem[:-1])
+            total_val.blockSignals(True)
+            total_val.setMinimum(rest)
+            if not edited[0]:
+                total_val.setValue(rest + st.layers[mem[-1]].thickness)
+            total_val.blockSignals(False)
+            total_val.setEnabled(total.isChecked())
+
+        def user_edit(_):
+            edited[0] = True
+        total_val.valueChanged.connect(user_edit)
+        total.toggled.connect(update_total)
+        for _, b in boxes:
+            b.toggled.connect(update_total)
+        update_total()
         bb = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok |
             QtWidgets.QDialogButtonBox.StandardButton.Cancel)
@@ -1088,7 +1159,12 @@ class LayerEditor(QtWidgets.QGroupBox):
         chosen = [j for j, b in boxes if b.isChecked()]
         if chosen:
             if total.isChecked():
-                st.tie([(j, attr) for j in sorted([i] + chosen)], 'total')
+                mem = members()
+                total_val.interpretText()           # a value still typed in
+                rest = sum(st.layers[j].thickness for j in mem[:-1])
+                st.layers[mem[-1]].thickness = max(total_val.value() - rest,
+                                                   0.0)
+                st.tie([(j, attr) for j in mem], 'total')
             else:
                 st.tie([(i, attr)] + [(j, attr) for j in chosen])
             self._show_tie(attr)
@@ -1202,6 +1278,10 @@ class SimulationTab(QtWidgets.QWidget):
         self._profile = None        # (z, edges, [curves], [slab values])
         self._crossings = []        # crossing_warnings of the profile
         self._locked = False        # a fit is running: see set_locked
+        # MODELS: [{'name', 'model': Stack.to_dict, 'selected_layer'}], the
+        # shown one's model None (it is self.stack)
+        self._models = [dict(name='Model 1', model=None, selected_layer=1)]
+        self._model_index = 0
 
         self._timer = QtCore.QTimer(self, singleShot=True, interval=120)
         self._timer.timeout.connect(self.recompute)
@@ -1223,6 +1303,8 @@ class SimulationTab(QtWidgets.QWidget):
         layout.addWidget(splitter)
 
         self.refresh_list(select=1)
+        self._refresh_models()
+        self._refresh_mixture_table()
         self.recompute()
 
     # -- left column --------------------------------------------------------
@@ -1269,10 +1351,20 @@ class SimulationTab(QtWidgets.QWidget):
             'Each node costs one more reflectivity: see nodes.')
         self.spread_target = QtWidgets.QComboBox()
         self.spread_target.setToolTip(
-            'Which thicknesses vary laterally: every layer together, or this '
-            'layer alone (the layers below it then shift in depth).\nA '
-            'one-layer spread can trade off against that layer\'s '
-            'roughness and its neighbours\' thicknesses: check with DREAM.')
+            'Which thicknesses vary laterally: every layer together, this '
+            'layer alone (the layers below it then shift in depth), or\n'
+            'several layers ticked below, all by the same factor.  A '
+            'spread of part of the stack can trade off against\nthose '
+            'layers\' roughness and their neighbours\' thicknesses: check '
+            'with DREAM.')
+        # the layers of a 'Several layers' target, one tick each
+        self.spread_layers = QtWidgets.QListWidget()
+        self.spread_layers.setToolTip(
+            'The layers the spread scales, together: one thickness factor '
+            'for all of them')
+        self.spread_layers.setFixedHeight(
+            5 * self.spread_layers.fontMetrics().height() + 12)
+        self.spread_layers.itemChanged.connect(self.schedule)
         self.spread_dist = QtWidgets.QComboBox()
         for key, label in (('gaussian', 'Gaussian'),
                            ('lognormal', 'log-normal')):
@@ -1473,25 +1565,19 @@ class SimulationTab(QtWidgets.QWidget):
         f.addRow('Q points', self.nq)
         f.addRow('Window tail', self.tail)
         for attr, label in (('scale', 'Scale'), ('background', 'Background'),
-                            ('q_shift', 'Q shift (Å⁻¹)'),
-                            ('thickness_spread', 'Thickness spread (%)')):
-            val, bmin, bmax, cb = self.stack_rows[attr]
-            row = QtWidgets.QHBoxLayout()
-            row.addWidget(val, 3)
-            row.addWidget(bmin, 2)
-            row.addWidget(QtWidgets.QLabel('–'))
-            row.addWidget(bmax, 2)
-            row.addWidget(cb)
-            row.addWidget(self.stack_priors[attr])
-            f.addRow(label, row)
-            if attr == 'thickness_spread':
-                nrow = QtWidgets.QHBoxLayout()
-                nrow.addWidget(self.spread_target, 3)
-                nrow.addWidget(self.spread_dist, 2)
-                nrow.addWidget(QtWidgets.QLabel('nodes'))
-                nrow.addWidget(self.spread_nodes, 1)
-                f.addRow('Spread', nrow)
-                f.addRow('', self.spread_error)
+                            ('q_shift', 'Q shift (Å⁻¹)')):
+            f.addRow(label, self._stack_row(attr))
+        # THICKNESS SPREAD and MIXTURE: their own window
+        srow = QtWidgets.QHBoxLayout()
+        self.spread_summary = QtWidgets.QLabel()
+        self.spread_summary.setProperty('role', 'muted')
+        srow.addWidget(self.spread_summary, 1)
+        b = QtWidgets.QPushButton('Edit…')
+        b.setToolTip('Thickness spread and mixture of models')
+        b.clicked.connect(self.show_spread_window)
+        srow.addWidget(b)
+        f.addRow('Spread / mixture', srow)
+        self._build_spread_window()
         f.addRow('Q reference', self.q_fronting)
         f.addRow('Licorne', self.lic_exact)
         f.addRow('Roughness', self.rscheme)
@@ -1549,7 +1635,8 @@ class SimulationTab(QtWidgets.QWidget):
                 w.valueChanged.connect(self.schedule)
             cb.toggled.connect(self.schedule)
         self.spread_nodes.currentIndexChanged.connect(self.schedule)
-        self.spread_target.currentIndexChanged.connect(self.schedule)
+        self.spread_target.currentIndexChanged.connect(
+            self._spread_target_changed)
         self.spread_dist.currentIndexChanged.connect(self._spread_dist_changed)
         self.nq.valueChanged.connect(self.schedule)
         self.msmear.currentIndexChanged.connect(self.schedule)
@@ -1567,6 +1654,31 @@ class SimulationTab(QtWidgets.QWidget):
         # layer list
         lay = QtWidgets.QGroupBox('Layers (top → bottom)')
         lv = QtWidgets.QVBoxLayout(lay)
+        # MODELS: the model shown and the buttons that add / remove one
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel('Model'))
+        self.model_box = QtWidgets.QComboBox()
+        self.model_box.setToolTip(
+            'The model shown; each keeps its own layers, general parameters, '
+            'resolution and fit settings.\nPolarisation, the Q range and the '
+            'plots are shared.')
+        self.model_box.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
+                                     QtWidgets.QSizePolicy.Policy.Fixed)
+        self.model_box.currentIndexChanged.connect(self.switch_model)
+        row.addWidget(self.model_box, 1)
+        self.model_btns = {}
+        for key, label, tip, slot in (
+                ('new', 'New', 'New model: the default layers, this '
+                 'model\'s other settings', self.new_model),
+                ('copy', 'Copy', 'New model: a copy of this one',
+                 self.copy_model),
+                ('rename', 'Rename…', 'Rename this model', self.rename_model),
+                ('delete', 'Delete', 'Delete this model', self.delete_model)):
+            b = self.model_btns[key] = QtWidgets.QPushButton(label)
+            b.setToolTip(tip)
+            b.clicked.connect(slot)
+            row.addWidget(b)
+        lv.addLayout(row)
         self.list = QtWidgets.QListWidget()
         # a few rows; the tool box below takes the rest of the height
         self.list.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
@@ -1599,6 +1711,35 @@ class SimulationTab(QtWidgets.QWidget):
         self.btn_del.clicked.connect(self.remove_layer)
         self.btn_up.clicked.connect(lambda: self.move_layer(-1))
         self.btn_dn.clicked.connect(lambda: self.move_layer(+1))
+        lv.addLayout(row)
+        self.btn_untick = QtWidgets.QPushButton('Untick all Fit')
+        self.btn_untick.setToolTip(
+            'Untick Fit on every parameter of every layer and of the general '
+            'parameters (ties follow);\nvalues and fit bounds are kept')
+        self.btn_untick.clicked.connect(self.untick_all)
+        # tick one quantity on every layer it belongs to (Stack.tick_all)
+        self.btn_tick = {}
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self.btn_untick)
+        for attr, label, tip in (
+                ('thickness', 'Tick thickness',
+                 'Tick Fit on the thickness of every film layer'),
+                ('NSLD_real', 'Tick NSLD',
+                 'Tick Fit on the real NSLD of every film layer and of the '
+                 'substrate (not the fronting)'),
+                ('roughness_sigma', 'Tick roughness',
+                 'Tick Fit on the roughness σ of every interface, the '
+                 'substrate\'s included (not those with roughness model '
+                 '"none")')):
+            b = self.btn_tick[attr] = QtWidgets.QPushButton(label)
+            b.setToolTip(tip + ';\nvalues and fit bounds are kept, as when '
+                         'ticked by hand')
+            b.clicked.connect(lambda _, a=attr: self.tick_all(a))
+            row.addWidget(b)
+        for b in [self.btn_untick] + list(self.btn_tick.values()):
+            b.setMinimumWidth(0)
+            b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
+                            QtWidgets.QSizePolicy.Policy.Fixed)
         lv.addLayout(row)
         v.addWidget(lay)
 
@@ -1657,6 +1798,152 @@ class SimulationTab(QtWidgets.QWidget):
         self.status.setWordWrap(True)
         v.addWidget(self.status)
         return panel
+
+    def _stack_row(self, attr):
+        """Value, min – max, Fit and prior of a stack parameter."""
+        val, bmin, bmax, cb = self.stack_rows[attr]
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(val, 3)
+        row.addWidget(bmin, 2)
+        row.addWidget(QtWidgets.QLabel('–'))
+        row.addWidget(bmax, 2)
+        row.addWidget(cb)
+        row.addWidget(self.stack_priors[attr])
+        return row
+
+    def _build_spread_window(self):
+        """The Thickness spread and mixture window (non-modal): the spread's
+        rows, the models mixed with this one and the thicknesses they share
+        (model.stack THICKNESS SPREAD, MIXTURE)."""
+        win = self.spread_window = QtWidgets.QDialog(self)
+        win.setWindowTitle('Thickness spread and mixture')
+        outer = QtWidgets.QVBoxLayout(win)
+        panel = self.spread_panel = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(panel)
+        v.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(panel)
+
+        # one or the other (model.stack MIXTURE)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel('Lateral variation:'))
+        self.lateral = QtWidgets.QButtonGroup(self)
+        for k, (key, label) in enumerate((
+                ('none', 'None'), ('spread', 'Thickness spread'),
+                ('mixture', 'Mixture of models'))):
+            b = QtWidgets.QRadioButton(label)
+            b.setProperty('mode', key)
+            self.lateral.addButton(b, k)
+            row.addWidget(b)
+        row.addStretch(1)
+        self.lateral.button(0).setChecked(True)
+        self.lateral.idClicked.connect(self._lateral_chosen)
+        v.addLayout(row)
+
+        box = self.spread_box = QtWidgets.QGroupBox('Thickness spread')
+        f = QtWidgets.QFormLayout(box)
+        f.addRow('σ/d (%)', self._stack_row('thickness_spread'))
+        nrow = QtWidgets.QHBoxLayout()
+        nrow.addWidget(self.spread_target, 3)
+        nrow.addWidget(self.spread_dist, 2)
+        nrow.addWidget(QtWidgets.QLabel('nodes'))
+        nrow.addWidget(self.spread_nodes, 1)
+        f.addRow('Spread', nrow)
+        f.addRow('', self.spread_layers)
+        f.addRow('', self.spread_error)
+        v.addWidget(box)
+
+        box = self.mix_box = QtWidgets.QGroupBox('Mixture of models')
+        mv = QtWidgets.QVBoxLayout(box)
+        note = QtWidgets.QLabel(
+            'R = w₀ R(this model) + Σ w R(model): regions larger than the '
+            'coherence length, e.g. 0, 1 or 2 extra layers.  The other '
+            'models are those of the Model box; each keeps its own layers '
+            '(no thickness spread), this model\'s scale, background, Q shift '
+            'and resolution apply once.')
+        note.setWordWrap(True)
+        note.setProperty('role', 'muted')
+        mv.addWidget(note)
+        t = self.mix_table = QtWidgets.QTableWidget(0, 6)
+        t.setHorizontalHeaderLabels(['Use', 'Model', 'Weight', 'Min', 'Max',
+                                     'Fit'])
+        t.verticalHeader().hide()
+        t.horizontalHeader().setSectionResizeMode(
+            1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        t.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        mv.addWidget(t)
+        self.mix_w0 = QtWidgets.QLabel()
+        mv.addWidget(self.mix_w0)
+        v.addWidget(box)
+
+        box = self.shared_box = QtWidgets.QGroupBox('Shared parameters')
+        lv = QtWidgets.QVBoxLayout(box)
+        note = QtWidgets.QLabel(
+            'Every parameter ticked Fit in this model is shared: the mixed '
+            'models take its value, layers matched by name (a model without '
+            'that layer skips it).  Show the model with the most layers.  '
+            'Ticked here: the layer\'s thickness is fitted, one value for '
+            'all models.')
+        note.setWordWrap(True)
+        note.setProperty('role', 'muted')
+        lv.addWidget(note)
+        self.mix_layers = QtWidgets.QWidget()
+        QtWidgets.QVBoxLayout(self.mix_layers).setContentsMargins(0, 0, 0, 0)
+        self._mix_layer_key = None
+        lv.addWidget(self.mix_layers)
+        v.addWidget(box)
+        v.addStretch(1)
+
+        close = QtWidgets.QPushButton('Close')
+        close.clicked.connect(win.close)
+        row = QtWidgets.QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(close)
+        outer.addLayout(row)
+        win.resize(580, 780)
+        self._mix_cache = {}        # name -> (its stored dict, linked Stack)
+
+    def lateral_mode(self):
+        return self.lateral.checkedButton().property('mode')
+
+    def _lateral_chosen(self, k):
+        """None, the thickness spread or the mixture: the other one is
+        switched off (spread 0 and not fitted; no model mixed in)."""
+        mode = self.lateral.button(k).property('mode')
+        if mode != 'spread':
+            val, _, _, cb = self.stack_rows['thickness_spread']
+            val.setValue(0.0)
+            cb.setChecked(False)
+        if mode != 'mixture' and self.stack.mixture:
+            self.stack.mixture = []
+            self._refresh_mixture_table()
+        self._show_lateral()
+        self.schedule()
+
+    def _show_lateral(self):
+        mode = self.lateral_mode()
+        self.spread_box.setEnabled(mode == 'spread')
+        self.mix_box.setEnabled(mode == 'mixture')
+        self.shared_box.setEnabled(mode == 'mixture')
+
+    def _refresh_lateral(self, keep=True):
+        """The choice from the stack: a spread or a mixture shows it;
+        neither keeps the choice shown (keep) or shows None."""
+        st = self.stack
+        mode = 'mixture' if st.mixture else 'spread' if (
+            st.thickness_spread or
+            st.fit.get('thickness_spread', {}).get('vary')) else None
+        if mode is None:
+            mode = self.lateral_mode() if keep else 'none'
+        for b in self.lateral.buttons():
+            if b.property('mode') == mode:
+                b.setChecked(True)
+        self._show_lateral()
+
+    def show_spread_window(self):
+        self._refresh_mixture_table()
+        self.spread_window.show()
+        self.spread_window.raise_()
+        self.spread_window.activateWindow()
 
     def _fill_along_fronting(self):
         """Every row along the fronting's in-plane M (sample x if the
@@ -1728,6 +2015,7 @@ class SimulationTab(QtWidgets.QWidget):
                 # on BarGraphItem.getData() (x is None when built from x0)
                 p.vb.addItem(bars)
                 p.addItem(curve)
+            export_name(curve, PROFILE_EXPORT_NAMES[i])
             self.prof_bars.append(bars)
             self.prof_curves.append(curve)
         p.addItem(pg.InfiniteLine(
@@ -1738,6 +2026,7 @@ class SimulationTab(QtWidgets.QWidget):
         p.scene().sigMouseClicked.connect(self._on_profile_click)
         self.prof_cursor = Crosshair(
             w, p, lambda x: profile_readout(self, x))
+        p.layer_at = lambda z: profile_layers(self, z)
         v.addWidget(w)
         return box
 
@@ -1842,12 +2131,45 @@ class SimulationTab(QtWidgets.QWidget):
         removing / moving layers), but layers can still be selected and
         their values read, the tool-box pages switched and the plots used."""
         self._locked = bool(locked)
-        for w in (self.gen_box, self.pol_box, self.btn_add):
+        for w in (self.gen_box, self.pol_box, self.btn_add, self.btn_untick,
+                  *self.btn_tick.values(), self.model_box,
+                  *self.model_btns.values(), self.spread_panel):
             w.setEnabled(not self._locked)
+        if not self._locked:
+            self._refresh_models()           # Delete needs two models
         self.list.setDragDropMode(
             QtWidgets.QAbstractItemView.DragDropMode.NoDragDrop if self._locked
             else QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
         self._on_select(self.list.currentRow())   # editor, move buttons
+
+    def untick_all(self):
+        """The Untick all Fit button (Stack.untick_all)."""
+        if self._locked:
+            return
+        self.recompute()                   # the general rows' ticks first
+        n = self.stack.untick_all()
+        self._load_stack_fit()
+        self.refresh_list(select=self.list.currentRow())
+        self.schedule()
+        msg = 'Fit unticked on %d parameter%s.' % (n, '' if n == 1 else 's')
+        win = self.window()
+        if isinstance(win, QtWidgets.QMainWindow):
+            win.statusBar().showMessage(msg, 8000)
+
+    def tick_all(self, attr):
+        """A Tick … button (Stack.tick_all)."""
+        if self._locked:
+            return
+        n = self.stack.tick_all(attr)
+        self.refresh_list(select=self.list.currentRow())
+        self.schedule()
+        msg = 'Fit ticked on %d more %s.' % (n, {
+            'thickness': 'thickness' if n == 1 else 'thicknesses',
+            'NSLD_real': 'NSLD' if n == 1 else 'NSLDs',
+            'roughness_sigma': 'roughness' if n == 1 else 'roughnesses'}[attr])
+        win = self.window()
+        if isinstance(win, QtWidgets.QMainWindow):
+            win.statusBar().showMessage(msg, 8000)
 
     def add_layer(self):
         row = self.list.currentRow()
@@ -1925,6 +2247,7 @@ class SimulationTab(QtWidgets.QWidget):
         for (i, attr, *_), v in zip(params, x):
             setattr(self.stack.owner(i), attr, float(v))
         self._load_stack_fit()             # recompute reads these boxes
+        self._refresh_mixture_table()
         self.refresh_list(select=self.list.currentRow())
         self.schedule()
 
@@ -1940,13 +2263,15 @@ class SimulationTab(QtWidgets.QWidget):
                       q_shift=(self.q_shift.minimum(),
                                self.q_shift.maximum()),
                       thickness_spread=(self.spread.minimum() / 100,
-                                        self.spread.maximum() / 100))
+                                        self.spread.maximum() / 100),
+                      weight=(0.0, 1.0))
         for (i, attr, *_), a, b in zip(params, lo, hi):
             lim_lo, lim_hi = sorted(limits[attr])
             e = self.stack.owner(i).fit_entry(attr)
             e['min'] = float(min(max(a, lim_lo), lim_hi))
             e['max'] = float(min(max(b, lim_lo), lim_hi))
         self._load_stack_fit()
+        self._refresh_mixture_table()
         self.refresh_list(select=self.list.currentRow())
         self.schedule()
 
@@ -1983,18 +2308,63 @@ class SimulationTab(QtWidgets.QWidget):
 
     def _refresh_spread_targets(self):
         """The Spread target box: 'Whole stack', then each interior layer
-        by name ('#i name' when names repeat), the stack's target selected."""
+        by name ('#i name' when names repeat), then 'Several layers' with
+        its ticks below; the stack's target selected."""
         c, L = self.spread_target, self.stack.layers
         names = [l.name for l in L]
+        label = ['#%d %s' % (i, n) if names.count(n) > 1 else n
+                 for i, n in enumerate(names)]
+        t = self.stack.thickness_spread_target
         c.blockSignals(True)
         c.clear()
         c.addItem('Whole stack', 'stack')
         for i in range(1, len(L) - 1):
-            c.addItem('#%d %s' % (i, names[i]) if names.count(names[i]) > 1
-                      else names[i], i)
+            c.addItem(label[i], i)
+        c.addItem('Several layers', 'several')
         c.setCurrentIndex(max(0, c.findData(
-            self.stack.thickness_spread_target)))
+            'several' if isinstance(t, tuple) else t)))
         c.blockSignals(False)
+        self._fill_spread_layers(t if isinstance(t, tuple) else ())
+
+    def _fill_spread_layers(self, ticked):
+        """The ticks of 'Several layers': each interior layer, those in
+        `ticked` ticked; shown only for that target."""
+        lw, L = self.spread_layers, self.stack.layers
+        names = [l.name for l in L]
+        lw.blockSignals(True)
+        lw.clear()
+        for i in range(1, len(L) - 1):
+            it = QtWidgets.QListWidgetItem(
+                '#%d %s' % (i, names[i]) if names.count(names[i]) > 1
+                else names[i])
+            it.setData(QtCore.Qt.ItemDataRole.UserRole, i)
+            it.setFlags(it.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(QtCore.Qt.CheckState.Checked if i in ticked
+                             else QtCore.Qt.CheckState.Unchecked)
+            lw.addItem(it)
+        lw.blockSignals(False)
+        lw.setVisible(self.spread_target.currentData() == 'several')
+
+    def _spread_target_changed(self, *_):
+        """Picking 'Several layers' starts from the current target's
+        layers ticked, so the model does not change until a tick does."""
+        if self.spread_target.currentData() == 'several':
+            self._fill_spread_layers(self.stack._spread_layers())
+        else:
+            self.spread_layers.hide()
+        self.schedule()
+
+    def _spread_target(self):
+        """The target the Spread box and ticks say; None: no layer ticked."""
+        t = self.spread_target.currentData() or 'stack'
+        if t != 'several':
+            return t
+        lw = self.spread_layers
+        ticked = tuple(
+            lw.item(r).data(QtCore.Qt.ItemDataRole.UserRole)
+            for r in range(lw.count())
+            if lw.item(r).checkState() == QtCore.Qt.CheckState.Checked)
+        return ticked or None
 
     def _reindex_spread(self, old):
         """After layers were added, removed or moved: the spread follows its
@@ -2093,10 +2463,14 @@ class SimulationTab(QtWidgets.QWidget):
             self.stack.thickness_spread = self.spread.value() / 100
             self.stack.thickness_spread_nodes = \
                 self.spread_nodes.currentData()
-            self.stack.set_spread_target(self.spread_target.currentData()
-                                         or 'stack')
+            target = self._spread_target()
+            if target is not None:           # none ticked: kept as it was
+                self.stack.set_spread_target(target)
             self.stack.thickness_spread_dist = self.spread_dist.currentData()
             try:
+                if target is None:
+                    raise ValueError('Several layers: tick at least one; '
+                                     'the spread keeps its previous layers.')
                 spread_factors(self.stack.thickness_spread,
                                self.stack.thickness_spread_dist, 5)
                 self.spread_error.hide()
@@ -2128,11 +2502,14 @@ class SimulationTab(QtWidgets.QWidget):
             if mode == 'tof':
                 self.stack.resolution['tof_angles'] = self._tof_angles()
             self._sync_licorne_exact()
+            self._link_mixture()
             self.stack.build_sublayers()
             self._compute_profile()
             self._show_crossings()
             self._show_profile()
             self._draw_reflectance()
+            self._store_partners()
+            self._refresh_mixture_info()
             text = '%d layers, %d sublayers' % (len(self.stack.layers),
                                                 len(self.stack.sublayers))
             if self._refl_note:
@@ -2166,7 +2543,7 @@ class SimulationTab(QtWidgets.QWidget):
         n = len(res.get('data_q', ()))
         self.res_data_info.setText(
             'dQ of %s (%d Q, overlap: %s); a fit uses each point\'s '
-            'own dQ' % (res.get('data_set') or '?', n,
+            'own dQ, and each dataset\'s own table' % (res.get('data_set') or '?', n,
                         {'first': 'earlier angle', 'last': 'later angle'}.get(
                             res.get('data_overlap'), 'mean')) if n else
             'No dQ yet: choose a dataset')
@@ -2477,10 +2854,290 @@ class SimulationTab(QtWidgets.QWidget):
             legend.addItem(curve, cname)
             self._refl_shown.append((curve, cname, Q, y))
 
+    # -- models -------------------------------------------------------------
+    def _refresh_models(self):
+        """The Model box from self._models, its current item the shown one."""
+        b = self.model_box
+        b.blockSignals(True)
+        b.clear()
+        b.addItems([m['name'] for m in self._models])
+        b.setCurrentIndex(self._model_index)
+        b.blockSignals(False)
+        self.model_btns['delete'].setEnabled(
+            len(self._models) > 1 and not self._locked)
+
+    def model_names(self):
+        return [m['name'] for m in self._models]
+
+    def _unique_name(self, base):
+        names = set(self.model_names())
+        if base not in names:
+            return base
+        k = 2
+        while '%s (%d)' % (base, k) in names:
+            k += 1
+        return '%s (%d)' % (base, k)
+
+    def _shown_model(self):
+        """(model dict, its 'simulation' settings without 'models') of the
+        shown model, the widgets' values included."""
+        d = self.session_state()
+        sim = d.pop('simulation')
+        sim.pop('models', None)
+        return copy.deepcopy(d), sim
+
+    def switch_model(self, i):
+        """Show model i: the shown one is kept as it is (MODELS)."""
+        if i == self._model_index or not 0 <= i < len(self._models) or \
+                self._locked:
+            self._refresh_models()
+            return
+        d, sim = self._shown_model()
+        cur, new = self._models[self._model_index], self._models[i]
+        state = copy.deepcopy(new['model'])
+        state['simulation'] = dict(sim, selected_layer=new['selected_layer'])
+        try:
+            self.restore_state(state, models=False)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self, 'Switch model', 'Could not load %s:\n%s'
+                % (new['name'], exc))
+            d['simulation'] = sim
+            self.restore_state(d, models=False)
+            self._refresh_models()
+            return
+        cur.update(model=d, selected_layer=sim['selected_layer'])
+        new.update(model=None)
+        self._model_index = i
+        self._refresh_models()
+        self._refresh_mixture_table()
+        self._refresh_lateral(keep=False)
+        self.recompute()                     # this model's mixture linked
+
+    def _add_model(self, name, d, selected_layer=1):
+        """Append model dict d as `name` and show it."""
+        self._models.append(dict(name=self._unique_name(name), model=d,
+                                 selected_layer=selected_layer))
+        self.switch_model(len(self._models) - 1)
+
+    def new_model(self):
+        """The default layers (make_stack) with the shown model's other
+        settings, as Import profile replaces only the layers."""
+        if self._locked:
+            return
+        d, _ = self._shown_model()
+        d['layers'] = make_stack().to_dict()['layers']
+        d['ties'] = []
+        d['thickness_spread_target'] = 'stack'
+        self._add_model('Model %d' % (len(self._models) + 1), d)
+
+    def copy_model(self):
+        if self._locked:
+            return
+        d, sim = self._shown_model()
+        self._add_model(self._models[self._model_index]['name'] + ' copy', d,
+                        sim['selected_layer'])
+
+    def rename_model(self):
+        if self._locked:
+            return
+        m = self._models[self._model_index]
+        name, ok = QtWidgets.QInputDialog.getText(
+            self, 'Rename model', 'Name:', text=m['name'])
+        name = name.strip()
+        if not ok or not name or name == m['name']:
+            return
+        old, m['name'] = m['name'], self._unique_name(name)
+        self._rename_in_mixtures(old, m['name'])
+        self._refresh_models()
+        self._refresh_mixture_table()
+
+    def delete_model(self):
+        """Delete the shown model (after asking) and show its neighbour."""
+        if self._locked or len(self._models) < 2:
+            return
+        name = self._models[self._model_index]['name']
+        if QtWidgets.QMessageBox.question(
+                self, 'Delete model', 'Delete the model %s?' % name) != \
+                QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        gone = self._model_index
+        self.switch_model(gone - 1 if gone > 0 else 1)
+        if self._model_index == gone:          # could not switch
+            return
+        del self._models[gone]
+        if self._model_index > gone:
+            self._model_index -= 1
+        self._rename_in_mixtures(name, None)
+        self._refresh_models()
+        self._refresh_mixture_table()
+        self.schedule()
+
+    # -- mixture (model.stack MIXTURE) -------------------------------------
+    def _refresh_mixture_table(self):
+        """One row per other model: used, its weight, bounds and Fit."""
+        t = self.mix_table
+        entries = {e['name']: e for e in self.stack.mixture}
+        others = [m['name'] for k, m in enumerate(self._models)
+                  if k != self._model_index]
+        for r in range(t.rowCount()):         # gone at once, not later
+            for c in range(t.columnCount()):
+                w = t.cellWidget(r, c)
+                if w is not None:
+                    w.hide()
+        t.setRowCount(0)
+        t.setRowCount(len(others))
+        self._mix_rows = []
+        for r, name in enumerate(others):
+            e = entries.get(name)
+            fit = e['fit'] if e else default_fit('weight')
+            use = QtWidgets.QCheckBox()
+            use.setChecked(e is not None)
+            use.setStyleSheet('margin-left: 6px')
+            w, lo, hi = (dspin(0.0, 1.0, 4, 0.01) for _ in range(3))
+            w.setValue(e['weight'] if e else 0.0)
+            lo.setValue(fit['min'])
+            hi.setValue(fit['max'])
+            cb = QtWidgets.QCheckBox()
+            cb.setChecked(bool(fit.get('vary')))
+            for c, widget in enumerate((use, None, w, lo, hi, cb)):
+                if widget is None:
+                    it = QtWidgets.QTableWidgetItem(name)
+                    it.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+                    t.setItem(r, c, it)
+                else:
+                    t.setCellWidget(r, c, widget)
+            for widget in (w, lo, hi):
+                widget.valueChanged.connect(self._mix_edited)
+            for widget in (use, cb):
+                widget.toggled.connect(self._mix_edited)
+            self._mix_rows.append((name, use, w, lo, hi, cb))
+        t.resizeColumnsToContents()
+        t.horizontalHeader().setSectionResizeMode(
+            1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self._refresh_lateral()
+        self._refresh_mixture_info()
+
+    def _mix_edited(self, *_):
+        """The table into Stack.mixture, in the Model box's order."""
+        mix = []
+        for name, use, w, lo, hi, cb in self._mix_rows:
+            for widget in (w, lo, hi, cb):
+                widget.setEnabled(use.isChecked())
+            if use.isChecked():
+                mix.append(dict(name=name, weight=w.value(), fit=dict(
+                    vary=cb.isChecked(), min=lo.value(), max=hi.value())))
+        self.stack.mixture = mix
+        self.schedule()
+
+    def _refresh_mixture_info(self):
+        """The weight w0 of this model, the shared-thickness ticks and the
+        summary in General parameters."""
+        for name, use, w, lo, hi, cb in getattr(self, '_mix_rows', []):
+            for widget in (w, lo, hi, cb):
+                widget.setEnabled(use.isChecked())
+        st = self.stack
+        w0, parts = st.mixture_parts()
+        name = self._models[self._model_index]['name']
+        self.mix_w0.setText('Weight of %s (this model): w₀ = %.4g' % (name, w0)
+                            if parts else 'No other model mixed in.')
+        self._refresh_mixture_layers()
+        bits = []
+        if st.thickness_spread:
+            bits.append('%.3g %% (%s, %s)' % (
+                100 * st.thickness_spread, st.spread_target_name(),
+                st.thickness_spread_dist))
+        if st.mixture:
+            bits.append('mixture of %d models' % (len(st.mixture) + 1))
+        self.spread_summary.setText('; '.join(bits) or 'none')
+
+    def _refresh_mixture_layers(self):
+        """A tick per film layer: its thickness Fit, and which mixed
+        models have a layer of that name."""
+        mixed = {n: st for n, st in self.stack._mix_stacks.items()
+                 if any(e['name'] == n for e in self.stack.mixture)}
+        rows = []
+        for i, l in enumerate(self.stack.layers[1:-1], 1):
+            also = [n for n, st in mixed.items()
+                    if any(x.name == l.name for x in st.layers)]
+            rows.append((i, l.name, tuple(also)))
+        lay = self.mix_layers.layout()
+        if rows != self._mix_layer_key:
+            self._mix_layer_key = rows
+            while lay.count():
+                w = lay.takeAt(0).widget()
+                if w is not None:
+                    w.hide()
+                    w.deleteLater()
+            self._mix_layer_boxes = []
+            for i, name, also in rows:
+                cb = QtWidgets.QCheckBox('%s thickness%s' % (
+                    name, '  (also in %s)' % ', '.join(also) if also else
+                    '  (only in this model)' if mixed else ''))
+                cb.toggled.connect(lambda on, i=i: self._shared_toggled(i, on))
+                lay.addWidget(cb)
+                self._mix_layer_boxes.append((i, cb))
+        for i, cb in self._mix_layer_boxes:
+            cb.blockSignals(True)
+            cb.setChecked(bool(self.stack.layers[i].fit.get(
+                'thickness', {}).get('vary')))
+            cb.blockSignals(False)
+
+    def _shared_toggled(self, i, on):
+        if self._locked:
+            return
+        self.stack.layers[i].fit_entry('thickness')['vary'] = on
+        self._on_select(self.list.currentRow())     # the editor's Fit box
+        self.schedule()
+
+    def _link_mixture(self):
+        """Stack._mix_stacks: a Stack per mixed model, from its stored
+        dict, rebuilt only when that dict was replaced."""
+        stored = {m['name']: m['model'] for m in self._models
+                  if m['model'] is not None}
+        links = {}
+        for e in self.stack.mixture:
+            d = stored.get(e['name'])
+            if d is None:
+                continue
+            c = self._mix_cache.get(e['name'])
+            if c is None or c[0] is not d:
+                c = self._mix_cache[e['name']] = (d, Stack.from_dict(d))
+            links[e['name']] = c[1]
+        self.stack._mix_stacks = links
+
+    def _store_partners(self):
+        """The shared values the mixed models took (Stack.sync_mixture)
+        into their stored dicts, in place: switching to one shows them."""
+        layers = self.stack.mixture_shared()
+        names = {n for n, _ in layers}
+        for name, st in self.stack._mix_stacks.items():
+            d = self._mix_cache[name][0]
+            for ld, l in zip(d['layers'], st.layers):
+                if l.name in names:
+                    for n, attr in layers:
+                        if n == l.name:
+                            ld[attr] = getattr(l, attr)
+
+    def _rename_in_mixtures(self, old, new):
+        """Every model's mixture entry naming `old` (None: removed)."""
+        lists = [self.stack.mixture] + [m['model'].setdefault('mixture', [])
+                                        for m in self._models
+                                        if m['model'] is not None]
+        for mix in lists:
+            for e in list(mix):
+                if e['name'] == old:
+                    if new is None:
+                        mix.remove(e)
+                    else:
+                        e['name'] = new
+        self._mix_cache.clear()
+
     # -- save / load --------------------------------------------------------
     def session_state(self):
-        """The model (Stack.to_dict) plus the tab's own settings under
-        'simulation': Q grid, polarisation and display."""
+        """The shown model (Stack.to_dict) plus the tab's own settings under
+        'simulation': Q grid, polarisation, display and the other models
+        (MODELS)."""
         self.recompute()                     # the widgets' values into the stack
         d = self.stack.to_dict()
         d['simulation'] = {
@@ -2493,13 +3150,31 @@ class SimulationTab(QtWidgets.QWidget):
                 'profile': [cb.isChecked() for cb in self.prof_boxes],
                 'sublayers': self.prof_show_bars.isChecked(),
                 'smooth': self.prof_show_smooth.isChecked()},
-            'selected_layer': self.list.currentRow()}
+            'selected_layer': self.list.currentRow(),
+            'models': {'current': self._model_index,
+                       'list': copy.deepcopy(self._models)}}
         return d
 
-    def restore_state(self, d):
+    def restore_state(self, d, models=True):
         """Inverse of session_state; a plain model file (no 'simulation')
-        keeps the tab's settings."""
+        keeps the tab's settings and replaces only the shown model, a session
+        saved before MODELS becomes the only model.  models=False: only the
+        shown model, whatever d holds (switch_model)."""
         new = Stack.from_dict(d)                 # validate before touching UI
+        sim = d.get('simulation')
+        models = None if not models or sim is None else sim.get(
+            'models', {'current': 0, 'list': [dict(
+                name='Model 1', model=None,
+                selected_layer=sim.get('selected_layer', 1))]})
+        if models is not None:
+            cur, lst = int(models['current']), copy.deepcopy(models['list'])
+            if not 0 <= cur < len(lst) or lst[cur]['model'] is not None:
+                raise ValueError('the session\'s models are inconsistent')
+            for m in lst:
+                if m['model'] is not None:
+                    Stack.from_dict(m['model'])
+            self._models, self._model_index = lst, cur
+            self._refresh_models()
         self.stack.layers = new.layers
         self.stack.tail = new.tail
         self.stack.background = new.background
@@ -2519,6 +3194,7 @@ class SimulationTab(QtWidgets.QWidget):
         self.stack.licorne_outer = new.licorne_outer
         self.stack.step_fallback = new.step_fallback
         self.stack.ties = new.ties
+        self.stack.mixture = new.mixture
         # unticking Licorne-exact must not bring back the previous session's
         # settings
         self.stack._before_exact = new._before_exact
@@ -2566,4 +3242,7 @@ class SimulationTab(QtWidgets.QWidget):
             w.blockSignals(False)
         self._sync_resolution()
         self.refresh_list(select=sim.get('selected_layer', 1))
+        self._mix_cache.clear()
+        self._refresh_mixture_table()
+        self._refresh_lateral(keep=False)
         self.recompute()

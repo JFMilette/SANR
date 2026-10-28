@@ -381,3 +381,23 @@ def test_windows_have_a_tab_per_dataset():
     dw._apply_bounds()
     assert got[0][2] == 1 and len(got[0][0]) == 3
     dw.close()
+
+
+def test_each_dataset_its_own_dq_table():
+    """The 'data' resolution mode with A's dQ chosen: in a joint fit B is
+    fitted (points without a dQ, its curves) with its own dQ table."""
+    sim, exp = gui()
+    for n, dq in (('A', 1e-4), ('B', 5e-4)):
+        s = next(t for t in exp.sets if t['name'] == n)
+        for d in s['channels'].values():
+            d['dQ'] = dq * np.ones_like(d['Q'])
+    sim.set_data_dq('A', [0.01, 0.1], [1e-4, 1e-4])
+    sim.recompute()
+    choose_joint(exp, {})
+    problem, *_ = exp._problem(exp.fit_report, 'chi2')
+    a, b = (p.stack for p in problem.parts)
+    assert a.resolution['data_set'] == 'A'
+    assert b.resolution['data_set'] == 'B'
+    assert b.resolution_sigma(np.array([0.05]))[0] == pytest.approx(5e-4)
+    # the Simulation tab keeps A's
+    assert sim.stack.resolution['data_set'] == 'A'

@@ -6,9 +6,12 @@ STARTS -- start 0 is the current values (problem.x0()); starts 1..n are the
 first n points of a scrambled Sobol sequence in the normalised box [0, 1]^d
 (scipy.stats.qmc.Sobol, `seed`), spread evenly over the bounds.
 
-LOCAL FIT -- 'lbfgs': scipy's L-BFGS-B from the start (maxiter 3000); 'de':
+LOCAL FIT -- 'lbfgs': scipy's L-BFGS-B from the start (maxiter 3000);
+'lsq': least squares on the residuals (fit.de.de_fit.run_lsq, maxiter
+LSQ_MAXITER); 'de':
 a short differential evolution (fit.de.de_fit.run_de, maxiter 100 with the
-polish, seed + k) whose population holds the start.
+polish unless de_options turn it off, seed + k) whose population holds the
+start.
 
 MINIMA -- the end points are merged when they agree to MERGE_U in every
 normalised coordinate and to MERGE_COST in cost: one minimum, its best
@@ -27,7 +30,8 @@ processes through a queue, read while waiting for the ends): info =
 k begins, 'de' as a short DE evaluates its members (step: the generation
 in progress, 0 for the first population, 'evals' of its 'size' members
 evaluated), 'polish' after each iteration of its
-polish (maxiter None), 'lbfgs' after each L-BFGS-B iteration, at most every
+polish (maxiter None), 'lbfgs' after each L-BFGS-B iteration, 'lsq' after
+each least-squares iteration, at most every
 PROGRESS_EVERY s per start besides 'begin', each generation's end and the
 polish's first; then 'done' (best: its end cost, u: its end point) once
 its end is in.
@@ -44,13 +48,14 @@ import numpy as np
 from scipy.optimize import minimize
 from scipy.stats import qmc
 
-from fit.de.de_fit import FitCancelled, run_de
+from fit.de.de_fit import FitCancelled, run_de, run_lsq
 
-METHODS = ('lbfgs', 'de')
+METHODS = ('lbfgs', 'lsq', 'de')
 EDGE = 0.005              # normalised distance from a bound: on it
 MERGE_U = 0.02            # max |u_a - u_b| of one minimum
 MERGE_COST = 1e-3         # max |cost_a - cost_b| of one minimum
 LBFGS_MAXITER = 3000
+LSQ_MAXITER = 1000
 PROGRESS_EVERY = 0.2      # s between the reports of one start
 
 _QUEUE = None             # a worker process's progress queue (_set_queue)
@@ -120,6 +125,16 @@ class _Local:
             raise FitCancelled
         return self.problem(u)
 
+    def _lsq(self, k, u0):
+        """The 'lsq' local fit of start k from u0: its end, normalised."""
+        x, _, _, msg = run_lsq(
+            self.problem, maxiter=LSQ_MAXITER, cancelled=self.cancelled,
+            x0=u0, status=lambda info: self._report(
+                k, 'lsq', info['iteration'], info['maxiter'], info['best']))
+        if msg == 'stopped':
+            raise FitCancelled
+        return self.problem.to_u(x)
+
     def __call__(self, item):
         k, u0 = item
         self._report(k, 'begin', 0, None, None, now=True)
@@ -134,6 +149,9 @@ class _Local:
                          bounds=[(0.0, 1.0)] * len(u0), callback=cb,
                          options={'maxiter': LBFGS_MAXITER})
             u = np.clip(r.x, 0.0, 1.0)
+            return k, u, float(self.problem(u))
+        if self.method == 'lsq':
+            u = self._lsq(k, u0)
             return k, u, float(self.problem(u))
         opts = dict(dict(maxiter=100, polish=True), **self.de_options)
         # scipy's population: popsize x d, a power of 2 for Sobol
