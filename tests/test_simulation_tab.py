@@ -334,10 +334,12 @@ def test_models_switch_copy_new_delete_and_session(app, monkeypatch):
     sim.background.setValue(1e-6)
     sim.refresh_list(select=1)
     sim.recompute()
-    sim.new_model()                          # default layers, settings kept
+    sim.new_model()                          # no layer, settings kept
     assert sim.model_box.currentText() == 'Model 3'
-    assert st.background == 1e-6 and len(st.layers) == 5
-    st.layers.pop(2)
+    assert st.background == 1e-6
+    assert [l.name for l in st.layers] == ['vacuum', 'substrate']
+    sim.list.setCurrentRow(0)
+    sim.add_layer()                          # one film
     sim.refresh_list(select=1)
     sim.model_box.setCurrentIndex(0)         # back to the first, unchanged
     assert [l.name for l in st.layers] == names
@@ -353,7 +355,7 @@ def test_models_switch_copy_new_delete_and_session(app, monkeypatch):
     assert again.model_box.currentIndex() == 1
     assert again.stack.layers[1].thickness == 33.0
     again.model_box.setCurrentIndex(2)
-    assert len(again.stack.layers) == 4
+    assert len(again.stack.layers) == 3
     # a session saved before the models: one model
     state.pop('simulation')['models']
     old = dict(state, simulation={'selected_layer': 1})
@@ -370,3 +372,24 @@ def test_models_switch_copy_new_delete_and_session(app, monkeypatch):
     sim.model_box.setCurrentIndex(1)
     assert sim.model_box.currentIndex() == 0 and st.layers[1].thickness == 80.0
     sim.set_locked(False)
+
+
+def test_main_window_tabs_and_empty_start(app):
+    """Geometry first, Simulation shown first with no layer: the bare
+    substrate computes without error, and a layer can be added."""
+    import main
+    win = main.MainWindow()
+    tabs = win.tabs
+    assert [tabs.tabText(i) for i in range(tabs.count())] == \
+        ['Geometry', 'Simulation', 'Experimental data', 'Fit']
+    assert tabs.currentWidget() is win.simulation
+    sim = win.simulation
+    assert [l.name for l in sim.stack.layers] == ['vacuum', 'substrate']
+    sim.recompute()
+    assert not sim.status.text().startswith('Error')
+    assert sim.last_R is not None
+    sim.list.setCurrentRow(0)
+    sim.add_layer()
+    sim.recompute()
+    assert len(sim.stack.layers) == 3
+    assert not sim.status.text().startswith('Error')

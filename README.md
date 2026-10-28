@@ -57,7 +57,7 @@ The installed program keeps its sessions in `Documents\SANR`.
 | **`fit/`** | **Fitting** |
 | `fit/problem.py` | `FitProblem`: free parameters, data, model and cost, shared by both methods |
 | `fit/joint.py` | `JointProblem`: several datasets fitted together with one model, each parameter shared, own to a dataset or not fitted in it (the `FitProblem` interface, for DE, multistart and DREAM) |
-| `fit/datasets_dialog.py` | "Datasets to fit" dialog (Select… on the Fit tool box's general page): the datasets of a joint fit and each parameter's mode in each |
+| `fit/datasets_panel.py` | "Datasets to fit" panel (right side of the Fit tab): the datasets of a joint fit and each parameter's mode in each |
 | `fit/panel.py` | The Fit tool box of the Experimental tab (general / DE / local L-BFGS-B / multistart / DREAM pages and their actions) |
 | `fit/workers.py` | Process pools for DE (and its L-BFGS-B) and DREAM that receive the fit problem once, as each worker starts, instead of with every task |
 | `fit/de/de_fit.py` | `run_de`: differential-evolution fit (scipy), optionally over worker processes; `run_lbfgs`: L-BFGS-B alone from the current values (the local page) |

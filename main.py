@@ -16,8 +16,10 @@ reflectivity plot (line_colours.py), remembered the same way.
 The mouse wheel never changes a spin box or a combo box (NoWheelOnInputs): it
 scrolls the panel under the pointer, so a value cannot be changed by accident.
 
-Each fit (DE, L-BFGS-B, multistart) and DREAM run opens a tab of its own
-after the three tools, named short (fit.panel.FitPanel._tab_name); older ones
+The tabs: Geometry, Simulation (shown first, starting with no layer),
+Experimental data, Fit (the fit box, fit.panel).  Each fit
+(DE, L-BFGS-B, multistart) and DREAM run opens a tab of its own after the
+four tools, named short (fit.panel.FitPanel._tab_name); older ones
 stay until their × closes them (FitPanel.close_page), not while they run.
 
 Built as a program (make_windows_installer.py, PyInstaller), the session
@@ -49,6 +51,7 @@ from model.profile_io import load_profile
 from tabs import ExperimentalTab, SimulationTab
 from tabs.experimental import file_ref
 from tabs.geometry import GeometryTab
+from tabs.simulation import empty_stack
 
 APP_ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icons',
                         'app.png')
@@ -77,12 +80,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.setDocumentMode(True)
         self.setCentralWidget(self.tabs)
 
-        self.simulation = SimulationTab()
-        self.tabs.addTab(self.simulation, 'Simulation')
+        # no layer to start with (tabs.simulation.empty_stack)
+        self.simulation = SimulationTab(empty_stack())
         self.experimental = ExperimentalTab(simulation=self.simulation)
-        self.tabs.addTab(self.experimental, 'Experimental data')
         self.geometry = GeometryTab(self.simulation)
         self.tabs.addTab(self.geometry, 'Geometry')
+        self.tabs.addTab(self.simulation, 'Simulation')
+        self.tabs.addTab(self.experimental, 'Experimental data')
+        self.tabs.addTab(self.experimental.fit_page, 'Fit')
+        self.tabs.setCurrentWidget(self.simulation)     # the one shown first
         # fits and DREAM runs open as tabs after these, with a close button
         self.tabs.setTabsClosable(True)
         for i in range(self.tabs.count()):

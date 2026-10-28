@@ -19,7 +19,7 @@ above the layer list showing one of them in self.stack: switching keeps the
 shown one as it is and loads the other (restore_state, models=False), so
 each keeps its layers, general parameters, resolution, fit settings and
 selected layer; the polarisation, Q range and display are the tab's.  New
-takes the default layers (make_stack) with the shown model's other settings,
+takes no layer (empty_stack) with the shown model's other settings,
 Copy the whole model.  A session file is the shown model as before, the
 others under 'simulation' -> 'models'; switching is off while a fit runs.
 
@@ -175,7 +175,9 @@ def profile_data(st):
 
 
 def make_stack():
-    """Default sample loaded when the tab opens."""
+    """Example sample: three films on a substrate, the tab's model when it
+    is built without one (the tests, selftest.py); SANR itself starts
+    from empty_stack()."""
     vacuum = Layer('vacuum')
 
     L1 = Layer('L1', thickness=80.0, NSLD_real=4.0e-6,
@@ -195,6 +197,13 @@ def make_stack():
                       roughness_sublayer=20)
 
     return Stack([vacuum, L1, L2, L3, substrate])
+
+
+def empty_stack():
+    """No layer: vacuum on the substrate of make_stack.  The model SANR
+    starts with, and that of a New model."""
+    st = make_stack()
+    return Stack([st.layers[0], st.layers[-1]])
 
 
 def dspin(lo, hi, dec, step, suffix=''):
@@ -1668,8 +1677,8 @@ class SimulationTab(QtWidgets.QWidget):
         row.addWidget(self.model_box, 1)
         self.model_btns = {}
         for key, label, tip, slot in (
-                ('new', 'New', 'New model: the default layers, this '
-                 'model\'s other settings', self.new_model),
+                ('new', 'New', 'New model: no layer (vacuum on the '
+                 'substrate), this model\'s other settings', self.new_model),
                 ('copy', 'Copy', 'New model: a copy of this one',
                  self.copy_model),
                 ('rename', 'Rename…', 'Rename this model', self.rename_model),
@@ -2921,12 +2930,12 @@ class SimulationTab(QtWidgets.QWidget):
         self.switch_model(len(self._models) - 1)
 
     def new_model(self):
-        """The default layers (make_stack) with the shown model's other
+        """No layer (empty_stack) with the shown model's other
         settings, as Import profile replaces only the layers."""
         if self._locked:
             return
         d, _ = self._shown_model()
-        d['layers'] = make_stack().to_dict()['layers']
+        d['layers'] = empty_stack().to_dict()['layers']
         d['ties'] = []
         d['thickness_spread_target'] = 'stack'
         self._add_model('Model %d' % (len(self._models) + 1), d)

@@ -17,12 +17,14 @@ from the chosen dataset and the Simulation tab, running it in a background
 thread, following it in its window (a closable tab of the main window,
 page_tabs) and sending results back to the Simulation tab.
 
-JOINT FIT -- "Select…" beside the Dataset box (fit.datasets_dialog) picks
-several datasets fitted together with one model, each parameter shared,
-own to a dataset or not fitted in it, at a value typed for that dataset
-or the Simulation tab's (fit.joint); the Dataset box then
-holds a "Joint: …" entry for that selection (kept in the session), and the
-fit windows show one tab per dataset.  A result sent to the Simulation tab
+JOINT FIT -- the Datasets to fit panel beside the fit box (the Fit tab's
+right side, fit.datasets_panel, `datasets_panel`) picks the datasets
+fitted, as it is ticked: one alone, or several fitted together with one
+model, each parameter shared, own to a dataset or not fitted in it, at a
+value typed for that dataset or the Simulation tab's (fit.joint).  The
+Dataset box (fit_set, never shown) holds the choice: a dataset, or a
+"Joint: …" entry for the selection (kept in the session); the fit windows
+then show one tab per dataset.  A result sent to the Simulation tab
 from a joint fit holds the values one dataset sees: that of the DE
 window's tab shown (a multistart's minima too), of the dataset chosen in
 the DREAM window, the first one's from the multistart table.
@@ -46,7 +48,7 @@ from PyQt6 import QtCore, QtWidgets
 
 from model.polarisation import vectors_pair
 from tabs.simulation import PARAM_DISPLAY, SciSpinBox, dspin
-from fit.datasets_dialog import DatasetsDialog
+from fit.datasets_panel import DatasetsPanel
 from fit.problem import FitProblem, parameter_names
 from fit.de.de_fit import STRATEGIES
 from fit.de.de_window import DEThread, DEWindow
@@ -158,14 +160,19 @@ class FitPanel:
         chosen, then that method's options."""
         self.fit_set = QtWidgets.QComboBox()
         self.fit_set.setToolTip('Every channel of this dataset is fitted '
-                                '(of every dataset of a joint fit)')
-        self.btn_sets = QtWidgets.QPushButton('Select…')
-        self.btn_sets.setToolTip(
-            'Choose the datasets to fit together, and for each how its '
-            'parameters are fitted:\nshared with the others, its own value, '
-            'or not fitted')
-        self.btn_sets.clicked.connect(self.select_datasets)
+                                '(of every dataset of a joint fit: tick '
+                                'them on the right)')
         self._joint = None             # {'sets', 'modes'} of the joint fit
+        # the datasets fitted together and their parameters' modes, live;
+        # the Fit tab shows it beside the fit box
+        self.datasets_panel = DatasetsPanel()
+        self.datasets_panel.changed.connect(self._datasets_chosen)
+        self._datasets_key = None      # what the panel was last loaded with
+        self._choosing = False         # the panel itself is being applied
+        self.fit_set.currentIndexChanged.connect(self._sync_datasets_panel)
+        if self.simulation is not None:     # the parameters ticked Fit
+            self.simulation.reflectanceChanged.connect(
+                self._sync_datasets_panel)
         self.fit_cost = QtWidgets.QComboBox()
         self.fit_cost.addItems([c[1] for c in FIT_COSTS])
         self.fit_cost.setToolTip(
@@ -266,21 +273,21 @@ class FitPanel:
 
         # -- shared by every method
         general, f = self._page()
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(self.fit_set, 1)
-        row.addWidget(self.btn_sets)
-        f.addRow('Dataset', row)
+        # the datasets fitted are ticked in the Datasets to fit panel; this
+        # box, never shown, holds that choice for the fit and the session
+        f.addRow('Dataset', self.fit_set)
+        f.setRowVisible(self.fit_set, False)
         f.addRow('Cost', self.fit_cost)
         f.addRow('Fit to', self.fit_target)
         f.addRow('Workers', self.fit_workers)
         f.addRow('Error floor', self.fit_floor)
         f.addRow(QtWidgets.QLabel(
-            '<i>Every channel of the dataset is fitted between Q min and '
-            'Q max of the Simulation tab, varying the parameters ticked Fit '
-            'there (scale and background included); its Q points set the '
-            'model curves of the fit windows.  Select… fits several '
-            'datasets together.  Fit to (R+ + R−)/2 or SA combines R+ and '
-            'R− point by point.</i>', wordWrap=True))
+            '<i>Every channel of the datasets ticked on the right is fitted '
+            'between Q min and Q max of the Simulation tab, varying the '
+            'parameters ticked Fit there (scale and background included); '
+            'their Q points set the model curves of the fit windows.  Fit '
+            'to (R+ + R−)/2 or SA combines R+ and R− point by point.</i>',
+            wordWrap=True))
         row = QtWidgets.QHBoxLayout()
         row.addStretch(1)
         row.addWidget(self.btn_revert)
@@ -1032,6 +1039,7 @@ class FitPanel:
         i = c.findData(JOINT) if joint and self._joint else c.findText(keep)
         c.setCurrentIndex(max(i, 0))
         c.blockSignals(False)
+        self._sync_datasets_panel()
 
     def _fit_sets(self):
         """The datasets fitted: the Dataset box's one, or every dataset of
@@ -1054,37 +1062,56 @@ class FitPanel:
         if old in self._grid_choice:
             self._grid_choice[new] = self._grid_choice.pop(old)
 
-    def select_datasets(self):
-        """The datasets to fit (fit.datasets_dialog): one is chosen in the
-        Dataset box, two or more make its joint entry."""
-        names = self._fittable()
-        if not names:
-            QtWidgets.QMessageBox.information(
-                self, 'Datasets to fit', 'Import data to fit first.')
+    def _sync_datasets_panel(self, *_):
+        """The Datasets to fit panel from the Dataset box (its dataset, or
+        the joint fit's), the datasets that can be fitted and the
+        parameters ticked Fit in the Simulation tab; reloaded only when one
+        of them changed, so a box being typed in is kept."""
+        if self._choosing:
             return
+        key, names, chosen, params, info = self._datasets_state()
+        if key == self._datasets_key:
+            return
+        self._datasets_key = key
+        joint = self._joint if len(chosen) > 1 else None
+        self.datasets_panel.load(
+            names, chosen, params,
+            None if joint is None else joint.get('modes') or {},
+            None if joint is None else joint.get('values') or {}, info)
+
+    def _datasets_state(self):
+        """(key, names, chosen, params, info) of _sync_datasets_panel."""
+        names = self._fittable()
+        chosen = [s['name'] for s in self._fit_sets()]
         params, info = [], {}
         if self.simulation is not None:
-            self.simulation.recompute()      # the Fit boxes into the stack
             st = self.simulation.stack
             free = st.free_parameters()
             params = parameter_names(st, free)
             # the value boxes of 'Not fitted': the Simulation tab's units
             info = {n: PARAM_DISPLAY[a][1:] + (v,)
                     for n, (_, a, v, *_) in zip(params, free)}
-        joint = self._joint or {}
-        dlg = DatasetsDialog(names, [s['name'] for s in self._fit_sets()],
-                             joint.get('modes'), params, self,
-                             values=joint.get('values'), info=info)
-        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
-            return
-        sel = dlg.selection()
-        if len(sel['sets']) > 1:
-            self._joint = sel
-            self._refresh_fit_sets()
-            self.fit_set.setCurrentIndex(self.fit_set.findData(JOINT))
-        else:
-            self.fit_set.setCurrentIndex(self.fit_set.findText(
-                sel['sets'][0]))
+        key = (names, chosen, params, sorted(info.items()))
+        return key, names, chosen, params, info
+
+    def _datasets_chosen(self):
+        """A tick, mode or value of the Datasets to fit panel: two datasets
+        or more are the Dataset box's joint entry, one is that dataset."""
+        sel = self.datasets_panel.selection()
+        self._choosing = True
+        try:
+            if len(sel['sets']) > 1:
+                self._joint = sel
+                self._refresh_fit_sets()
+                i = self.fit_set.findData(JOINT)
+            else:
+                i = self.fit_set.findText(sel['sets'][0])
+            if i != self.fit_set.currentIndex():
+                self.fit_set.setCurrentIndex(i)
+        finally:
+            self._choosing = False
+        # the panel already shows this state: not reloaded
+        self._datasets_key = self._datasets_state()[0]
 
     def busy(self):
         """A fit, a multistart or a DREAM run is going on."""

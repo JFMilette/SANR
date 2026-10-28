@@ -1,6 +1,9 @@
 """
 Experimental tab: import measured reflectivity channels and plot them with
-the same quantities as the simulation tab, with error bars.
+the same quantities as the simulation tab, with error bars.  The fit box
+(fit.panel) is not in this tab: `fit_page` holds it, with the Datasets to
+fit panel on its right, a tab of its own in the main window, so the
+datasets have the column's whole height.
 
 Each file holds one channel (R+, R-, R++, R+-, R-+ or R--) as columns
     Qz (1/A)   R (a.u.)   [dR (a.u.)   dQz (1/A)   theta]
@@ -79,6 +82,7 @@ from .simulation import (REFL_QUANTITIES, Crosshair, PairTable, dspin, fmt,
 
 DATA_FILTER = 'Data files (*.dat *.txt *.csv *.refl);;All files (*)'
 DIALOG_OPTIONS = QtWidgets.QFileDialog.Option.DontUseNativeDialog
+FIT_PAGE_WIDTH = 560                  # px, the fit box's first width
 # import order in the channel combo; colours: line_colours
 DATA_CHANNELS = ['+', '-', '++', '-+', '+-', '--']
 PLOT_ORDER = ['++', '+-', '-+', '--', '+', '-']
@@ -829,7 +833,6 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self.btn_new.clicked.connect(lambda: self.new_set())
         self.btn_sim.clicked.connect(self.add_simulation)
         self.btn_remove.clicked.connect(self.remove_selected)
-        v.addWidget(box, 1)
 
         disp = QtWidgets.QGroupBox('Display')
         f = QtWidgets.QFormLayout(disp)
@@ -844,7 +847,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self.show_line = QtWidgets.QCheckBox('line')
         self.show_line.setToolTip('Join the data points of each channel '
                                   'with a line, in file order')
-        # one row, to leave the height to the fit box
+        # one row, to leave the height to the datasets
         opts = QtWidgets.QHBoxLayout()
         opts.addWidget(QtWidgets.QLabel('Scale'))
         opts.addWidget(self.logy)
@@ -859,9 +862,26 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         for w in (self.logy, self.rq4, self.show_err, self.show_points,
                   self.show_line):
             w.toggled.connect(self.redraw)
+        v.addWidget(box, 1)
         v.addWidget(disp)
-        # the fit tools get most of the height the window has to spare
-        v.addWidget(self._build_fit_box(), 2)
+
+        # the fit box: a page for the main window's own Fit tab, the
+        # datasets fitted together beside it (fit.datasets_panel), a
+        # splitter between them
+        fit = self._build_fit_box()
+        fit.setTitle('Fitting parameters')
+        sets = QtWidgets.QGroupBox('Datasets to fit')
+        QtWidgets.QVBoxLayout(sets).addWidget(self.datasets_panel)
+        self.fit_splitter = QtWidgets.QSplitter(
+            QtCore.Qt.Orientation.Horizontal)
+        self.fit_splitter.addWidget(fit)
+        self.fit_splitter.addWidget(sets)
+        self.fit_splitter.setChildrenCollapsible(False)
+        self.fit_splitter.setStretchFactor(0, 0)
+        self.fit_splitter.setStretchFactor(1, 1)
+        self.fit_splitter.setSizes([FIT_PAGE_WIDTH, 900])
+        self.fit_page = QtWidgets.QWidget()
+        QtWidgets.QHBoxLayout(self.fit_page).addWidget(self.fit_splitter)
 
         self.status = QtWidgets.QLabel()
         self.status.setWordWrap(True)

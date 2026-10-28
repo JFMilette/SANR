@@ -1,13 +1,15 @@
 """
-The "Datasets to fit" dialog of the Fit tool box (Select… on the general
-page): the datasets fitted together, and how each parameter ticked Fit in
-the Simulation tab is fitted (fit.joint MODES): shared by the datasets (the
-default), its own value in each, or not fitted.  The table has a row per
+The "Datasets to fit" panel, on the right of the main window's Fit tab: the
+datasets fitted together, and how each parameter ticked Fit in the
+Simulation tab is fitted (fit.joint MODES): shared by the datasets (the
+default), its own value in each, or not fitted.  Every change applies at
+once (`changed`); fit.panel turns two ticked datasets or more into the
+Dataset box's joint entry, one into that dataset.  The table has a row per
 parameter: its "All datasets" column sets the mode in every ticked dataset
 at once ("Own value" there: a value of its own in each), and a column per
 ticked dataset changes one of them ("All datasets" then reads Mixed).
 Modes only matter for two datasets or more; one dataset ticked is fitted
-alone.
+alone.  The last ticked dataset cannot be unticked.
 
 NOT FITTED -- a box beside "Not fitted" holds the value the parameter keeps
 in that dataset (fit.joint `values`), in the Simulation tab's units; left
@@ -30,36 +32,23 @@ MODE_LABELS = [('shared', 'Shared'),
 MIXED = 'mixed'             # "All datasets" when the datasets differ
 
 
-class DatasetsDialog(QtWidgets.QDialog):
+class DatasetsPanel(QtWidgets.QWidget):
     """Pick datasets and the parameters' modes (see the module
     docstring)."""
 
-    def __init__(self, names, chosen, modes, params, parent=None,
-                 values=None, info=None):
-        """names: the datasets that can be fitted; chosen: those ticked;
-        modes: {dataset: {parameter name: mode}} (fit.joint); params: the
-        parameter names (fit.problem.parameter_names); values: {dataset:
-        {parameter name: value}} of the 'fixed' ones given a value (stored
-        units); info: {parameter name: (scale, unit, current value)} for
-        the boxes (scale: stored -> shown; default 1, '', no value)."""
+    changed = QtCore.pyqtSignal()       # a tick, a mode or a value changed
+
+    def __init__(self, names=(), chosen=(), modes=None, params=(),
+                 parent=None, values=None, info=None):
+        """See load."""
         super().__init__(parent)
-        self.setWindowTitle('Datasets to fit')
-        self.params = list(params)
-        self.modes = {n: dict((modes or {}).get(n) or {}) for n in names}
-        self.values = {n: dict((values or {}).get(n) or {}) for n in names}
-        self.info = dict(info or {})
+        self.params, self.modes, self.values, self.info = [], {}, {}, {}
 
         self.list = QtWidgets.QListWidget()
         self.list.setToolTip('Tick the datasets fitted together')
-        for n in names:
-            it = QtWidgets.QListWidgetItem(n)
-            it.setFlags(it.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
-            it.setCheckState(QtCore.Qt.CheckState.Checked if n in chosen
-                             else QtCore.Qt.CheckState.Unchecked)
-            self.list.addItem(it)
-        self.list.itemChanged.connect(lambda *_: self._build_table())
+        self.list.itemChanged.connect(self._ticked)
 
-        self.table = QtWidgets.QTableWidget(len(self.params), 0)
+        self.table = QtWidgets.QTableWidget(0, 0)
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -82,12 +71,8 @@ class DatasetsDialog(QtWidgets.QDialog):
         row = QtWidgets.QHBoxLayout()
         row.addLayout(left, 1)
         row.addLayout(right, 3)
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Ok
-            | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
         v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
         v.addLayout(row, 1)
         v.addWidget(QtWidgets.QLabel(
             '<i>Shared: one value fitted to every dataset sharing it.  Own '
@@ -96,9 +81,43 @@ class DatasetsDialog(QtWidgets.QDialog):
             'when the box is empty (shown greyed).  "All datasets" sets '
             'every dataset; a dataset\'s column changes that one only.</i>',
             wordWrap=True))
-        v.addWidget(buttons)
-        self.resize(760, 420)
+        self.load(names, chosen, params, modes, values, info)
+
+    def load(self, names, chosen, params, modes=None, values=None,
+             info=None):
+        """names: the datasets that can be fitted; chosen: those ticked;
+        params: the parameter names (fit.problem.parameter_names); modes:
+        {dataset: {parameter name: mode}} (fit.joint), values: {dataset:
+        {parameter name: value}} of the 'fixed' ones given a value (stored
+        units), None for both: the panel's own, for the datasets still
+        there; info: {parameter name: (scale, unit, current value)} for
+        the boxes (scale: stored -> shown; default 1, '', no value)."""
+        self.params = list(params)
+        self.modes = {n: dict((self.modes if modes is None else modes)
+                              .get(n) or {}) for n in names}
+        self.values = {n: dict((self.values if values is None else values)
+                               .get(n) or {}) for n in names}
+        self.info = dict(info or {})
+        self.list.blockSignals(True)
+        self.list.clear()
+        for n in names:
+            it = QtWidgets.QListWidgetItem(n)
+            it.setFlags(it.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(QtCore.Qt.CheckState.Checked if n in chosen
+                             else QtCore.Qt.CheckState.Unchecked)
+            self.list.addItem(it)
+        self.list.blockSignals(False)
         self._build_table()
+
+    def _ticked(self, item):
+        """A dataset ticked or unticked; the last one stays ticked."""
+        if not self.chosen():
+            self.list.blockSignals(True)
+            item.setCheckState(QtCore.Qt.CheckState.Checked)
+            self.list.blockSignals(False)
+            return
+        self._build_table()
+        self.changed.emit()
 
     def chosen(self):
         """The ticked datasets, in the list's order."""
@@ -182,6 +201,7 @@ class DatasetsDialog(QtWidgets.QDialog):
         sets = self.chosen()
         t = self.table
         t.clearContents()
+        t.setRowCount(len(self.params))
         t.setColumnCount(2 + len(sets))
         t.setHorizontalHeaderLabels(['Parameter', 'All datasets'] + sets)
         self.all_combos, self.all_edits = [], []
@@ -215,17 +235,15 @@ class DatasetsDialog(QtWidgets.QDialog):
                 self.cells[n, p] = c
                 self.edits[n, p] = e
             self._show_all(r)
-        # names in full; the table scrolls sideways if the window is narrow
+        # names in full; the table scrolls sideways if the tab is narrow
         for k in range(t.columnCount()):
             t.resizeColumnToContents(k)
         t.resizeRowsToContents()
-        # wide enough for every column (the dialog grows), up to 1000 px
-        need = sum(t.columnWidth(k) for k in range(t.columnCount())) + \
-            2 * t.frameWidth() + t.verticalScrollBar().sizeHint().width()
-        t.setMinimumWidth(min(need, 1000))
         on = len(sets) > 1
         t.setEnabled(on)
-        if not self.params:
+        if not self.list.count():
+            self.note.setText('Import data to fit first.')
+        elif not self.params:
             self.note.setText('No parameter is ticked Fit in the Simulation '
                               'tab.')
         elif not on:
@@ -265,11 +283,13 @@ class DatasetsDialog(QtWidgets.QDialog):
             c.blockSignals(False)
             self.edits[n, p].setVisible(mode == 'fixed')
         self._show_all(self.params.index(p))
+        self.changed.emit()
 
     def _set_one(self, n, p, mode):
         self.modes[n][p] = mode
         self.edits[n, p].setVisible(mode == 'fixed')
         self._show_all(self.params.index(p))
+        self.changed.emit()
 
     def _set_value(self, n, p, e):
         v = self._parse(p, e)
@@ -280,6 +300,7 @@ class DatasetsDialog(QtWidgets.QDialog):
         else:
             self.values[n][p] = v
         self._show_all(self.params.index(p))
+        self.changed.emit()
 
     def _set_all_value(self, p, e):
         """The "All datasets" box: its value into every ticked dataset."""
@@ -293,26 +314,4 @@ class DatasetsDialog(QtWidgets.QDialog):
                 self.values[n][p] = v
             self.edits[n, p].setText('' if v is None else self._shown(p, v))
             self.edits[n, p].setStyleSheet('')
-
-    def accept(self):
-        # a box still being typed in counts (editingFinished may not have
-        # fired before OK); a value that is not a number stops here
-        bad = []
-        for (n, p), e in self.edits.items():
-            if e.isVisible() or self.mode(n, p) == 'fixed':
-                v = self._parse(p, e)
-                if v is False:
-                    bad.append('%s in %s' % (shown_names(p), n))
-                elif v is None:
-                    self.values[n].pop(p, None)
-                else:
-                    self.values[n][p] = v
-        if bad:
-            QtWidgets.QMessageBox.information(
-                self, 'Datasets to fit', 'Not a number: %s.' % ', '.join(bad))
-            return
-        if not self.chosen():
-            QtWidgets.QMessageBox.information(self, 'Datasets to fit',
-                                              'Tick at least one dataset.')
-            return
-        super().accept()
+        self.changed.emit()

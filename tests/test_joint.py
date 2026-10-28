@@ -190,9 +190,9 @@ def test_dialog_selection():
     dataset's column one of them (All then reads Mixed)."""
     gui()
     from PyQt6 import QtCore
-    from fit.datasets_dialog import DatasetsDialog
+    from fit.datasets_panel import DatasetsPanel
     params = ['L.thickness', 'L.MSLD_rho']
-    dlg = DatasetsDialog(['A', 'B', 'C'], ['A'], {}, params)
+    dlg = DatasetsPanel(['A', 'B', 'C'], ['A'], {}, params)
     assert dlg.chosen() == ['A'] and not dlg.table.isEnabled()
     dlg.list.item(1).setCheckState(QtCore.Qt.CheckState.Checked)
     assert dlg.table.isEnabled() and dlg.table.columnCount() == 4
@@ -224,12 +224,13 @@ def test_dialog_values_of_not_fitted():
     dataset's value, "All datasets" writes every one, text is refused."""
     gui()
     from PyQt6 import QtCore
-    from fit.datasets_dialog import DatasetsDialog
+    from fit.datasets_panel import DatasetsPanel
     params = ['L.thickness', 'L.MSLD_rho']
     info = {'L.thickness': (1.0, 'Å', 75.0),
             'L.MSLD_rho': (1e6, '10⁻⁶ Å⁻²', 2e-6)}
-    dlg = DatasetsDialog(['A', 'B'], ['A', 'B'], {}, params, info=info,
+    dlg = DatasetsPanel(['A', 'B'], ['A', 'B'], {}, params, info=info,
                          values={'A': {'L.thickness': 60.0}})
+    dlg.resize(900, 500)                  # room for the table's cells
     dlg.show()
     e = dlg.edits['B', 'L.MSLD_rho']
     assert not e.isVisible() and e.placeholderText() == '2'
@@ -253,22 +254,43 @@ def test_dialog_values_of_not_fitted():
     assert dlg.all_edits[0].text() == ''
     assert dlg.selection()['values'] == {
         'B': {'L.thickness': 80.0, 'L.MSLD_rho': pytest.approx(3.5e-6)}}
-    seen = []
-    import fit.datasets_dialog as D
-    orig = D.QtWidgets.QMessageBox.information
-    D.QtWidgets.QMessageBox.information = staticmethod(
-        lambda *a: seen.append(a[2]))
-    try:
-        dlg.edits['B', 'L.thickness'].setText('abc')
-        dlg.accept()
-    finally:
-        D.QtWidgets.QMessageBox.information = orig
-    assert 'Not a number' in seen[0] and dlg.result() == 0
+    dlg.edits['B', 'L.thickness'].setText('abc')        # not taken
+    dlg.edits['B', 'L.thickness'].editingFinished.emit()
     assert 'border' in dlg.edits['B', 'L.thickness'].styleSheet()
-    dlg.edits['B', 'L.thickness'].setText('81')        # typed, not entered
-    dlg.accept()
-    assert dlg.result() == 1 and dlg.values['B']['L.thickness'] == 81.0
-    assert QtCore is not None
+    assert dlg.values['B']['L.thickness'] == 80.0
+    # the last ticked dataset stays ticked
+    dlg.list.item(0).setCheckState(QtCore.Qt.CheckState.Unchecked)
+    dlg.list.item(1).setCheckState(QtCore.Qt.CheckState.Unchecked)
+    assert dlg.chosen() == ['B']
+
+
+def test_panel_follows_and_sets_the_dataset_box():
+    """Ticking a second dataset makes the joint entry; picking one dataset
+    in the Dataset box ticks it alone; picking the joint entry again
+    brings its modes back."""
+    from PyQt6 import QtCore
+    from fit.panel import JOINT
+    sim, exp = gui()
+    exp.fit_set.setCurrentIndex(exp.fit_set.findText('A'))
+    panel = exp.datasets_panel
+    assert panel.chosen() == ['A'] and len(panel.params) == 2
+    panel.list.item(1).setCheckState(QtCore.Qt.CheckState.Checked)
+    assert exp.fit_set.currentData() == JOINT
+    assert exp._joint['sets'] == ['A', 'B']
+    p = panel.params[1]
+    c = panel.cells['B', p]
+    c.setCurrentIndex(c.findData('own'))
+    assert exp._joint['modes'] == {'B': {p: 'own'}}
+    exp.fit_set.setCurrentIndex(exp.fit_set.findText('B'))
+    assert panel.chosen() == ['B']
+    exp.fit_set.setCurrentIndex(exp.fit_set.findData(JOINT))
+    assert panel.chosen() == ['A', 'B']
+    assert panel.cells['B', p].currentData() == 'own'
+    # a parameter ticked Fit in the Simulation tab: a row more
+    sim.stack.layers[1].fit_entry('NSLD_real')['vary'] = True
+    sim.recompute()
+    assert len(panel.params) == 3
+    assert panel.cells['B', p].currentData() == 'own'
 
 
 def test_joint_entry_problem_and_session(tmp_path):
