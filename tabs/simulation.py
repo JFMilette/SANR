@@ -80,14 +80,61 @@ def export_name(item, name):
     item.opts['name'] = name
 # combo label, axis label (None = raw reflectivities), formula beside the combo.
 # The channels are the Pi / Pa pairs of the Polarisation box.
+POLARIZED = 'Polarized with analysis'          # R++, R+-, R-+, R--
+HALF_POLARIZED = 'Polarized without analysis'  # R+, R-
+UNPOLARIZED = 'Non-polarized'                  # (R+ + R-) / 2
 REFL_QUANTITIES = [
-    ('Reflectivity', None, ''),
-    ('Half-polarized', None, 'R+, R− (Pa = 0: no analyser)'),
+    (POLARIZED, None, 'R++, R+−, R−+, R−−'),
+    (HALF_POLARIZED, None, 'R+, R− (Pa = 0: no analyser)'),
+    (UNPOLARIZED, None, '(R+ + R−) / 2'),
     ('SA NSF', 'SA_NSF', '(R++ − R−−) / (R++ + R−−)'),
     ('SF fraction', 'SF fraction', '(R+− + R−+) / (R++ + R+− + R−+ + R−−)'),
     ('SA SF', 'SA_SF', '(R+− − R−+) / (R+− + R−+)'),
     ('SA half-polarized', 'SA', '(R+ − R−) / (R+ + R−)'),
 ]
+# the y scale of a reflectivity (r_scale_combo): one or the other
+R_SCALES = [('log', 'log R'), ('rq4', 'R·Q⁴')]
+
+
+def r_scale_combo():
+    """The R scale box of a reflectivity plot: log R (log axis) or R·Q⁴
+    (linear axis), never both."""
+    c = QtWidgets.QComboBox()
+    for key, label in R_SCALES:
+        c.addItem(label, key)
+    c.setToolTip('log R: the reflectivity on a log axis.\nR·Q⁴: the '
+                 'reflectivity times Q⁴ on a linear axis (the Fresnel '
+                 'decay taken out).')
+    return c
+
+
+def saved_r_scale(disp):
+    """R_SCALES key of a saved display dict: its 'scale', or from the
+    older 'logy' / 'rq4' check boxes (R·Q⁴ when it was ticked)."""
+    if disp.get('scale') in dict(R_SCALES):
+        return disp['scale']
+    return 'rq4' if disp.get('rq4') else 'log'
+
+
+def set_r_scale(combo, key):
+    combo.setCurrentIndex(max(0, combo.findData(key)))
+
+
+# the list before UNPOLARIZED, whose indices older sessions saved
+OLD_REFL_QUANTITIES = [POLARIZED, HALF_POLARIZED, 'SA NSF', 'SF fraction',
+                       'SA SF', 'SA half-polarized']
+
+
+def quantity_index(disp, default=0):
+    """REFL_QUANTITIES index of a saved display dict: its 'quantity_name',
+    or its older 'quantity' index (OLD_REFL_QUANTITIES), else default."""
+    names = [q[0] for q in REFL_QUANTITIES]
+    if disp.get('quantity_name') in names:
+        return names.index(disp['quantity_name'])
+    k = disp.get('quantity')
+    if isinstance(k, int) and 0 <= k < len(OLD_REFL_QUANTITIES):
+        return names.index(OLD_REFL_QUANTITIES[k])
+    return default
 # smallest font for the layer names in the depth profile
 LABEL_MIN_PT = 6
 # an additive profile whose crossing interfaces push a quantity this far
@@ -406,7 +453,8 @@ def profile_readout(view, x):
     """Cursor text for a depth profile plot: layer, depth, checked curves.
     view holds the plot as the Simulation tab does: stack, _profile and
     _on_bars (profile_data), prof_boxes, prof_show_smooth,
-    prof_show_bars, prof_plot and prof_vb2 (the angles' axis)."""
+    prof_show_bars, prof_plot, prof_vb2 (the right axis) and prof_right
+    (ProfileRightAxis)."""
     if view._profile is None:
         return None, []
     z, Z, e, curves, slabs = view._profile
@@ -417,8 +465,7 @@ def profile_readout(view, x):
     layer = view.stack.layers[int(np.searchsorted(Z, x))]
     rows = []
     for i, (name, _, col) in enumerate(PROFILE_QUANTITIES):
-        if not view.prof_boxes[i].isChecked() or \
-                not (show_smooth or show_bars):
+        if not view.prof_right.angle_on(i) or not (show_smooth or show_bars):
             continue
         unit = ' °' if i in RIGHT else ''
         k = min(max(int(np.searchsorted(e, x)) - 1, 0), len(slabs[i]) - 1)
@@ -434,18 +481,166 @@ def profile_readout(view, x):
                 value = fmt(y) + unit
         vb = view.prof_vb2 if i in RIGHT else view.prof_plot.vb
         rows.append((name, value, col, y, vb))
-    return 'z = %.4g Å  —  %s' % (x, layer.name), rows
+    return 'z = %.4g Å  —  %s' % (x, layer.name), rows + \
+        view.prof_right.readout(x)
+
+
+# RIGHT AXIS of a depth profile: the magnetisation angles (PROFILE_QUANTITIES
+# RIGHT) or the roughness of each interface, a stem at its depth: σ, and σ_M
+# where a layer has its own magnetic roughness (MSLD_sigma)
+RIGHT_AXIS_MODES = (('angles', 'Angles'), ('roughness', 'Roughness'))
+ROUGHNESS_QUANTITIES = [('σ', 'roughness σ', '#17becf'),
+                        ('σ_M', 'magnetic σ', '#bcbd22')]
+
+
+def roughness_stems(st):
+    """([(Z_j, σ_j)], [(Z_j, σ_M,j)]) of every interface (the top of layer
+    j + 1): its roughness_sigma (0 for a sharp, 'none' one), and its
+    MSLD_sigma where the layer has one."""
+    sig, mag = [], []
+    for Zj, l in zip(st._interfaces(), st.layers[1:]):
+        sig.append((Zj, 0.0 if l.roughness_model == 'none'
+                    else max(float(l.roughness_sigma), 0.0)))
+        if l.MSLD_sigma is not None:
+            mag.append((Zj, max(float(l.MSLD_sigma), 0.0)))
+    return sig, mag
+
+
+class ProfileRightAxis:
+    """The Right axis box of a depth profile (RIGHT AXIS) and the roughness
+    stems it draws in the right view box; the angle check boxes stay the
+    view's own (prof_boxes[RIGHT]), shown only in the 'angles' mode."""
+
+    def __init__(self, view, changed):
+        """view: has prof_plot, prof_vb2 and prof_boxes; changed: called
+        when the mode or a σ box changes."""
+        self.view = view
+        self.combo = QtWidgets.QComboBox()
+        for key, label in RIGHT_AXIS_MODES:
+            self.combo.addItem(label, key)
+        self.combo.setToolTip('What the right axis shows: the in-plane and '
+                              'out-of-plane magnetisation angles, or the '
+                              'roughness of each interface (Å)')
+        self.combo.currentIndexChanged.connect(self._mode_changed)
+        self.boxes, self.stems, self.heads = [], [], []
+        for name, tip, col in ROUGHNESS_QUANTITIES:
+            cb = QtWidgets.QCheckBox(name)
+            cb.setChecked(True)
+            cb.setStyleSheet('color: %s' % col)
+            cb.setToolTip('The %s of each interface, at its depth' % tip)
+            cb.toggled.connect(changed)
+            self.boxes.append(cb)
+            stem = pg.PlotDataItem(pen=pg.mkPen(col, width=2),
+                                   connect='pairs')
+            head = pg.ScatterPlotItem(size=7, pen=pg.mkPen(col),
+                                      brush=pg.mkBrush(col))
+            view.prof_vb2.addItem(stem)
+            view.prof_vb2.addItem(head)
+            self.stems.append(stem)
+            self.heads.append(head)
+        self._changed = changed
+        self._points = ([], [])
+
+    def widgets(self):
+        """The box and the σ check boxes, for the profile's bar."""
+        return [self.combo] + self.boxes
+
+    def mode(self):
+        return self.combo.currentData()
+
+    def set_mode(self, key):
+        self.combo.setCurrentIndex(max(0, self.combo.findData(key)))
+
+    def _mode_changed(self, *_):
+        self._show_boxes()
+        self._changed()
+
+    def _show_boxes(self):
+        """The angle boxes in the 'angles' mode, the σ boxes otherwise."""
+        angles = self.mode() == 'angles'
+        for i in RIGHT:
+            self.view.prof_boxes[i].setVisible(angles)
+        for cb in self.boxes:
+            cb.setVisible(not angles)
+
+    def angle_on(self, i):
+        """Profile quantity i is drawn (its box ticked, and on the right
+        axis only in the 'angles' mode)."""
+        return self.view.prof_boxes[i].isChecked() and \
+            (i not in RIGHT or self.mode() == 'angles')
+
+    def draw(self, st):
+        """The stems of st, shown in the 'roughness' mode; the right axis
+        labelled and shown when something is on it."""
+        self._points = roughness_stems(st)
+        rough = self.mode() == 'roughness'
+        for cb, stem, head, pts in zip(self.boxes, self.stems, self.heads,
+                                       self._points):
+            z = np.array([p[0] for p in pts])
+            s = np.array([p[1] for p in pts])
+            stem.setData(np.repeat(z, 2), np.ravel(np.column_stack(
+                [np.zeros_like(s), s])))
+            head.setData(z, s)
+            on = rough and cb.isChecked()
+            stem.setVisible(on)
+            head.setVisible(on)
+        p = self.view.prof_plot
+        p.getAxis('right').setLabel('roughness σ (Å)' if rough
+                                    else 'MSLD φ, θ (deg)')
+        p.showAxis('right', any(cb.isChecked() for cb in self.boxes) if rough
+                   else any(self.view.prof_boxes[i].isChecked()
+                            for i in RIGHT))
+
+    def readout(self, x):
+        """Cursor rows (as profile_readout's) of the interface nearest x."""
+        if self.mode() != 'roughness':
+            return []
+        rows = []
+        for cb, (name, _, col), pts in zip(self.boxes, ROUGHNESS_QUANTITIES,
+                                           self._points):
+            if not cb.isChecked() or not pts:
+                continue
+            Zj, s = min(pts, key=lambda p: abs(p[0] - x))
+            rows.append((name, '%s Å  (interface at %.4g Å)' % (fmt(s), Zj),
+                         col, s, self.view.prof_vb2))
+        return rows
+
+    def state(self):
+        return {'right_axis': self.mode(),
+                'roughness': [cb.isChecked() for cb in self.boxes]}
+
+    def restore(self, disp):
+        """The mode and σ boxes of a saved display dict, without drawing:
+        the view redraws once its model is loaded."""
+        for w in [self.combo] + self.boxes:
+            w.blockSignals(True)
+        self.set_mode(disp.get('right_axis', self.mode()))
+        for cb, on in zip(self.boxes, disp.get('roughness', [])):
+            cb.setChecked(on)
+        for w in [self.combo] + self.boxes:
+            w.blockSignals(False)
+        self._show_boxes()
 
 
 class LayerLabels:
     """A shaded band and a name (with the thickness) per layer on a depth
-    profile plot.  selected() is the row drawn in bold (-1 for none)."""
+    profile plot.  selected() is the row highlighted (-1 for none): its name
+    in bold, its band tinted and its interfaces drawn as bold lines in the
+    theme's SELECT colour (violet, none of the curves' colours)."""
 
     def __init__(self, plot, selected=lambda: -1):
         self.plot, self.selected = plot, selected
         self.bands = []                      # one shaded region per layer
         self.labels = []                     # layer names, pinned to the top
         self.spans = []                      # (z0, z1, texts) of each label
+        self.Z = []                          # the interfaces
+        # the selected layer's top and bottom interfaces
+        self.edges = [pg.InfiniteLine(angle=90, movable=False)
+                      for _ in range(2)]
+        for ln in self.edges:
+            ln.setZValue(-40)                # over the grey interface lines
+            ln.hide()
+            plot.addItem(ln, ignoreBounds=True)
         plot.vb.sigYRangeChanged.connect(self.place)
         plot.vb.sigXRangeChanged.connect(self.fit)
         plot.vb.sigResized.connect(self.fit)
@@ -458,6 +653,7 @@ class LayerLabels:
         for item in self.bands + self.labels:
             p.removeItem(item)
         self.bands, self.labels, self.spans = [], [], []
+        self.Z = list(Z)
         # layer j spans [bounds[j], bounds[j+1]]
         bounds = np.concatenate([[zlo], Z, [zhi]])
         n = len(layers)
@@ -480,17 +676,29 @@ class LayerLabels:
         self.style()
 
     def style(self, *_):
-        """Alternate grey shading per layer; bold the selected layer's name."""
+        """Alternate grey shading per layer; the selected layer's name in
+        bold, its band tinted and its interfaces in bold SELECT lines."""
         sel = self.selected()
+        tint = QtGui.QColor(style.SELECT)
+        tint.setAlpha(28)
         for j, (band, t) in enumerate(zip(self.bands, self.labels)):
             # alternating shading, the theme's band colour on odd layers
-            brush = pg.mkBrush(style.BAND if j % 2 else '#00000000')
+            brush = pg.mkBrush(tint if j == sel else
+                               style.BAND if j % 2 else '#00000000')
             band.setBrush(brush)
             band.setHoverBrush(brush)
             font = t.textItem.font()
             font.setBold(j == sel)
             t.setFont(font)
             t.setColor(style.TEXT if j == sel else style.MUTED)
+        # interface j - 1 is the top of layer j, interface j its bottom
+        pen = pg.mkPen(style.SELECT, width=2.5)
+        for ln, k in zip(self.edges, (sel - 1, sel)):
+            on = sel >= 0 and 0 <= k < len(self.Z)
+            if on:
+                ln.setPos(self.Z[k])
+                ln.setPen(pen)
+            ln.setVisible(on)
         self.fit()
 
     def fit(self, *_):
@@ -569,7 +777,7 @@ EDITOR_PARAMS = [
     ('thickness', 'Thickness (Å)', 0.0, 1e5, 4, 1.0, '', 1.0),
     ('NSLD_real', 'NSLD real', -100, 100, 6, 0.1, '', 1 / SLD_SCALE),
     ('NSLD_img', 'NSLD imag', -100, 100, 7, 0.001, '', 1 / SLD_SCALE),
-    ('MSLD_rho', 'MSLD ρ', 0, 100, 6, 0.1, '', 1 / SLD_SCALE),
+    ('MSLD_rho', 'MSLD ρ', -100, 100, 6, 0.1, '', 1 / SLD_SCALE),
     ('MSLD_theta', 'MSLD φ', -360, 360, 4, 5.0, ' °', 360.0),
     ('MSLD_phi', 'MSLD θ', -90, 90, 4, 5.0, ' °', 360.0),
     ('roughness_sigma', 'Roughness σ', 0.0, 1e4, 4, 0.5, ' Å', 1.0),
@@ -936,7 +1144,11 @@ class LayerEditor(QtWidgets.QGroupBox):
             'φ: in-plane angle of M from the sample x axis towards y '
             '(Majkrzak Fig. 1.14)')
         self.rows['MSLD_rho'][4].setToolTip(
-            'ρ_M = |M|, including any out-of-plane part')
+            'ρ_M: the magnetic SLD of M, including any out-of-plane part.\n'
+            'Negative: M points opposite to φ, the same layer as +ρ at φ + '
+            '180°.\nWith "step" or "angle" M smearing, ρ is smeared as a '
+            'signed number:\nbetween +ρ and −ρ layers it passes through 0 '
+            'at the interface.')
         self.rows['MSLD_phi'][4].setToolTip(
             'θ: elevation of M out of the film plane (0 = in plane, +90° = '
             '+z). Only ρ cos θ is seen by neutrons (Halperin)')
@@ -1496,7 +1708,7 @@ class SimulationTab(QtWidgets.QWidget):
 
         # instrumental resolution, Gaussian in Q (see model.stack RESOLUTION)
         res = self.stack.resolution
-        self.res_on = QtWidgets.QCheckBox('smear')
+        self.res_on = QtWidgets.QCheckBox('enable')
         self.res_on.setChecked(res['enabled'])
         self.res_on.setToolTip(
             'Average the reflectivity over a Gaussian in Q of standard '
@@ -1976,15 +2188,21 @@ class SimulationTab(QtWidgets.QWidget):
             cb.setStyleSheet('color: %s' % col)
             cb.toggled.connect(self._show_profile)
             self.prof_boxes.append(cb)
-            bar.addWidget(cb)
+        right = QtWidgets.QHBoxLayout()      # filled once prof_vb2 exists
         self.prof_show_smooth = QtWidgets.QCheckBox('smooth')
         self.prof_show_smooth.setChecked(True)
         self.prof_show_smooth.setToolTip('The continuous profile Stack.profile(z)')
         self.prof_show_smooth.toggled.connect(self._show_profile)
-        bar.addWidget(self.prof_show_smooth)
         self.prof_show_bars = QtWidgets.QCheckBox('sublayers')
         self.prof_show_bars.setChecked(True)
         self.prof_show_bars.toggled.connect(self._show_profile)
+        for i, cb in enumerate(self.prof_boxes):
+            (right if i in RIGHT else bar).addWidget(cb)
+        bar.addSpacing(10)
+        bar.addWidget(QtWidgets.QLabel('Right axis:'))
+        bar.addLayout(right)
+        bar.addSpacing(10)
+        bar.addWidget(self.prof_show_smooth)
         bar.addWidget(self.prof_show_bars)
         bar.addStretch(1)
         v.addLayout(bar)
@@ -2027,6 +2245,12 @@ class SimulationTab(QtWidgets.QWidget):
             export_name(curve, PROFILE_EXPORT_NAMES[i])
             self.prof_bars.append(bars)
             self.prof_curves.append(curve)
+        # RIGHT AXIS: angles or roughness, its box before the angle boxes
+        self.prof_right = ProfileRightAxis(self, self._show_profile)
+        right.insertWidget(0, self.prof_right.combo)
+        for cb in self.prof_right.boxes:
+            right.addWidget(cb)
+        self.prof_right._show_boxes()
         p.addItem(pg.InfiniteLine(
             pos=0, angle=0, pen=pg.mkPen('#4b4e55', width=0.7)))
         self.prof_decor = []                 # interface lines
@@ -2045,7 +2269,7 @@ class SimulationTab(QtWidgets.QWidget):
         v.setContentsMargins(0, 0, 0, 0)
 
         bar = QtWidgets.QHBoxLayout()
-        bar.addWidget(QtWidgets.QLabel('Reflectivity plot:'))
+        bar.addWidget(QtWidgets.QLabel('Plot:'))
         self.refl_quantity = QtWidgets.QComboBox()
         self.refl_quantity.addItems([q[0] for q in REFL_QUANTITIES])
         self.refl_quantity.currentIndexChanged.connect(self.schedule)
@@ -2054,15 +2278,14 @@ class SimulationTab(QtWidgets.QWidget):
         self.refl_formula.setProperty('role', 'muted')
         bar.addWidget(self.refl_formula)
         bar.addStretch(1)
-        self.logy = QtWidgets.QCheckBox('log R')
-        self.logy.setChecked(True)
-        self.rq4 = QtWidgets.QCheckBox('R·Q⁴')
+        self.r_scale = r_scale_combo()
+        self.r_scale.currentIndexChanged.connect(self.schedule)
+        bar.addWidget(self.r_scale)
         self.freeze_y = QtWidgets.QCheckBox('Freeze Y')
         self.freeze_y.setToolTip('Keep the current y range when the model '
                                  'changes (e.g. while dragging a slider)')
-        for cb in (self.logy, self.rq4, self.freeze_y):
-            cb.toggled.connect(self.schedule)
-            bar.addWidget(cb)
+        self.freeze_y.toggled.connect(self.schedule)
+        bar.addWidget(self.freeze_y)
         bar.addWidget(line_colours.button())
         v.addLayout(bar)
 
@@ -2073,6 +2296,7 @@ class SimulationTab(QtWidgets.QWidget):
         self.hp_curves = [self.refl_plot.plot(connect='finite')
                           for _ in range(2)]
         self.asym_curve = self.refl_plot.plot(connect='finite')
+        self.unpol_curve = self.refl_plot.plot(connect='finite')
         self._line_colours()
         line_colours.notifier().changed.connect(self._line_colours)
         self.asym_zero = pg.InfiniteLine(
@@ -2088,8 +2312,8 @@ class SimulationTab(QtWidgets.QWidget):
     def _line_colours(self):
         """Pens of the reflectivity curves from line_colours."""
         for curve, key in zip(self.refl_curves + self.hp_curves
-                              + [self.asym_curve],
-                              CHANNELS + ['+', '-', 'asym']):
+                              + [self.asym_curve, self.unpol_curve],
+                              CHANNELS + ['+', '-', 'asym', 'unpol']):
             curve.setPen(pg.mkPen(line_colours.get(key), width=1.8))
         for sample, _ in self.refl_plot.legend.items:
             sample.update()
@@ -2731,14 +2955,14 @@ class SimulationTab(QtWidgets.QWidget):
         if show_bars:
             curves = [self._on_bars.get(i, c) for i, c in enumerate(curves)]
         for i, cb in enumerate(self.prof_boxes):
-            on = cb.isChecked()
+            on = self.prof_right.angle_on(i)
             self.prof_curves[i].setData(z, curves[i], connect='finite')
             self.prof_curves[i].setVisible(on and show_smooth)
             # a blank angle (NaN) is a bar of zero height
             self.prof_bars[i].setOpts(x0=e[:-1], width=np.diff(e),
                                       height=np.nan_to_num(slabs[i]), y0=0)
             self.prof_bars[i].setVisible(on and show_bars)
-        p.showAxis('right', any(self.prof_boxes[i].isChecked() for i in RIGHT))
+        self.prof_right.draw(self.stack)
         p.showAxis('left', any(cb.isChecked() for i, cb in
                                enumerate(self.prof_boxes) if i not in RIGHT))
 
@@ -2809,15 +3033,18 @@ class SimulationTab(QtWidgets.QWidget):
         k = self.refl_quantity.currentIndex()
         name, label, formula = REFL_QUANTITIES[k]
         is_refl = label is None
-        # log / R·Q⁴ only apply to raw reflectivities
-        for w in (self.logy, self.rq4):
-            w.setEnabled(is_refl)
+        # log R / R·Q⁴ only apply to raw reflectivities
+        self.r_scale.setEnabled(is_refl)
+        rq4 = is_refl and self.r_scale.currentData() == 'rq4'
 
-        if k == 0:
+        if name == POLARIZED:
             shown = zip(self.refl_curves, (R[c] for c in CHANNELS),
                         ['R' + c for c in CHANNELS])
-        elif is_refl:
+        elif name == HALF_POLARIZED:
             shown = zip(self.hp_curves, (R['+'], R['-']), ['R+', 'R−'])
+        elif name == UNPOLARIZED:
+            shown = [(self.unpol_curve, 0.5 * (R['+'] + R['-']),
+                      '(R+ + R−)/2')]
         else:
             shown = [(self.asym_curve, refl_quantity(name, R), name)]
         shown = list(shown)
@@ -2828,22 +3055,22 @@ class SimulationTab(QtWidgets.QWidget):
         # clear unused curves rather than hide them, so visibility toggled
         # from the legend survives a change of plotted quantity
         used = {id(c) for c, _, _ in shown}
-        for curve in self.refl_curves + self.hp_curves + [self.asym_curve]:
+        for curve in self.refl_curves + self.hp_curves + [self.asym_curve,
+                                                         self.unpol_curve]:
             if id(curve) not in used:
                 curve.setData([], [])
         self.asym_zero.setVisible(not is_refl)
         self.refl_formula.setText(formula)
 
         if is_refl:
-            log = self.logy.isChecked()
-            p.setLabel('left', 'R·Q⁴ (Å⁻⁴)' if self.rq4.isChecked()
-                       else 'Reflectivity')
+            log = not rq4
+            p.setLabel('left', 'R·Q⁴ (Å⁻⁴)' if rq4 else 'Reflectivity')
         else:
             log = False
             p.setLabel('left', label)
         # a frozen y range only makes sense for the same plotted quantity;
         # set before setData, which autoranges straight away
-        ykey = (self.refl_quantity.currentIndex(), log, self.rq4.isChecked())
+        ykey = (self.refl_quantity.currentIndex(), log, rq4)
         if self.freeze_y.isChecked() and ykey == self._refl_ykey:
             p.disableAutoRange(axis='y')
             p.enableAutoRange(axis='x')
@@ -2855,7 +3082,7 @@ class SimulationTab(QtWidgets.QWidget):
         self._refl_shown = []
         # channel visibility is toggled by clicking the legend entries
         for curve, y, cname in shown:
-            if is_refl and self.rq4.isChecked():
+            if rq4:
                 y = y * Q**4
             if log:
                 y = np.where(y > 0, y, np.nan)
@@ -3153,10 +3380,11 @@ class SimulationTab(QtWidgets.QWidget):
             'qmin': self.qmin.value(), 'qmax': self.qmax.value(),
             'nq': self.nq.value(), 'polarisation': self.pol.vectors(),
             'display': {
-                'quantity': self.refl_quantity.currentIndex(),
-                'logy': self.logy.isChecked(), 'rq4': self.rq4.isChecked(),
+                'quantity_name': self.refl_quantity.currentText(),
+                'scale': self.r_scale.currentData(),
                 'freeze_y': self.freeze_y.isChecked(),
                 'profile': [cb.isChecked() for cb in self.prof_boxes],
+                **self.prof_right.state(),
                 'sublayers': self.prof_show_bars.isChecked(),
                 'smooth': self.prof_show_smooth.isChecked()},
             'selected_layer': self.list.currentRow(),
@@ -3234,19 +3462,22 @@ class SimulationTab(QtWidgets.QWidget):
         self.res_tof_dl.setValue(res['tof_dlambda'])
         self._set_tof_angles(res['tof_angles'])
         disp = sim.get('display', {})
-        display = [self.refl_quantity, self.logy, self.rq4, self.freeze_y,
+        display = [self.refl_quantity, self.r_scale, self.freeze_y,
                    self.prof_show_bars, self.prof_show_smooth] + self.prof_boxes
         for w in display:
             w.blockSignals(True)
-        self.refl_quantity.setCurrentIndex(disp.get(
-            'quantity', self.refl_quantity.currentIndex()))
-        for key, cb in (('logy', self.logy), ('rq4', self.rq4),
-                        ('freeze_y', self.freeze_y),
+        self.refl_quantity.setCurrentIndex(quantity_index(
+            disp, self.refl_quantity.currentIndex()))
+        if disp:
+            set_r_scale(self.r_scale, saved_r_scale(disp))
+        for key, cb in (('freeze_y', self.freeze_y),
                         ('sublayers', self.prof_show_bars),
                         ('smooth', self.prof_show_smooth)):
             cb.setChecked(disp.get(key, cb.isChecked()))
         for cb, on in zip(self.prof_boxes, disp.get('profile', [])):
             cb.setChecked(on)
+        if disp:
+            self.prof_right.restore(disp)
         for w in widgets + display:
             w.blockSignals(False)
         self._sync_resolution()

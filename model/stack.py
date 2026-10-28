@@ -125,7 +125,10 @@ MAGNETISATION -- Stack.magnetic_smearing chooses how M crosses an interface
       side carries rho > 0.  Core slabs and the semi-infinite media keep
       their own angle.
   'vector': the Cartesian components of M are smeared like any
-      other quantity.  This is the lateral average of a
+      other quantity, then written as rho and angles along the magnetic
+      layer that occupies the depth most (in a Licorne window: its upper
+      layer on the upper side): rho < 0 where M points against that
+      layer's direction, so a layer entered with rho < 0 shows as entered.  This is the lateral average of a
       rough interface (the potential is linear in M), so a non-magnetic
       neighbour only fades |M| without turning it, its theta has no effect,
       and layers at an angle D pass through |M| = cos(D/2) (0 if antiparallel).
@@ -143,7 +146,14 @@ the film plane.  MSLD_theta is theta_M, the in-plane angle of M from sample x
 towards y (GEPORE THE(J); also the theta of Eq. 1.128 / Fig. 1.19), stored in
 turns.  MSLD_phi is the elevation of M out of the film plane, in turns
 (0 = in plane, +1/4 = along +z), so M = rho (cos phi cos theta,
-cos phi sin theta, sin phi).  MSLD_rho is |M|.
+cos phi sin theta, sin phi).  MSLD_rho is the magnetic SLD of M; it may be
+negative, M then points opposite to (theta, phi): rho < 0 at theta is the
+same layer magnetisation as -rho at theta + 1/2.  With the 'vector'
+smearing the two are the same model (each reported as entered); 'step'
+and 'angle' smear rho as a signed number, so from a +rho
+layer to a -rho one it passes through 0 at the interface, where -rho at
+theta + 1/2 keeps |M| and turns or jumps the angle.  Fitting rho across 0
+together with theta has two equivalent minima (fit.problem warns).
 
 HALPERIN -- the neutron sees B, and B_z is continuous across the film
 surface: the z component of M is cancelled by the demagnetising field and
@@ -389,7 +399,7 @@ DEFAULT_BOUNDS = {
     'thickness':       (0.0, 500.0),       # Angstrom
     'NSLD_real':       (-2e-6, 10e-6),     # A^-2
     'NSLD_img':        (-1e-6, 0.0),       # A^-2
-    'MSLD_rho':        (0.0, 5e-6),        # A^-2
+    'MSLD_rho':        (-5e-6, 5e-6),      # A^-2, < 0: M reversed
     'MSLD_theta':      (0.0, 1.0),         # turns
     'MSLD_phi':        (-0.25, 0.25),      # turns, out of plane
     'roughness_sigma': (0.0, 10.0),        # Angstrom
@@ -530,6 +540,27 @@ def spread_factors(sigma, dist, n):
     f = 1.0 + np.sqrt(2.0) * sigma * x
     keep = f > SPREAD_F_MIN
     return f[keep], w[keep] / w[keep].sum()
+
+
+def _unit_vectors(layers):
+    """(x, y, z) arrays of each layer's direction (theta, phi)."""
+    t = np.array([l.MSLD_theta for l in layers])
+    p = np.array([l.MSLD_phi for l in layers])
+    return cos_turns(p) * cos_turns(t), cos_turns(p) * sin_turns(t), \
+        sin_turns(p)
+
+
+def _signed_vector(mp, mz, u, k):
+    """(rho, theta, phi in turns) of the smeared vector M = (Re mp, Im mp,
+    mz) written along the direction of layer k (an index array like mp;
+    u = _unit_vectors): rho = +|M| at M's own angles where M points with
+    that layer, -|M| at the opposite angles where it points against it, so
+    a layer entered with rho < 0 is reported as entered (MAGNETISATION)."""
+    a = np.abs(mp)
+    dot = mp.real * u[0][k] + mp.imag * u[1][k] + mz * u[2][k]
+    s = np.where(dot < 0, -1.0, 1.0)
+    return (s * np.hypot(a, mz), np.angle(s * mp) / (2*np.pi),
+            np.arctan2(s * mz, a) / (2*np.pi))
 
 
 def _node_sum(seqs, R):
@@ -1489,8 +1520,8 @@ class Stack:
         return self._rms_steps(z, order, magnetic=True)
 
     def _magnetic_profile(self, F):
-        """(|M|, theta, phi in turns) from the steps F (_rms_steps), smeared
-        as magnetic_smearing says (see MAGNETISATION)."""
+        """(rho, theta, phi in turns) from the steps F (_rms_steps),
+        smeared as magnetic_smearing says (see MAGNETISATION)."""
         rho = np.array([l.MSLD_rho for l in self.layers])
         theta = np.array([l.MSLD_theta for l in self.layers])
         phi = np.array([l.MSLD_phi for l in self.layers])
@@ -1518,9 +1549,16 @@ class Stack:
         # everywhere mz is exactly 0 and this is the previous 2D smearing
         mp = _combine(F, rho * cos_turns(phi) * np.exp(2j*np.pi*theta))
         mz = _combine(F, rho * sin_turns(phi))
-        a = np.abs(mp)
-        return (np.hypot(a, mz), wrap_turns(np.angle(mp) / (2*np.pi)),
-                np.arctan2(mz, a) / (2*np.pi))
+        # written along the magnetic layer that occupies each depth most
+        # (occupancy F_{k-1} - F_k, F_{-1} = 1, F_last = 0, built in place)
+        occ = np.empty((len(self.layers),) + shape)
+        occ[0] = 1.0 - F[0]
+        np.subtract(F[:-1], F[1:], out=occ[1:-1])
+        occ[-1] = F[-1]
+        occ[rho == 0] = -np.inf
+        k = np.argmax(occ, 0)
+        r, t, p = _signed_vector(mp, mz, _unit_vectors(self.layers), k)
+        return r, wrap_turns(t), p
 
     def _has_angle(self):
         """'step': which layers have an angle to give (see MAGNETISATION).
@@ -1616,11 +1654,16 @@ class Stack:
         nsld = v[0] + 1j * v[1]
         mode = self.magnetic_smearing
         if mode == 'vector':
-            mp = v[3] + 1j * v[4]
-            a = np.abs(mp)
-            return (nsld, np.hypot(a, v[5]),
-                    wrap_turns(np.angle(mp) / (2*np.pi), LICORNE_DECIMALS),
-                    np.arctan2(v[5], a) / (2*np.pi))
+            # written along the window's upper layer on its upper side, the
+            # lower one below (the other where that one has no M)
+            upper = x <= STEP_TIE * (w['la'] + w['lb'])
+            first = np.where(upper, w['a'], w['b'])
+            other = np.where(upper, w['b'], w['a'])
+            mag = np.array([l.MSLD_rho != 0 for l in self.layers])
+            k = np.where(mag[first], first, other)
+            r, t, p = _signed_vector(v[3] + 1j * v[4], v[5],
+                                     _unit_vectors(self.layers), k)
+            return (nsld, r, wrap_turns(t, LICORNE_DECIMALS), p)
         if mode == 'angle':
             # angles interpolated with the profile fraction, never
             # renormalised (an angle has no amount of material)
@@ -1729,13 +1772,13 @@ class Stack:
         return float(layer.MSLD_rho * cos_turns(layer.MSLD_phi))
 
     def angle_defined(self, rho):
-        """True where the magnetisation |M| = rho (A^-2, array) is large
-        enough for its direction to mean something: above M_TINY of the
-        largest layer rho.  Below that the angle is round-off noise or the
+        """True where the magnetisation |rho| (A^-2, array; rho < 0 is M
+        reversed) is large enough for its direction to mean something:
+        above M_TINY of the largest layer |rho|.  Below that the angle is round-off noise or the
         direction of a leftover interface tail (no layer's angle), and has no
         measurable effect; plots leave it blank."""
         ref = max((abs(l.MSLD_rho) for l in self.layers), default=0.0)
-        return np.asarray(rho) > M_TINY * ref if ref > 0 else \
+        return np.abs(rho) > M_TINY * ref if ref > 0 else \
             np.zeros(np.shape(rho), dtype=bool)
 
     # -- crossing interfaces (see PROFILE) ------------------------------------

@@ -76,7 +76,10 @@ from fit.panel import FitPanel
 from model.polarisation import CHANNEL_NAMES, default_vectors, vectors_pair
 import line_colours
 import style
-from .simulation import (REFL_QUANTITIES, Crosshair, PairTable, dspin, fmt,
+from .simulation import (HALF_POLARIZED, POLARIZED, REFL_QUANTITIES,
+                         UNPOLARIZED, quantity_index, r_scale_combo,
+                         saved_r_scale, set_r_scale, Crosshair, PairTable,
+                         dspin, fmt,
                          plot_widget)
 
 
@@ -519,6 +522,16 @@ def half_polarized(D, sign):
     return None
 
 
+def unpolarized(D):
+    """(Q, (R+ + R-)/2, its error, dQ) on R+'s Q grid (R- taken there, as
+    for the asymmetry), None without both."""
+    up, dn = half_polarized(D, '+'), half_polarized(D, '-')
+    if up is None or dn is None:
+        return None
+    b, db = on_grid(up[0], dict(Q=dn[0], R=dn[1], dR=dn[2]))
+    return up[0], 0.5 * (up[1] + b), 0.5 * np.hypot(up[2], db), up[3]
+
+
 def asymmetry(D, name):
     """(Q, value, error, dQ) of an asymmetry, or a str naming what's missing."""
     if name == 'SA half-polarized':
@@ -557,12 +570,17 @@ def dataset_series(D, k, line=False, colour=None):
     if colour is None:
         colour = lambda key: key and line_colours.get(key)      # noqa: E731
     name, label, _ = REFL_QUANTITIES[k]
-    if k == 0:
+    if name == POLARIZED:
         hide = {'+', '-'} if line and len(D) > 2 else set()
         return [('R' + ch, colour(ch), D[ch]['Q'], D[ch]['R'],
                  D[ch]['dR'], D[ch]['dQ']) for ch in PLOT_ORDER
                 if ch in D and ch not in hide], ''
-    if label is None:
+    if name == UNPOLARIZED:
+        res = unpolarized(D)
+        if res is None:
+            return [], 'needs R+ and R− (or R++, R+-, R-+, R--)'
+        return [('(R+ + R−)/2', colour('unpol')) + res], ''
+    if name == HALF_POLARIZED:
         out = []
         for sign, lab in (('+', 'R+'), ('-', 'R−')):
             hp = half_polarized(D, sign)
@@ -836,9 +854,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
 
         disp = QtWidgets.QGroupBox('Display')
         f = QtWidgets.QFormLayout(disp)
-        self.logy = QtWidgets.QCheckBox('log R')
-        self.logy.setChecked(True)
-        self.rq4 = QtWidgets.QCheckBox('R·Q⁴')
+        self.r_scale = r_scale_combo()
         self.show_err = QtWidgets.QCheckBox('error bars')
         self.show_err.setChecked(True)
         self.show_points = QtWidgets.QCheckBox('points')
@@ -850,8 +866,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         # one row, to leave the height to the datasets
         opts = QtWidgets.QHBoxLayout()
         opts.addWidget(QtWidgets.QLabel('Scale'))
-        opts.addWidget(self.logy)
-        opts.addWidget(self.rq4)
+        opts.addWidget(self.r_scale)
         opts.addSpacing(12)
         opts.addWidget(QtWidgets.QLabel('Data'))
         opts.addWidget(self.show_points)
@@ -859,8 +874,8 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         opts.addWidget(self.show_err)
         opts.addStretch(1)
         f.addRow(opts)
-        for w in (self.logy, self.rq4, self.show_err, self.show_points,
-                  self.show_line):
+        self.r_scale.currentIndexChanged.connect(self.redraw)
+        for w in (self.show_err, self.show_points, self.show_line):
             w.toggled.connect(self.redraw)
         v.addWidget(box, 1)
         v.addWidget(disp)
@@ -894,7 +909,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         v.setContentsMargins(0, 0, 0, 0)
 
         bar = QtWidgets.QHBoxLayout()
-        bar.addWidget(QtWidgets.QLabel('Reflectivity plot:'))
+        bar.addWidget(QtWidgets.QLabel('Plot:'))
         self.quantity = QtWidgets.QComboBox()
         self.quantity.addItems([q[0] for q in REFL_QUANTITIES])
         self.quantity.currentIndexChanged.connect(self.redraw)
@@ -1399,8 +1414,8 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
             sets.append(e)
         return dict(
             sets=sets,
-            display=dict(quantity=self.quantity.currentIndex(),
-                         logy=self.logy.isChecked(), rq4=self.rq4.isChecked(),
+            display=dict(quantity_name=self.quantity.currentText(),
+                         scale=self.r_scale.currentData(),
                          errors=self.show_err.isChecked(),
                          points=self.show_points.isChecked(),
                          line=self.show_line.isChecked()),
@@ -1465,13 +1480,12 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                 s['channels'] = self._live_channels(s)
 
         disp, fit = state.get('display', {}), state.get('fit', {})
-        widgets = (self.quantity, self.logy, self.rq4, self.show_err,
+        widgets = (self.quantity, self.r_scale, self.show_err,
                    self.show_points, self.show_line)
         for w in widgets:
             w.blockSignals(True)
-        self.quantity.setCurrentIndex(disp.get('quantity', 0))
-        self.logy.setChecked(disp.get('logy', True))
-        self.rq4.setChecked(disp.get('rq4', False))
+        self.quantity.setCurrentIndex(quantity_index(disp))
+        set_r_scale(self.r_scale, saved_r_scale(disp))
         self.show_err.setChecked(disp.get('errors', True))
         self.show_points.setChecked(disp.get('points', True))
         self.show_line.setChecked(disp.get('line', False))
@@ -1524,14 +1538,13 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         k = self.quantity.currentIndex()
         name, label, formula = REFL_QUANTITIES[k]
         is_refl = label is None
-        for w in (self.logy, self.rq4):
-            w.setEnabled(is_refl)
+        self.r_scale.setEnabled(is_refl)
         self.zero.setVisible(not is_refl)
         self.formula.setText(formula)
 
         if is_refl:
-            log = self.logy.isChecked()
-            rq4 = self.rq4.isChecked()
+            rq4 = self.r_scale.currentData() == 'rq4'
+            log = not rq4
             p.setLabel('left', 'R·Q⁴ (Å⁻⁴)' if rq4 else 'Reflectivity')
         else:
             log = rq4 = False

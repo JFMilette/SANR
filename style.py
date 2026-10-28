@@ -35,6 +35,8 @@ THEMES = {
         ERROR='#f87171',
         ERROR_BG='#4a1f22',     # out-of-bounds spin boxes
         BAND='#ffffff0c',       # alternate layer shading in the profile
+        SELECT='#b48cff',       # the selected layer in the profile: violet,
+                                # none of the profile curves' colours
         START_LINE='#5a4a1c',   # data preview: first line read ...
         START_REST='#34301f',   # ... and the lines after it
         BEAM='#d0d4da',         # geometry tab: k_i, k_f
@@ -60,6 +62,7 @@ THEMES = {
         ERROR='#d93025',
         ERROR_BG='#fde2e1',
         BAND='#0000000a',
+        SELECT='#7c3aed',
         START_LINE='#ffe08a',
         START_REST='#fff4cc',
         BEAM='#3c4043',

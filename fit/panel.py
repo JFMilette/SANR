@@ -75,7 +75,7 @@ DREAM_STARTS = [('Latin hypercube', None), ('DE population', 'de'),
 FIT_METHODS = [('de', 'Differential evolution'),
                ('basinhopping', 'Basin hopping'),
                ('dual_annealing', 'Dual annealing'), ('shgo', 'SHGO'),
-               ('direct', 'DIRECT'), ('lbfgs', 'Local (L-BFGS-B)'),
+               ('direct', 'DIRECT'), ('lbfgs', 'L-BFGS-B'),
                ('lsq', 'Least squares'), ('multistart', 'Multistart'),
                ('dream', 'Bayesian (DREAM)')]
 SHGO_SAMPLING = [('sobol', 'Sobol'), ('halton', 'Halton'),
@@ -300,7 +300,7 @@ class FitPanel:
             'Differential evolution: a global search over the bounds.\n'
             'Basin hopping, dual annealing, SHGO, DIRECT: scipy\'s other '
             'global searches.\n'
-            'Local (L-BFGS-B): a gradient descent from the current values.\n'
+            'L-BFGS-B: a local gradient descent from the current values.\n'
             'Least squares: trust-region least squares on the residuals '
             'from the current values.\n'
             'Multistart: local fits from the current values and from points '
@@ -632,7 +632,7 @@ class FitPanel:
         f.addRow(self._grid([('Starts', self.ms_starts),
                              ('Local fit', self.ms_method)]))
         row = QtWidgets.QHBoxLayout()
-        self.btn_ms_run = QtWidgets.QPushButton('Run')
+        self.btn_ms_run = QtWidgets.QPushButton('Fit')
         self.btn_ms_run.setToolTip(
             'Fit from every start with the general cost and '
             'workers')
@@ -987,7 +987,7 @@ class FitPanel:
             '<i>χ² likelihood with the measured dR, whatever the DE '
             'cost.</i>', wordWrap=True))
         row = QtWidgets.QHBoxLayout()
-        self.btn_sample = QtWidgets.QPushButton('Sample')
+        self.btn_sample = QtWidgets.QPushButton('Fit')
         self.btn_sample.setToolTip('Sample the posterior of the parameters '
                                    'ticked Fit in the Simulation tab')
         self.btn_dream_window = QtWidgets.QPushButton('Show')

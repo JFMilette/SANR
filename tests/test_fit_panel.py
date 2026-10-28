@@ -408,7 +408,7 @@ def test_residuals_plot(app):
         view.quantity.setCurrentText(RESIDUALS)
         assert view.quantity.currentIndex() == len(REFL_QUANTITIES)
         assert view.formula.text() == '(R_data − R_model) / σ'
-        assert not view.logy.isEnabled() and not view.show_err.isEnabled()
+        assert not view.r_scale.isEnabled() and not view.show_err.isEnabled()
         res = view.residuals()
         assert [n for n, *_ in res] == ['R+', 'R-']
         assert [len(q) for _, q, _ in res] == [len(QA), len(QB)]
@@ -425,7 +425,7 @@ def test_residuals_plot(app):
         win.history.setCurrentItem(win.history.topLevelItem(0))
         assert view.residuals() is not res
         view.quantity.setCurrentIndex(0)
-        assert view.logy.isEnabled() and view.show_err.isEnabled()
+        assert view.r_scale.isEnabled() and view.show_err.isEnabled()
 
 
 def test_strategy_reaches_the_fit_and_the_session(app, monkeypatch):

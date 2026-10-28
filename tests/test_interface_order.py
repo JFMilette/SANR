@@ -66,6 +66,21 @@ def outputs(st, z):
     return prof, np.array(slabs), st.reflectivities(Q, PAIRS, warn=False)
 
 
+def m_vector(rho, theta, phi):
+    """M's Cartesian parts: the same M written with rho < 0 (the 'vector'
+    smearing along its dominant layer, model.stack MAGNETISATION) or with
+    rho > 0 and the opposite angles (how it was written before) agree."""
+    rho, theta, phi = (np.asarray(a, dtype=float) for a in (rho, theta, phi))
+    c = rho * S.cos_turns(phi)
+    return np.array([c * S.cos_turns(theta), c * S.sin_turns(theta),
+                     rho * S.sin_turns(phi)])
+
+
+def same_m(a, b):
+    """The same magnetisation to rounding (|M| ~ 1e-6 A^-2)."""
+    return np.allclose(m_vector(*a), m_vector(*b), rtol=0, atol=1e-20)
+
+
 def occupancies(F):
     one = np.ones((1,) + F.shape[1:])
     return np.concatenate([one, F]) - np.concatenate([F, 0 * one])
@@ -80,20 +95,24 @@ def test_additive_matches_reference(case, monkeypatch):
     g = lambda k: REF['%s/%s' % (case, k)]                     # noqa: E731
     st = S.Stack.from_dict(json.loads(str(g('stack'))))
     assert st.interface_order == 'additive'                    # no key: old
-    for a, k in zip(st.profile(g('z')), ('nsld', 'rho', 'theta', 'phi')):
-        assert np.array_equal(a, g(k)), k
+    # the magnetisation as a vector: 'vector' smearing now writes an M
+    # pointing against its layer with rho < 0 (it was +|M| turned by half a
+    # turn), and R moves by rounding only (<= 4e-16 relative)
+    nsld, *mag = st.profile(g('z'))
+    assert np.array_equal(nsld, g('nsld'))
+    assert same_m(mag, [g(k) for k in ('rho', 'theta', 'phi')])
     slabs = st.build_sublayers()
     assert np.array_equal([s.thickness for s in slabs], g('slab_t'))
     assert np.array_equal([complex(s.NSLD_real, s.NSLD_img) for s in slabs],
                           g('slab_nsld'))
-    for k in ('rho', 'theta', 'phi'):
-        assert np.array_equal([getattr(s, 'MSLD_' + k) for s in slabs],
-                              g('slab_' + k)), k
-    assert np.array_equal(st.reflectivities(g('Q'), PAIRS, warn=False),
-                          g('R_res_on'), equal_nan=True)
+    assert same_m([[getattr(s, 'MSLD_' + k) for s in slabs]
+                   for k in ('rho', 'theta', 'phi')],
+                  [g('slab_' + k) for k in ('rho', 'theta', 'phi')])
+    assert np.allclose(st.reflectivities(g('Q'), PAIRS, warn=False),
+                       g('R_res_on'), rtol=1e-14, atol=0, equal_nan=True)
     st.resolution['enabled'] = False
-    assert np.array_equal(st.reflectivities(g('Q'), PAIRS, warn=False),
-                          g('R_res_off'), equal_nan=True)
+    assert np.allclose(st.reflectivities(g('Q'), PAIRS, warn=False),
+                       g('R_res_off'), rtol=1e-14, atol=0, equal_nan=True)
 
 
 @pytest.mark.parametrize('name', ['session_Cr2Te3', 'show_mistake'])
@@ -101,7 +120,8 @@ def test_old_sessions_load_additive(name):
     st = session(name)
     assert st.interface_order == 'additive'
     g = lambda k: REF['%s/%s' % (name, k)]                     # noqa: E731
-    assert np.array_equal(st.profile(g('z'))[1], g('rho'))
+    assert same_m(st.profile(g('z'))[1:],
+                  [g(k) for k in ('rho', 'theta', 'phi')])
 
 
 @pytest.mark.parametrize('order', ORDERS)
@@ -180,7 +200,12 @@ def test_single_magnetic_layer_keeps_its_angle():
         return theta[st.angle_defined(rho)]
     assert np.max(np.abs(one('ordered') - 0.3)) <= 1e-12
     assert np.max(np.abs(one('independent') - 0.3)) <= 1e-12
-    assert np.max(np.abs(one('additive') - 0.3)) > 0.49     # the half turn
+    # 'additive': M points backwards where the occupancy is negative; it
+    # keeps the layer's angle there, with rho < 0 (it showed a half turn)
+    assert np.max(np.abs(one('additive') - 0.3)) <= 1e-12
+    st = crossing('additive')
+    st.layers[3].MSLD_rho = 0.0
+    assert st.profile(np.linspace(-40, 140, 4001))[1].min() < -1e-8
 
 
 # -- T5: the kink sits at the erf crossing ---------------------------------------
@@ -364,8 +389,8 @@ def test_not_slower(name):
     st = session(name)
     assert st.magnetic_smearing == 'vector'
     z = np.linspace(-60, 300, 4000)
-    old = _old_profile(st, z)
-    assert all(np.array_equal(a, b) for a, b in zip(old, st.profile(z)))
+    old, new = _old_profile(st, z), st.profile(z)
+    assert np.array_equal(old[0], new[0]) and same_m(old[1:], new[1:])
     # old and new timed in turn, so that a busy machine slows both alike
     t = {'old': [], 'additive': [], 'ordered': [], 'independent': []}
     for _ in range(7):
@@ -394,7 +419,9 @@ def test_show_mistake():
     assert Mx.min() == pytest.approx(-0.4354e-6, rel=1e-3)
     assert abs(z[np.argmin(Mx)] - 69.2) <= 0.1
     assert iM == pytest.approx(nominal, rel=1e-3)
-    assert dth == pytest.approx(0.5, abs=1e-9)
+    # M_x < 0 inside CrSb is written rho < 0 at its own angle (it was a
+    # half turn of theta)
+    assert dth <= 1e-12
     Mx, dth, iM, iN_o = res['ordered']
     assert Mx.min() >= -1e-20 and dth <= 1e-12
     assert iM == pytest.approx(16.685e-6, rel=1e-3)

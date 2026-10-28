@@ -1,6 +1,7 @@
 """
 Line colours of the reflectivity plots: one per channel (R++, R+-, R-+, R--
-and the half-polarized R+, R-) and one for a single-curve asymmetry, shared
+and the R+, R- of polarized without analysis), one for the non-polarized
+(R+ + R-)/2 and one for a single-curve asymmetry, shared
 by the Simulation and Experimental tabs and the DE and DREAM windows.
 
 Read a colour with get(key) when drawing; set_colours() changes them and
@@ -17,11 +18,11 @@ from PyQt6 import QtCore, QtGui, QtWidgets, sip
 
 # key, label in the dialog
 KEYS = [('++', 'R++'), ('+-', 'R+−'), ('-+', 'R−+'), ('--', 'R−−'),
-        ('+', 'R+ (half-polarized)'), ('-', 'R− (half-polarized)'),
-        ('asym', 'Asymmetry')]
+        ('+', 'R+ (without analysis)'), ('-', 'R− (without analysis)'),
+        ('unpol', '(R+ + R−)/2 (non-polarized)'), ('asym', 'Asymmetry')]
 DEFAULTS = {'++': '#1f77b4', '+-': '#d62728', '-+': '#2ca02c',
             '--': '#ff7f0e', '+': '#1f77b4', '-': '#ff7f0e',
-            'asym': '#b392f0'}
+            'unpol': '#17becf', 'asym': '#b392f0'}
 
 _current = dict(DEFAULTS)
 

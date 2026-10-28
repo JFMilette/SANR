@@ -42,8 +42,9 @@ from fit.joint import JointProblem, part_x, parts
 from fit.multistart import merge
 import line_colours
 import style
-from tabs.simulation import (PARAM_DISPLAY, PROFILE_EXPORT_NAMES,
+from tabs.simulation import (POLARIZED, PARAM_DISPLAY, PROFILE_EXPORT_NAMES,
                              PROFILE_QUANTITIES, REFL_QUANTITIES, RIGHT,
+                             ProfileRightAxis, r_scale_combo,
                              Crosshair, LayerLabels, export_name, plot_widget,
                              profile_data, profile_layers, profile_readout)
 
@@ -669,7 +670,13 @@ class DatasetView(QtWidgets.QSplitter):
             cb.setStyleSheet('color: %s' % col)
             cb.toggled.connect(self._show_profile_curves)
             self.prof_boxes.append(cb)
-            bar.addWidget(cb)
+        right = QtWidgets.QHBoxLayout()      # filled once prof_vb2 exists
+        for i, cb in enumerate(self.prof_boxes):
+            (right if i in RIGHT else bar).addWidget(cb)
+        bar.addSpacing(10)
+        bar.addWidget(QtWidgets.QLabel('Right axis:'))
+        bar.addLayout(right)
+        bar.addSpacing(10)
         self.prof_show_smooth = QtWidgets.QCheckBox('smooth')
         self.prof_show_smooth.setChecked(True)
         self.prof_show_smooth.setToolTip('The continuous profile Stack.profile(z)')
@@ -719,6 +726,12 @@ class DatasetView(QtWidgets.QSplitter):
             export_name(curve, PROFILE_EXPORT_NAMES[i])
             self.prof_bars.append(bars)
             self.prof_curves.append(curve)
+        # angles or roughness on the right axis, as in the Simulation tab
+        self.prof_right = ProfileRightAxis(self, self._show_profile_curves)
+        right.insertWidget(0, self.prof_right.combo)
+        for cb in self.prof_right.boxes:
+            right.addWidget(cb)
+        self.prof_right._show_boxes()
         p.addItem(pg.InfiniteLine(
             pos=0, angle=0, pen=pg.mkPen('#4b4e55', width=0.7)))
         self.prof_lines = []                  # interface lines
@@ -734,7 +747,7 @@ class DatasetView(QtWidgets.QSplitter):
         v = QtWidgets.QVBoxLayout(box)
         v.setContentsMargins(0, 0, 0, 0)
         bar = QtWidgets.QHBoxLayout()
-        bar.addWidget(QtWidgets.QLabel('Reflectivity plot:'))
+        bar.addWidget(QtWidgets.QLabel('Plot:'))
         self.quantity = QtWidgets.QComboBox()
         self.quantity.addItems([q[0] for q in REFL_QUANTITIES] + [RESIDUALS])
         self.quantity.setToolTip(
@@ -746,14 +759,13 @@ class DatasetView(QtWidgets.QSplitter):
         self.formula.setProperty('role', 'muted')
         bar.addWidget(self.formula)
         bar.addStretch(1)
-        self.logy = QtWidgets.QCheckBox('log R')
-        self.logy.setChecked(True)
-        self.rq4 = QtWidgets.QCheckBox('R·Q⁴')
+        self.r_scale = r_scale_combo()
+        self.r_scale.currentIndexChanged.connect(self._redraw_reflectance)
+        bar.addWidget(self.r_scale)
         self.show_err = QtWidgets.QCheckBox('error bars')
         self.show_err.setChecked(True)
-        for cb in (self.logy, self.rq4, self.show_err):
-            cb.toggled.connect(self._redraw_reflectance)
-            bar.addWidget(cb)
+        self.show_err.toggled.connect(self._redraw_reflectance)
+        bar.addWidget(self.show_err)
         bar.addWidget(line_colours.button())
         v.addLayout(bar)
         line_colours.notifier().changed.connect(self._redraw_reflectance)
@@ -799,7 +811,7 @@ class DatasetView(QtWidgets.QSplitter):
         if show_bars:
             curves = [self._on_bars.get(i, c) for i, c in enumerate(curves)]
         for i, cb in enumerate(self.prof_boxes):
-            on = cb.isChecked()
+            on = self.prof_right.angle_on(i)
             self.prof_curves[i].setData(z, curves[i], connect='finite')
             self.prof_curves[i].setVisible(on and show_smooth)
             # a blank angle (NaN) is a bar of zero height
@@ -807,7 +819,7 @@ class DatasetView(QtWidgets.QSplitter):
                                       height=np.nan_to_num(slabs[i]), y0=0)
             self.prof_bars[i].setVisible(on and show_bars)
         p = self.prof_plot
-        p.showAxis('right', any(self.prof_boxes[i].isChecked() for i in RIGHT))
+        self.prof_right.draw(self.stack)
         p.enableAutoRange(axis='y')
         self.prof_vb2.enableAutoRange(axis='y')
         self.prof_cursor.refresh()
@@ -829,20 +841,19 @@ class DatasetView(QtWidgets.QSplitter):
         self.show_err.setEnabled(True)
         name, label, formula = REFL_QUANTITIES[k]
         is_refl = label is None
-        # log / R·Q⁴ only apply to raw reflectivities
-        for w in (self.logy, self.rq4):
-            w.setEnabled(is_refl)
+        # log R / R·Q⁴ only apply to raw reflectivities
+        self.r_scale.setEnabled(is_refl)
         self.zero.setVisible(not is_refl)
         self.formula.setText(formula)
-        log = is_refl and self.logy.isChecked()
-        rq4 = is_refl and self.rq4.isChecked()
+        rq4 = is_refl and self.r_scale.currentData() == 'rq4'
+        log = is_refl and not rq4
         p.setLabel('left', label or ('R·Q⁴ (Å⁻⁴)' if rq4 else 'Reflectivity'))
         p.setLogMode(x=False, y=log)
 
         data, note = dataset_series(self.data, k)
-        # the raw reflectivities: only the fitted channels' model
+        # the four channels: only the fitted channels' model
         model = {c: d for c, d in self._model.items()
-                 if k != 0 or c in self.data}
+                 if name != POLARIZED or c in self.data}
         for lab, col, Q, y, _, _ in dataset_series(model, k, line=True)[0]:
             y = y * Q**4 if rq4 else y
             if log:
@@ -890,7 +901,7 @@ class DatasetView(QtWidgets.QSplitter):
         """Each fitted channel's residuals, in its colour, with its chi^2/N
         in the legend; lines at 0 and +-1 sigma."""
         p = self.refl_plot
-        for w in (self.logy, self.rq4, self.show_err):
+        for w in (self.r_scale, self.show_err):
             w.setEnabled(False)
         self.formula.setText(RESIDUAL_FORMULA)
         p.setLabel('left', 'residual (σ)')

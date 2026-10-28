@@ -169,6 +169,13 @@ class FitProblem:
         for i in sorted({p[0] for p in self.params
                          if isinstance(p[0], int)}):
             varied = {p[1] for p in self.params if p[0] == i}
+            lo = [p[3] for p in self.params if p[:2] == (i, 'MSLD_rho')]
+            if {'MSLD_rho', 'MSLD_theta'} <= varied and lo and lo[0] < 0:
+                warnings.warn(
+                    '%s: MSLD ρ may be negative and the in-plane angle MSLD '
+                    'φ (MSLD_theta) is varied too: -ρ at φ is +ρ at φ + '
+                    '180°, so the fit has two equivalent minima; keep ρ >= '
+                    '0 or fix φ' % self.stack.layers[i].name, stacklevel=2)
             if {'MSLD_rho', 'MSLD_phi'} <= varied:
                 warnings.warn(
                     '%s: MSLD ρ and the out-of-plane angle MSLD θ '
