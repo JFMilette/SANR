@@ -74,29 +74,40 @@ def test_own_and_fixed():
                for n in RHO})
 
 
-def test_fixed_at_a_value_of_its_own():
-    """A 'fixed' parameter takes the value given for that dataset; one
-    given for a parameter that is fitted there is ignored; the values are
-    one row per dataset, also when given as one row for all."""
-    jp = JointProblem([(n, FitProblem(stack(), data(r)))
-                       for n, r in RHO.items()],
-                      {'A': {'Fe.thickness': 'fixed'},
-                       'B': {'Fe.thickness': 'fixed'}},
-                      values={'B': {'Fe.thickness': 70.0,
-                                    'Fe.MSLD_rho': 9e-6}})
-    assert jp.names == ['Fe.MSLD_rho']
-    assert jp.fixed.shape == (2, 2)
-    assert np.allclose(jp.part_x([4e-6], 0), [75.0, 4e-6])   # current
-    assert np.allclose(jp.part_x([4e-6], 1), [70.0, 4e-6])   # its own
-    with pytest.raises(ValueError, match='unknown parameter'):
-        JointProblem([(n, FitProblem(stack(), data(r)))
-                      for n, r in RHO.items()],
-                     {'B': {'Fe.thickness': 'fixed'}},
-                     values={'B': {'nope': 1.0}})
+def test_models_with_other_parameters():
+    """Each dataset fitted with its own stack: parameters matched by name,
+    a dataset without one shows '—' in the panel and is simply not fitted
+    there; 'fixed' keeps that dataset's own value; a shared parameter takes
+    its bounds and start from the dataset `sources` names."""
+    a = stack()
+    b = stack()
+    b.layers[1].thickness = 85.0
+    b.layers[1].fit['thickness'] = {'vary': True, 'min': 70, 'max': 95}
+    b.layers[1].fit['MSLD_rho']['vary'] = False
+    b.layers[1].fit['NSLD_real'] = {'vary': True, 'min': 7e-6, 'max': 9e-6}
+    pa, pb = FitProblem(a, data(RHO['A'])), FitProblem(b, data(RHO['B']))
+    jp = JointProblem([('A', pa), ('B', pb)])
+    assert jp.names == ['Fe.thickness', 'Fe.MSLD_rho', 'Fe.NSLD_real']
+    assert jp.index == [[0, 1], [0, 2]]
+    # the shared thickness: A's bounds and start by default, B's on request
+    assert jp.params[0][2:] == (75.0, 60, 100)
+    jb = JointProblem([('A', pa), ('B', pb)], sources={'Fe.thickness': 'B'})
+    assert jb.params[0][2:] == (85.0, 70, 95) and jb.origin[0] == (1, 0)
+    # fixed in B: B's own value
+    jf = JointProblem([('A', pa), ('B', pb)], {'B': {'Fe.thickness': 'fixed'}})
+    assert jf.names == ['Fe.thickness', 'Fe.MSLD_rho', 'Fe.NSLD_real']
+    assert np.allclose(jf.part_x([80.0, 5e-6, 8e-6], 1), [85.0, 8e-6])
+    assert len(jf.fixed[0]) == 2 and len(jf.fixed[1]) == 2
     one = JointProblem([(n, FitProblem(stack(), data(r)))
                         for n, r in RHO.items()],
                        {'B': {'Fe.thickness': 'fixed'}}, fixed=[60.0, 1e-6])
     assert np.allclose(one.fixed, [[60.0, 1e-6], [60.0, 1e-6]])
+    # through a session
+    from fit.saved import problem_from_state, problem_state
+    again = problem_from_state(problem_state(jb))
+    assert again.names == jb.names and again.origin == jb.origin
+    x = jb.to_u(jb.x0())
+    assert again(x) == jb(x)
 
 
 def test_single_problem_helpers():
@@ -176,92 +187,90 @@ def gui():
     return sim, exp
 
 
-def choose_joint(exp, modes, values=None):
+def choose_joint(exp, modes):
     from fit.panel import JOINT
     exp._joint = dict(sets=['A', 'B'], modes=modes)
-    if values is not None:
-        exp._joint['values'] = values
     exp._refresh_fit_sets()
     exp.fit_set.setCurrentIndex(exp.fit_set.findData(JOINT))
 
 
 def test_dialog_selection():
-    """A row per parameter: "All datasets" sets every ticked dataset, a
-    dataset's column one of them (All then reads Mixed)."""
+    """A row per parameter any ticked dataset's model has, its Fit tick
+    asked of fit.panel; for ticked rows, "All datasets" sets every ticked
+    dataset, a dataset's column one of them (All then reads Mixed), '—'
+    where its model lacks the parameter; From lists the models sharing
+    it."""
     gui()
     from PyQt6 import QtCore
-    from fit.datasets_panel import DatasetsPanel
-    params = ['L.thickness', 'L.MSLD_rho']
-    dlg = DatasetsPanel(['A', 'B', 'C'], ['A'], {}, params)
-    assert dlg.chosen() == ['A'] and not dlg.table.isEnabled()
-    dlg.list.item(1).setCheckState(QtCore.Qt.CheckState.Checked)
-    assert dlg.table.isEnabled() and dlg.table.columnCount() == 4
-    assert dlg.table.horizontalHeaderItem(3).text() == 'B'
-    every = dlg.all_combos[1]
+    from fit.datasets_panel import SHOWN, DatasetsPanel
+    params = ['L.thickness', 'L.MSLD_rho', 'L.NSLD_real']
+    present = {'A': set(params[:2]), 'B': set(params), 'C': set(params)}
+    dlg = DatasetsPanel()
+    dlg.load(['A', 'B', 'C'], ['A'], ['M1', 'M2'], {'B': 'M2'}, params,
+             present, {params[0]: True, params[1]: True, params[2]: None})
+    assert dlg.chosen() == ['A'] and dlg.table.columnCount() == 2
+    assert dlg.list.cellWidget(1, 1).currentText() == 'M2'
+    assert dlg.list.cellWidget(0, 1).currentText() == SHOWN
+    asked = []
+    dlg.fitToggled.connect(lambda names, on: asked.append((names, on)))
+    dlg.table.item(2, 0).setCheckState(QtCore.Qt.CheckState.Checked)
+    assert asked == [(['L.NSLD_real'], True)]       # partly: ticked all
+    dlg.list.item(1, 0).setCheckState(QtCore.Qt.CheckState.Checked)
+    assert dlg.table.columnCount() == 6
+    assert dlg.table.horizontalHeaderItem(5).text() == 'B'
+    assert dlg.table.item(2, 4).text() == '—'       # A has no NSLD_real
+    every = dlg.all_combos['L.MSLD_rho']
     every.setCurrentIndex(every.findData('own'))       # own in each
     assert [dlg.cells[n, 'L.MSLD_rho'].currentData() for n in 'AB'] == \
         ['own', 'own']
     assert dlg.selection() == {'sets': ['A', 'B'],
                                'modes': {'A': {'L.MSLD_rho': 'own'},
                                          'B': {'L.MSLD_rho': 'own'}},
-                               'values': {}}
+                               'sources': {}}
     a = dlg.cells['A', 'L.MSLD_rho']
     a.setCurrentIndex(a.findData('shared'))            # A alone
     assert every.currentData() == 'mixed'
     assert dlg.selection()['modes'] == {'B': {'L.MSLD_rho': 'own'}}
-    # a third dataset joins: shared until set, so still mixed
-    dlg.list.item(2).setCheckState(QtCore.Qt.CheckState.Checked)
-    assert dlg.table.columnCount() == 5
-    assert dlg.cells['B', 'L.MSLD_rho'].currentData() == 'own'
-    assert dlg.all_combos[1].currentData() == 'mixed'
-    dlg.all_combos[0].setCurrentIndex(dlg.all_combos[0].findData('fixed'))
-    assert {dlg.mode(n, 'L.thickness') for n in 'ABC'} == {'fixed'}
-
-
-def test_dialog_values_of_not_fitted():
-    """Beside "Not fitted", a box in the Simulation tab's units: empty
-    keeps the Simulation tab's value (shown greyed), a number is that
-    dataset's value, "All datasets" writes every one, text is refused."""
-    gui()
-    from PyQt6 import QtCore
-    from fit.datasets_panel import DatasetsPanel
-    params = ['L.thickness', 'L.MSLD_rho']
-    info = {'L.thickness': (1.0, 'Å', 75.0),
-            'L.MSLD_rho': (1e6, '10⁻⁶ Å⁻²', 2e-6)}
-    dlg = DatasetsPanel(['A', 'B'], ['A', 'B'], {}, params, info=info,
-                         values={'A': {'L.thickness': 60.0}})
-    dlg.resize(900, 500)                  # room for the table's cells
-    dlg.show()
-    e = dlg.edits['B', 'L.MSLD_rho']
-    assert not e.isVisible() and e.placeholderText() == '2'
-    c = dlg.cells['B', 'L.MSLD_rho']
-    c.setCurrentIndex(c.findData('fixed'))
-    assert e.isVisible()
-    e.setText('3.5')                                   # 10⁻⁶ Å⁻²
-    e.editingFinished.emit()
-    assert dlg.values['B']['L.MSLD_rho'] == pytest.approx(3.5e-6)
-    # A's thickness value is kept but unused until it is not fitted
-    assert dlg.selection()['values'] == {'B': {'L.MSLD_rho': 3.5e-6}}
-    every = dlg.all_combos[0]
-    every.setCurrentIndex(every.findData('fixed'))
-    assert dlg.edits['A', 'L.thickness'].text() == '60'
-    assert dlg.all_edits[0].isVisible() and dlg.all_edits[0].text() == ''
-    dlg.all_edits[0].setText('80')
-    dlg.all_edits[0].editingFinished.emit()
-    assert [dlg.edits[n, 'L.thickness'].text() for n in 'AB'] == ['80'] * 2
-    dlg.edits['A', 'L.thickness'].setText('')          # back to current
-    dlg.edits['A', 'L.thickness'].editingFinished.emit()
-    assert dlg.all_edits[0].text() == ''
-    assert dlg.selection()['values'] == {
-        'B': {'L.thickness': 80.0, 'L.MSLD_rho': pytest.approx(3.5e-6)}}
-    dlg.edits['B', 'L.thickness'].setText('abc')        # not taken
-    dlg.edits['B', 'L.thickness'].editingFinished.emit()
-    assert 'border' in dlg.edits['B', 'L.thickness'].styleSheet()
-    assert dlg.values['B']['L.thickness'] == 80.0
+    # the shared thickness: from either model
+    f = dlg.from_combos['L.thickness']
+    assert [f.itemText(k) for k in range(f.count())] == [SHOWN, 'M2']
+    f.setCurrentText('M2')
+    assert dlg.selection()['sources'] == {'L.thickness': 'M2'}
+    # relinking B is reported
+    got = []
+    dlg.changed.connect(lambda: got.append(dlg.link('B')))
+    dlg.list.cellWidget(1, 1).setCurrentText(SHOWN)
+    assert got == [None]
     # the last ticked dataset stays ticked
-    dlg.list.item(0).setCheckState(QtCore.Qt.CheckState.Unchecked)
-    dlg.list.item(1).setCheckState(QtCore.Qt.CheckState.Unchecked)
+    dlg.list.item(0, 0).setCheckState(QtCore.Qt.CheckState.Unchecked)
+    dlg.list.item(1, 0).setCheckState(QtCore.Qt.CheckState.Unchecked)
     assert dlg.chosen() == ['B']
+
+
+def test_fit_ticks_go_to_the_models():
+    """The panel's Fit tick ticks the parameter in every model of the
+    datasets fitted; Untick all unticks them; the Simulation tab has no Fit
+    box of its own left."""
+    from PyQt6 import QtCore
+    sim, exp = gui()
+    sim.copy_model()                        # 'Model 1 copy', shown
+    exp.sets[1]['link'] = 'Model 1'
+    choose_joint(exp, {})
+    panel = exp.datasets_panel
+    p = 'L1.NSLD_real'
+    assert panel.varied[p] is False
+    panel.table.item(panel.params.index(p), 0).setCheckState(
+        QtCore.Qt.CheckState.Checked)
+    APP[0].processEvents()
+    assert sim.stack.layers[1].fit['NSLD_real']['vary']
+    assert sim.stored_model('Model 1')['layers'][1]['fit']['NSLD_real'][
+        'vary']
+    assert panel.varied[p] is True
+    exp._tick_requested('untick')
+    APP[0].processEvents()
+    assert not any(panel.varied.values())
+    assert not sim.stack.free_parameters()
+    assert all(cb.isHidden() for *_, cb, _ in sim.editor.rows.values())
 
 
 def test_panel_follows_and_sets_the_dataset_box():
@@ -273,11 +282,14 @@ def test_panel_follows_and_sets_the_dataset_box():
     sim, exp = gui()
     exp.fit_set.setCurrentIndex(exp.fit_set.findText('A'))
     panel = exp.datasets_panel
-    assert panel.chosen() == ['A'] and len(panel.params) == 2
-    panel.list.item(1).setCheckState(QtCore.Qt.CheckState.Checked)
+    assert panel.chosen() == ['A']
+    ticked = [n for n, v in panel.varied.items() if v]
+    assert len(ticked) == 2
+    panel.list.item(1, 0).setCheckState(QtCore.Qt.CheckState.Checked)
+    APP[0].processEvents()                  # B's parameters: reloaded
     assert exp.fit_set.currentData() == JOINT
     assert exp._joint['sets'] == ['A', 'B']
-    p = panel.params[1]
+    p = ticked[1]
     c = panel.cells['B', p]
     c.setCurrentIndex(c.findData('own'))
     assert exp._joint['modes'] == {'B': {p: 'own'}}
@@ -286,10 +298,10 @@ def test_panel_follows_and_sets_the_dataset_box():
     exp.fit_set.setCurrentIndex(exp.fit_set.findData(JOINT))
     assert panel.chosen() == ['A', 'B']
     assert panel.cells['B', p].currentData() == 'own'
-    # a parameter ticked Fit in the Simulation tab: a row more
+    # a parameter ticked Fit: a ticked row more
     sim.stack.layers[1].fit_entry('NSLD_real')['vary'] = True
     sim.recompute()
-    assert len(panel.params) == 3
+    assert len([n for n, v in panel.varied.items() if v]) == 3
     assert panel.cells['B', p].currentData() == 'own'
 
 
@@ -317,21 +329,18 @@ def test_joint_entry_problem_and_session(tmp_path):
     exp.refresh_tree()
     assert exp.fit_set.currentText() == 'Joint: A + B2'
     assert exp._joint['modes'] == {'B2': {pn[1]: 'own'}}
-    # a value for a parameter not fitted in B reaches the problem and the
-    # session, and follows a rename
-    exp.sets[1]['name'] = 'B'
-    exp.refresh_tree()
-    choose_joint(exp, {'B': {pn[0]: 'fixed'}}, {'B': {pn[0]: 42.0}})
-    problem, *_ = exp._problem(exp.fit_report, 'chi2')
-    assert problem.names == [pn[0], pn[1]]
-    assert problem.part_x(problem.x0() * 0 + problem.lo, 1)[0] == 42.0
+    # a link and a From are kept in the session
+    sim.copy_model()
+    exp.sets[1]['link'] = 'Model 1'
+    exp._joint['sources'] = {pn[0]: 'Model 1'}
     state = exp.session_state(str(tmp_path))
-    assert state['fit']['joint']['values'] == {'B': {pn[0]: 42.0}}
     exp.restore_state(state, str(tmp_path))
-    exp._rename_fit_set('B', 'B3')
-    assert exp._joint['values'] == {'B3': {pn[0]: 42.0}}
-    exp.sets[1]['name'] = 'B3'
-    exp.refresh_tree()
+    assert exp.sets[1]['link'] == 'Model 1'
+    assert exp._joint['sources'] == {pn[0]: 'Model 1'}
+    problem, *_ = exp._problem(exp.fit_report, 'chi2')
+    assert [p.model_name for p in problem.parts] == ['Model 1 copy',
+                                                     'Model 1']
+    assert problem.sources == {pn[0]: 'B2'}
     # a dataset gone: no joint fit left
     del exp.sets[1]
     exp.refresh_tree()
@@ -364,7 +373,7 @@ def test_windows_have_a_tab_per_dataset():
     view = win.views[1]
     assert view.stack.layers[1].MSLD_rho == pytest.approx(3e-6)
     # B's thickness is not fitted: the value the fit started from
-    assert view.stack.layers[1].thickness == pytest.approx(problem.fixed[1, 0])
+    assert view.stack.layers[1].thickness == pytest.approx(problem.fixed[1][0])
     assert win.params.topLevelItem(2).text(4) == 'B'
     sent = []
     win.sendRequested.connect(lambda *a: sent.append(a))
@@ -423,3 +432,73 @@ def test_each_dataset_its_own_dq_table():
     assert b.resolution_sigma(np.array([0.05]))[0] == pytest.approx(5e-4)
     # the Simulation tab keeps A's
     assert sim.stack.resolution['data_set'] == 'A'
+
+
+def test_send_to_a_model_per_dataset():
+    """A result goes to the model named after each dataset: made (a copy
+    of the model it was fitted with) when missing, overwritten when there;
+    each dataset is then linked to it, so its next fit starts there.
+    Revert removes what a send made and restores the links."""
+    sim, exp = gui()
+    pn = parameter_names_of(sim)
+    choose_joint(exp, {'B': {pn[0]: 'own'}})
+    problem, *_ = exp._problem(exp.fit_report, 'chi2')
+    exp._set_fit_start(problem)
+    x = np.array([90.0, 95.0, 2e-6])          # thickness, thickness [B], rho
+    sent = exp._send_values(problem, x, 0, exp, 'test')
+    assert sent == ['A', 'B'] and sim.model_names() == ['Model 1', 'A', 'B']
+    assert sim.model_stack('A').layers[1].thickness == 90.0
+    assert sim.model_stack('B').layers[1].thickness == 95.0
+    assert sim.model_stack('B').layers[1].MSLD_rho == pytest.approx(2e-6)
+    assert sim.stack.layers[1].thickness != 90.0      # Model 1 untouched
+    assert [s.get('link') for s in exp.sets[:2]] == ['A', 'B']
+    assert [s['name'] for s in exp.sets if s.get('live')] == [
+        'Model 1 (simulation)', 'A (simulation)', 'B (simulation)']
+    # the next fit starts from each dataset's own result; a send overwrites
+    problem, *_ = exp._problem(exp.fit_report, 'chi2')
+    assert np.allclose(problem.to_x(problem.x0()), x)
+    exp._send_values(problem, x + [1, 1, 0], 0, exp, 'test')
+    assert sim.model_names() == ['Model 1', 'A', 'B']
+    assert sim.model_stack('B').layers[1].thickness == 96.0
+    exp.revert_fit()
+    assert sim.model_names() == ['Model 1']
+    assert [s.get('link') for s in exp.sets[:2]] == [None, None]
+    assert [s['name'] for s in exp.sets if s.get('live')] == [
+        'Model 1 (simulation)']
+
+
+def test_one_dataset_shows_its_model():
+    """Fitting a dataset linked to a model the Simulation tab does not show
+    shows it first; its result goes to the model named after it."""
+    sim, exp = gui()
+    sim.copy_model()                          # 'Model 1 copy', shown
+    exp.sets[0]['link'] = 'Model 1'
+    exp.fit_set.setCurrentIndex(exp.fit_set.findText('A'))
+    problem, *_ = exp._problem(exp.fit_report, 'chi2')
+    assert sim.shown_model() == 'Model 1' and problem.model_name == 'Model 1'
+    exp._send_values(problem, problem.to_x(problem.x0()), 0, exp, 'test')
+    assert sim.shown_model() == 'A'
+
+
+def test_live_dataset_per_model():
+    """A live dataset per model, last in the list, unticked when made;
+    renamed and removed with its model; not removable by hand."""
+    sim, exp = gui()
+    live = lambda: [s['name'] for s in exp.sets if s.get('live')]
+    assert live() == ['Model 1 (simulation)']
+    sim.copy_model()
+    assert live() == ['Model 1 (simulation)', 'Model 1 copy (simulation)']
+    assert not exp.sets[-1]['visible'] and exp.sets[-1]['channels']
+    sim.add_model('X', sim.model_dict('Model 1'))
+    sim._models[-1]['name']                    # renamed through the box
+    sim.modelRenamed.emit('X', 'Y')
+    sim._models[-1]['name'] = 'Y'
+    sim._refresh_models()
+    assert live()[-1] == 'Y (simulation)'
+    sim.remove_model('Y')
+    assert live() == ['Model 1 (simulation)', 'Model 1 copy (simulation)']
+    exp.new_set('C')
+    assert [s['name'] for s in exp.sets][:3] == ['A', 'B', 'C']
+    exp.tree.setCurrentItem(exp.tree.topLevelItem(len(exp.sets) - 1))
+    exp.remove_selected()
+    assert len(live()) == 2

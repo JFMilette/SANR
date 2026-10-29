@@ -25,20 +25,32 @@ at and sent to the Simulation tab, not continued.
 
 JOINT FIT -- the Datasets to fit panel beside the fit box (the Fit tab's
 right side, fit.datasets_panel, `datasets_panel`) picks the datasets
-fitted, as it is ticked: one alone, or several fitted together with one
-model, each parameter shared, own to a dataset or not fitted in it, at a
-value typed for that dataset or the Simulation tab's (fit.joint).  The
-Dataset box (fit_set, never shown) holds the choice: a dataset, or a
-"Joint: …" entry for the selection (kept in the session); the fit windows
-then show one tab per dataset.  A result sent to the Simulation tab
-from a joint fit holds the values one dataset sees: that of the DE
-window's tab shown (a multistart's minima too), of the dataset chosen in
-the DREAM window, the first one's from the multistart table.
+fitted, as it is ticked: one alone, or several fitted together (fit.joint),
+each parameter shared, own to a dataset or not fitted in it.  The Dataset
+box (fit_set, never shown) holds the choice: a dataset, or a "Joint: …"
+entry for the selection (kept in the session); the fit windows then show
+one tab per dataset.
+
+MODELS -- each dataset is fitted with a model of the Simulation tab's
+Model box: the one it is linked to in the panel (the dataset's 'link'),
+else the one shown.  What is fitted is ticked in the panel, which writes
+the Fit ticks into those models (Stack.set_varied); values, bounds and
+priors stay each model's, edited in the Simulation tab.  A joint fit
+matches the parameters across the models by name; a shared one takes its
+bounds and start from the model chosen in its From box (fit.joint
+`sources`), the others from each dataset's own model.  Fitting one dataset
+alone first shows its model in the Simulation tab.  A result (an entry of a
+fit window, a DREAM state or bounds, a multistart minimum) is written, for
+every dataset at once, into the model named after that dataset: its values
+overwritten if it exists, else made as a copy of the model the dataset was
+fitted with (_send_values); each dataset is then linked to its model, so
+its next fit starts from its own result.  Revert puts those values back,
+removes a model a send made and restores the links.
 
 FitPanel is a mixin of tabs.experimental.ExperimentalTab, which builds the
 fit box with _build_fit_box() and provides the datasets: `sets`,
-`simulation`, `_set_index`, `channel_vectors`, `sim_vectors`,
-`add_simulation` and `_update_live`.
+`simulation`, `_set_index`, `channel_vectors`, `sim_vectors` and
+`_update_live`.
 
 While a fit or a sampling runs (busy()), the Simulation tab is locked
 (SimulationTab.set_locked): its layers can be looked at, not changed.
@@ -54,8 +66,8 @@ import numpy as np
 from PyQt6 import QtCore, QtWidgets
 
 from model.polarisation import vectors_pair
-from tabs.simulation import PARAM_DISPLAY, SciSpinBox, dspin
-from fit.datasets_panel import DatasetsPanel
+from tabs.simulation import SciSpinBox, dspin, shown_names
+from fit.datasets_panel import SHOWN, DatasetsPanel
 from fit.problem import FitProblem, parameter_names
 from fit.de.de_fit import STRATEGIES
 from fit.de.de_window import DEThread, DEWindow
@@ -169,17 +181,22 @@ class FitPanel:
         self.fit_set.setToolTip('Every channel of this dataset is fitted '
                                 '(of every dataset of a joint fit: tick '
                                 'them on the right)')
-        self._joint = None             # {'sets', 'modes'} of the joint fit
-        # the datasets fitted together and their parameters' modes, live;
-        # the Fit tab shows it beside the fit box
+        # {'sets', 'modes', 'sources'} of the joint fit
+        self._joint = None
+        # the datasets fitted together, their models, the parameters fitted
+        # and their modes, live; the Fit tab shows it beside the fit box
         self.datasets_panel = DatasetsPanel()
         self.datasets_panel.changed.connect(self._datasets_chosen)
+        self.datasets_panel.fitToggled.connect(self._fit_toggled)
+        self.datasets_panel.tickRequested.connect(self._tick_requested)
         self._datasets_key = None      # what the panel was last loaded with
         self._choosing = False         # the panel itself is being applied
+        self._param_cache = {}         # model -> (stored dict, _model_params)
         self.fit_set.currentIndexChanged.connect(self._sync_datasets_panel)
-        if self.simulation is not None:     # the parameters ticked Fit
+        if self.simulation is not None:     # the parameters, the models
             self.simulation.reflectanceChanged.connect(
                 self._sync_datasets_panel)
+            self.simulation.modelsChanged.connect(self._sync_datasets_panel)
         self.fit_cost = QtWidgets.QComboBox()
         self.fit_cost.addItems([c[1] for c in FIT_COSTS])
         self.fit_cost.setToolTip(
@@ -355,7 +372,8 @@ class FitPanel:
         self._fit = None               # running DEThread
         self._de_state = None          # where the last DE ended (Continue)
         self._fit_ok = True            # the last DE did not fail
-        self._fit_start = None         # (params, x) before the last fit
+        self._fit_start = None         # what Revert restores (_snapshot)
+        self._made = []                # models the last send made
         self._fit_warnings = ''        # html, shown above the fit report
         self._grid_choice = {}         # dataset -> channel of its Licorne Q
         self.fit_window = None         # DEWindow, made by the first fit
@@ -844,27 +862,20 @@ class FitPanel:
         return self._ms_minima[rows[0].row()]
 
     def _ms_apply(self):
-        """Send the selected minimum to the Simulation tab (the first
-        dataset's values of a joint fit)."""
+        """Send the selected minimum to the models of its datasets (a model
+        several datasets share: the first one's values)."""
         m = self._ms_selected()
         if m is None or self.busy():
             return
-        base = parts(self._ms_shown)[0]
-        if [l.name for l in self.simulation.stack.layers] != \
-                [l.name for l in base.stack.layers] or \
-                [p[:2] for p in self.simulation.stack.free_parameters()] != \
-                [p[:2] for p in base.params]:
+        sent = self._send_values(self._ms_shown, m['x'], 0, self,
+                                 'Multistart')
+        if sent is None:
             self.ms_report.setText(self._error(
-                'The layers or varied parameters of the Simulation tab '
-                'changed since these minima were found.'))
+                'The layers of a model changed since these minima were '
+                'found.'))
             return
-        self.simulation.set_parameters(base.params,
-                                       part_x(self._ms_shown, m['x']))
-        joint = getattr(self._ms_shown, 'part_names', None)
-        self.ms_report.setText(
-            'Minimum %.5g sent to the Simulation tab%s.' % (
-                m['chi2'], ' (the values of %s)' % html_escape(joint[0])
-                if joint else ''))
+        self.ms_report.setText('Minimum %.5g sent to %s.' % (
+            m['chi2'], self._to_models(sent)))
         self.btn_revert.setEnabled(True)
 
     def _ms_dream(self):
@@ -1034,9 +1045,11 @@ class FitPanel:
         names = self._fittable()
         if self._joint:
             sets = [n for n in self._joint['sets'] if n in names]
-            self._joint = dict(sets=sets, **{
-                key: {n: m for n, m in (self._joint.get(key) or {}).items()
-                      if n in sets} for key in ('modes', 'values')}) \
+            self._joint = dict(
+                sets=sets, modes={n: m for n, m in
+                                  (self._joint.get('modes') or {}).items()
+                                  if n in sets},
+                sources=dict(self._joint.get('sources') or {})) \
                 if len(sets) > 1 else None
         c.blockSignals(True)
         c.clear()
@@ -1062,49 +1075,104 @@ class FitPanel:
         if self._joint and old in self._joint['sets']:
             self._joint['sets'] = [new if n == old else n
                                    for n in self._joint['sets']]
-            for key in ('modes', 'values'):
-                d = self._joint.get(key) or {}
-                if old in d:
-                    d[new] = d.pop(old)
+            d = self._joint.get('modes') or {}
+            if old in d:
+                d[new] = d.pop(old)
         if old in self._grid_choice:
             self._grid_choice[new] = self._grid_choice.pop(old)
 
     def _sync_datasets_panel(self, *_):
         """The Datasets to fit panel from the Dataset box (its dataset, or
-        the joint fit's), the datasets that can be fitted and the
-        parameters ticked Fit in the Simulation tab; reloaded only when one
-        of them changed, so a box being typed in is kept."""
+        the joint fit's), the datasets that can be fitted, their models and
+        the parameters those can fit; reloaded only when one of them
+        changed."""
         if self._choosing:
             return
-        key, names, chosen, params, info = self._datasets_state()
+        key, names, chosen, models, links, params, present, varied = \
+            self._datasets_state()
         if key == self._datasets_key:
             return
         self._datasets_key = key
         joint = self._joint if len(chosen) > 1 else None
         self.datasets_panel.load(
-            names, chosen, params,
+            names, chosen, models, links, params, present, varied,
             None if joint is None else joint.get('modes') or {},
-            None if joint is None else joint.get('values') or {}, info)
+            None if joint is None else joint.get('sources') or {})
+
+    def _resync_datasets_panel(self):
+        """Reload the panel (later: not from one of its own signals)."""
+        def again():
+            self._datasets_key = None
+            self._sync_datasets_panel()
+        QtCore.QTimer.singleShot(0, again)
+
+    def _link(self, s):
+        """The model dataset s is fitted with (MODELS): its link, else the
+        model the Simulation tab shows."""
+        sim = self.simulation
+        m = s.get('link')
+        return m if m in sim.model_names() else sim.shown_model()
+
+    def _model_params(self, model):
+        """(every parameter name `model` can fit, {name: ticked Fit}), its
+        stored dict's kept until that dict is replaced."""
+        sim = self.simulation
+        d = sim.stored_model(model)
+        if d is not None:
+            c = self._param_cache.get(model)
+            if c is not None and c[0] is d:
+                return c[1]
+        st = sim.model_stack(model)
+        every = st.free_parameters(everything=True)
+        names = parameter_names(st, every)
+        out = (names, {n: st.is_varied(i, a)
+                       for n, (i, a, *_) in zip(names, every)})
+        if d is not None:
+            self._param_cache[model] = (d, out)
+        return out
 
     def _datasets_state(self):
-        """(key, names, chosen, params, info) of _sync_datasets_panel."""
+        """(key, names, chosen, models, links, params, present, varied) of
+        _sync_datasets_panel (DatasetsPanel.load)."""
         names = self._fittable()
         chosen = [s['name'] for s in self._fit_sets()]
-        params, info = [], {}
-        if self.simulation is not None:
-            st = self.simulation.stack
-            free = st.free_parameters()
-            params = parameter_names(st, free)
-            # the value boxes of 'Not fitted': the Simulation tab's units
-            info = {n: PARAM_DISPLAY[a][1:] + (v,)
-                    for n, (_, a, v, *_) in zip(params, free)}
-        key = (names, chosen, params, sorted(info.items()))
-        return key, names, chosen, params, info
+        models, links, params, present, ticks = [], {}, [], {}, {}
+        sim = self.simulation
+        if sim is not None:
+            models = sim.model_names()
+            links = {s['name']: s['link'] for s in self.sets
+                     if s['name'] in names and s.get('link') in models}
+            for s in self._fit_sets():
+                got, on = self._model_params(self._link(s))
+                present[s['name']] = got
+                params += [n for n in got if n not in params]
+                for n in got:
+                    ticks.setdefault(n, []).append(on[n])
+        varied = {n: True if all(v) else False if not any(v) else None
+                  for n, v in ticks.items()}
+        key = (tuple(names), tuple(chosen), tuple(models),
+               sim.shown_model() if sim is not None else None,
+               tuple(sorted(links.items())), tuple(params),
+               tuple(sorted((n, tuple(v)) for n, v in present.items())),
+               tuple(sorted(varied.items())))
+        return key, names, chosen, models, links, params, present, varied
 
     def _datasets_chosen(self):
-        """A tick, mode or value of the Datasets to fit panel: two datasets
-        or more are the Dataset box's joint entry, one is that dataset."""
-        sel = self.datasets_panel.selection()
+        """A tick, link, mode or From of the Datasets to fit panel: two
+        datasets or more are the Dataset box's joint entry, one is that
+        dataset; a link is written into its dataset."""
+        panel = self.datasets_panel
+        relinked = False
+        for n in panel.names:
+            i = self._set_index(n)
+            if i is None or self.sets[i].get('link') == panel.link(n):
+                continue
+            relinked = True
+            if panel.link(n) is None:
+                self.sets[i].pop('link', None)
+            else:
+                self.sets[i]['link'] = panel.link(n)
+        sel = panel.selection()
         self._choosing = True
         try:
             if len(sel['sets']) > 1:
@@ -1117,8 +1185,53 @@ class FitPanel:
                 self.fit_set.setCurrentIndex(i)
         finally:
             self._choosing = False
-        # the panel already shows this state: not reloaded
-        self._datasets_key = self._datasets_state()[0]
+        if relinked:                   # the live curves' norms
+            self._update_live()
+        # other datasets or models: their parameters, loaded later (not
+        # from the panel's own signal); a mode or From: nothing to reload
+        if self._datasets_state()[0] != self._datasets_key:
+            self._resync_datasets_panel()
+
+    def _chosen_models(self):
+        """The models of the datasets fitted, each once."""
+        out = []
+        for s in self._fit_sets():
+            m = self._link(s)
+            if m not in out:
+                out.append(m)
+        return out
+
+    def _fit_toggled(self, names, on):
+        """The panel's Fit tick of parameters `names`: ticked or unticked in
+        every model of the datasets fitted that has them."""
+        if self.busy() or self.simulation is None:
+            self._resync_datasets_panel()
+            return
+
+        def edit(st):
+            every = st.free_parameters(everything=True)
+            for n, (i, a, *_) in zip(parameter_names(st, every), every):
+                if n in names:
+                    st.set_varied(i, a, on)
+        for m in self._chosen_models():
+            self.simulation.set_model_varied(m, edit)
+        self._resync_datasets_panel()
+
+    def _tick_requested(self, key):
+        """A tick button of the panel (DatasetsPanel TICKS), in every model
+        of the datasets fitted."""
+        if self.busy() or self.simulation is None:
+            return
+
+        def edit(st):
+            if key == 'untick':
+                for i, a, *_ in st.free_parameters():
+                    st.set_varied(i, a, False)
+            else:
+                st.tick_all(key)
+        for m in self._chosen_models():
+            self.simulation.set_model_varied(m, edit)
+        self._resync_datasets_panel()
 
     def busy(self):
         """A fit, a multistart or a DREAM run is going on."""
@@ -1184,6 +1297,12 @@ class FitPanel:
             report.setText(self._error('Import data to fit first.'))
             return None
         sim = self.simulation
+        if len(sets) == 1:
+            # one dataset: the Simulation tab shows the model it is fitted
+            # with, so that Send and Revert work there as they always did
+            m = sets[0].get('link')
+            if m in sim.model_names() and m != sim.shown_model():
+                sim.switch_model(sim.model_names().index(m))
         sim.recompute()                 # push the tab's settings into the stack
         inputs = []
         for s in sets:
@@ -1200,40 +1319,84 @@ class FitPanel:
             try:
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter('always')
-                    fits.append((s['name'], FitProblem(
+                    fp = FitProblem(
                         self._set_stack(s), data, cost, qmin, qmax, grid,
                         error_floor=self.fit_floor.value() / 100,
-                        target=target)))
+                        target=target)
             except ValueError as exc:
                 report.setText(self._error(
                     '%s: %s' % (s['name'], exc) if joint else exc))
                 return None
+            fp.model_name, fp.dataset_name = self._link(s), s['name']
+            fits.append((s['name'], fp))
             for w in caught:
                 said.setdefault(str(w.message), []).append(s['name'])
         try:
             problem = JointProblem(fits, self._joint['modes'],
-                                   values=self._joint.get('values')) \
+                                   sources=self._sources(fits)) \
                 if joint else fits[0][1]
         except ValueError as exc:
             report.setText(self._error(exc))
             return None
+        if joint:
+            for msg in self._bound_notes(problem):
+                said.setdefault(msg, []).append(None)
         # e.g. rho and phi of one layer both varied, said once
         note = ''.join(self._error(
-            msg if not joint or len(who) == len(fits)
+            msg if not joint or len(who) == len(fits) or None in who
             else '%s: %s' % (', '.join(who), msg)) + '<br>'
             for msg, who in said.items())
         return problem, inputs, qmin, qmax, note
 
+    def _sources(self, fits):
+        """{parameter: dataset} a shared parameter of a joint fit takes its
+        bounds and start from: the first dataset sharing it whose model is
+        the one chosen in its From box (fit.joint `sources`)."""
+        modes = self._joint.get('modes') or {}
+        out = {}
+        for p, model in (self._joint.get('sources') or {}).items():
+            if model == SHOWN:
+                model = self.simulation.shown_model()
+            n = next((n for n, fp in fits if fp.model_name == model and
+                      p in fp.names and
+                      (modes.get(n) or {}).get(p, 'shared') == 'shared'),
+                     None)
+            if n is not None:
+                out[p] = n
+        return out
+
+    @staticmethod
+    def _bound_notes(problem):
+        """A note per shared parameter whose models give other bounds than
+        the model it takes them from."""
+        notes = []
+        for j, (name, scope) in enumerate(zip(problem.names,
+                                              problem.scopes)):
+            if scope is not None:
+                continue
+            k0, i0 = problem.origin[j]
+            lo, hi = problem.params[j][3:5]
+            other = [problem.parts[k].model_name
+                     for k, idx in enumerate(problem.index)
+                     for i, jj in enumerate(idx) if jj == j and
+                     tuple(problem.parts[k].params[i][3:5]) != (lo, hi)]
+            if other:
+                notes.append('%s: the bounds of %s are used (%s has others)'
+                             % (shown_names(name),
+                                problem.parts[k0].model_name,
+                                ', '.join(sorted(set(other)))))
+        return notes
+
     def _set_stack(self, s):
-        """The stack dataset s is fitted with: the Simulation tab's, but in
+        """The stack dataset s is fitted with: its model's (MODELS), but in
         the 'data' resolution mode with the dQ table of s itself
         (tabs.resolution.dq_table, the overlap rule of the table chosen
         there), so that its points without a dQ and its curves in the fit
-        window take its own dQ, not the chosen dataset's; the Simulation
-        tab's stack itself if s is that dataset or has no dQ."""
+        window take its own dQ, not the chosen dataset's; the model's
+        stack itself if s is that dataset or has no dQ."""
         # imported here: tabs.resolution imports tabs.simulation
         from tabs.resolution import dq_table
-        st = self.simulation.stack
+        st = self.simulation.model_stack(self._link(s))
         res = st.resolution
         if not (res.get('enabled') and res.get('mode') == 'data') or \
                 res.get('data_set') == s['name']:
@@ -1251,11 +1414,107 @@ class FitPanel:
         return st
 
     def _set_fit_start(self, problem):
-        """What Revert restores: the stack's varied parameters as the fit
-        of `problem` starts, and the layer names a result is sent to."""
-        base = parts(problem)[0]
-        self._fit_start = (base.params, [p[2] for p in base.params])
-        self._fit_layers = [l.name for l in base.stack.layers]
+        """What Revert restores: the values and bounds a result of `problem`
+        would overwrite, as the fit starts (_snapshot)."""
+        self._fit_start = self._snapshot(problem)
+
+    def _target(self, sub):
+        """The model a result of dataset problem `sub` (a FitProblem) is
+        written into: the one named after its dataset (from before MODELS:
+        the model it was fitted with, else the shown one)."""
+        return sub.dataset_name or sub.model_name or \
+            self.simulation.shown_model()
+
+    def _entries(self, model, names):
+        """{parameter name: free_parameters(everything=True) entry} of
+        model `model` for those of `names` it has."""
+        st = self.simulation.model_stack(model)
+        every = st.free_parameters(everything=True)
+        return {n: e for n, e in zip(parameter_names(st, every), every)
+                if n in names}
+
+    def _snapshot(self, problem):
+        """What Revert restores, for each dataset of `problem`: [(model,
+        rows, dataset, its link)] with rows the current (i, attr, value,
+        min, max) of the parameters a result would write into the model
+        named after it, None if there is no such model yet (Revert then
+        removes the one a send made)."""
+        sim = self.simulation
+        out = []
+        for sub in parts(problem):
+            m = self._target(sub)
+            rows = None
+            if m in sim.model_names():
+                st = sim.model_stack(m)
+                rows = []
+                for i, a, *_ in self._entries(m, sub.names).values():
+                    o = st.owner(i)
+                    e = o.fit_entry(a)
+                    rows.append((i, a, getattr(o, a), e['min'], e['max']))
+            k = self._set_index(sub.dataset_name) if sub.dataset_name \
+                else None
+            out.append((m, rows, sub.dataset_name,
+                        None if k is None else self.sets[k].get('link')))
+        return out
+
+    def _send_values(self, problem, x, part, parent, title, bounds=None):
+        """Write a result x of `problem`, or with bounds=(lo, hi) those
+        bounds (of the joint parameters), into the model named after each
+        of its datasets: overwritten where it exists, else made first as a
+        copy of the model that dataset was fitted with; only the parameters
+        fitted in that dataset, matched by name.  Each dataset is then
+        linked to its model, so that its next fit starts from there.  One
+        dataset alone: the Simulation tab shows its model.  Returns the
+        models written (`part` is not used: every dataset has its own)."""
+        sim = self.simulation
+        sent, made, missing = [], [], []
+        for k, sub in enumerate(parts(problem)):
+            m = self._target(sub)
+            if m not in sim.model_names():
+                base = sub.model_name if sub.model_name in \
+                    sim.model_names() else sim.shown_model()
+                m = sim.add_model(m, sim.model_dict(base))
+                made.append(m)
+            fitted = [(n, j) for n, j in zip(sub.names,
+                                            part_index(problem, k))
+                      if j is not None]
+            where = self._entries(m, [n for n, _ in fitted])
+            missing += ['%s (%s)' % (shown_names(n), m) for n, _ in fitted
+                        if n not in where]
+            rows = [(where[n], j) for n, j in fitted if n in where]
+            if bounds is None:
+                v = np.asarray(x, dtype=float)
+                sim.set_model_parameters(m, [e for e, _ in rows],
+                                         [v[j] for _, j in rows])
+            else:
+                lo, hi = bounds
+                sim.set_model_bounds(m, [e for e, _ in rows],
+                                     [lo[j] for _, j in rows],
+                                     [hi[j] for _, j in rows])
+            i = self._set_index(sub.dataset_name) if sub.dataset_name \
+                else None
+            if i is not None:
+                self.sets[i]['link'] = m
+            sent.append(m)
+        if len(sent) == 1 and sent[0] != sim.shown_model():
+            sim.switch_model(sim.model_names().index(sent[0]))
+        self._resync_datasets_panel()
+        self.refresh_tree(self._selected())
+        if missing:
+            QtWidgets.QMessageBox.information(
+                parent, title, 'Not written (the model has no such '
+                'parameter):\n\n' + '\n'.join(missing))
+        self._made = made
+        return sent
+
+    def _to_models(self, models):
+        """'model A' or 'models A, B (B new)' for a report."""
+        made = [m for m in getattr(self, '_made', []) if m in models]
+        return '%s %s%s' % ('model' if len(models) == 1 else 'models',
+                            ', '.join(html_escape(m) for m in models),
+                            ' (%s new)' % ', '.join(html_escape(m)
+                                                    for m in made)
+                            if made else '')
 
     def _fitted_points(self, s, qmin, qmax, cost):
         """The points of dataset s that are fitted (Q range, R > 0 for log
@@ -1374,11 +1633,13 @@ class FitPanel:
             b.setEnabled(True)
         # a live simulation dataset, computed from the same pairs as the
         # fit, shows a result sent from the fit window against the data
-        if not any(t.get('live') for t in self.sets):
-            self.add_simulation()
+        # each model's dataset takes the pairs of the first dataset fitted
+        # with that model (else of the first one)
         for t in self.sets:
             if t.get('live'):
-                t['pairs'] = dict(inputs[0][1])
+                t['pairs'] = dict(next(
+                    (vec for s, vec, *_ in inputs
+                     if self._link(s) == t.get('link')), inputs[0][1]))
         self._update_live()
         return title
 
@@ -1671,8 +1932,9 @@ class FitPanel:
 
     def load_dream(self):
         """Show a run saved with "Save chains..." in the DREAM window.  Its
-        MAP and bounds can be sent to the Simulation tab when the layers
-        there have the names they had in the run."""
+        MAP and bounds can be sent to the models it was fitted with (the
+        shown one for a file from before MODELS) when they have the layers
+        they had in the run."""
         if self.busy():
             return
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -1689,19 +1951,12 @@ class FitPanel:
                 self, 'Load chains', 'Could not load %s:\n%s' % (path, exc))
             return
         self._dream_problem = problem
-        self._fit_layers = [l.name for l in problem.fit.stack.layers]
-        sim = self.simulation
         self._fit_start = None
         self.btn_revert.setEnabled(False)
-        if sim is not None and \
-                [l.name for l in sim.stack.layers] == self._fit_layers:
-            sim.recompute()
-            # what Revert restores: the Simulation tab's values and bounds now
-            params = [(i, a, getattr(sim.stack.owner(i), a),
-                       sim.stack.owner(i).fit_entry(a)['min'],
-                       sim.stack.owner(i).fit_entry(a)['max'])
-                      for i, a, *_ in parts(problem.fit)[0].params]
-            self._fit_start = (params, [p[2] for p in params])
+        if self.simulation is not None:
+            self.simulation.recompute()
+            # what Revert restores: the models' values and bounds now
+            self._fit_start = self._snapshot(problem.fit)
         self._make_dream_window([os.path.basename(path)])
         self.dream_window.show_loaded(
             result, problem, 'Loaded %s — %d parameter(s), %d points'
@@ -1787,58 +2042,32 @@ class FitPanel:
                   self.btn_dream_load, self.btn_ms_run):
             b.setEnabled(True)
 
-    def _same_layers(self, parent, title, what='run', fit=None):
-        """The Simulation tab still has the layers of the fit problem `fit`
-        (default: of the last fit or run); a message box on `parent` if
-        not."""
-        layers = self._fit_layers if fit is None else \
-            [l.name for l in parts(fit)[0].stack.layers]
-        if [l.name for l in self.simulation.stack.layers] == layers:
-            return True
-        QtWidgets.QMessageBox.warning(
-            parent, title, 'The layers of the Simulation tab changed since '
-            'the %s started;\nthese parameters no longer match them.' % what)
-        return False
-
-    @staticmethod
-    def _whose(problem, part):
-        """' (the values of <dataset>)' for a joint fit, else ''."""
-        names = getattr(problem, 'part_names', None)
-        return ' (the values of %s)' % html_escape(names[part]) if names \
-            else ''
-
     def _send_dream(self, x, part=0, w=None, label='MAP'):
         """Write a DREAM state of window w (default: the newest) into the
-        Simulation tab: the values dataset `part` of a joint fit sees;
-        label says which state ('MAP', 'chain 3')."""
+        models of its datasets (_send_values; a model several datasets
+        share: the values of dataset `part`); label says which state
+        ('MAP', 'chain 3')."""
         w = w or self.dream_window
-        fit = w.problem.fit
-        if self.busy() or not self._same_layers(w, 'Load into model',
-                                                fit=fit):
+        if self.busy():
             return
-        self.simulation.set_parameters(parts(fit)[part].params,
-                                       part_x(fit, x, part))
-        self.dream_report.setText('%s sent to the Simulation tab%s.'
-                                  % (label, self._whose(fit, part)))
-        self.btn_revert.setEnabled(True)
+        sent = self._send_values(w.problem.fit, x, part, w, 'Load into model')
+        if sent is not None:
+            self.dream_report.setText('%s sent to %s.' % (
+                label, self._to_models(sent)))
+            self.btn_revert.setEnabled(True)
 
     def _bounds_dream(self, lo, hi, part=0, w=None):
         """Write posterior-based fit bounds of window w (default: the
-        newest) into the Simulation tab: those of the parameters fitted in
-        dataset `part` of a joint fit."""
+        newest) into the models of its datasets, as _send_dream."""
         w = w or self.dream_window
-        fit = w.problem.fit
-        if self.busy() or not self._same_layers(w, 'Apply ±σ to bounds',
-                                                fit=fit):
+        if self.busy():
             return
-        rows = [(p, lo[j], hi[j]) for p, j in zip(parts(fit)[part].params,
-                                                  part_index(fit, part))
-                if j is not None]
-        self.simulation.set_bounds([r[0] for r in rows],
-                                   [r[1] for r in rows], [r[2] for r in rows])
-        self.dream_report.setText('Posterior bounds sent to the Simulation '
-                                  'tab%s.' % self._whose(fit, part))
-        self.btn_revert.setEnabled(True)
+        sent = self._send_values(w.problem.fit, None, part, w,
+                                 'Apply ±σ to bounds', bounds=(lo, hi))
+        if sent is not None:
+            self.dream_report.setText('Posterior bounds sent to %s.'
+                                      % self._to_models(sent))
+            self.btn_revert.setEnabled(True)
 
     def stop_fit(self):
         """The fit window's Stop: the DE / L-BFGS-B fit or the multistart."""
@@ -1853,31 +2082,46 @@ class FitPanel:
 
     def _send_fit(self, x, label, part=0, w=None):
         """Write an entry of fit window w (default: the newest) into the
-        Simulation tab: the values dataset `part` of a joint fit sees."""
+        models of its datasets (_send_values; a model several datasets
+        share: the values of the dataset of the tab shown, `part`)."""
         w = w or self.fit_window
-        p = w.problem
-        if self.busy() or not self._same_layers(w, 'Send to Simulation',
-                                                'fit', fit=p):
+        if self.busy():
             return
-        self.simulation.set_parameters(parts(p)[part].params,
-                                       part_x(p, x, part))
+        sent = self._send_values(w.problem, x, part, w, 'Send to Simulation')
+        if sent is None:
+            return
         self._fit_out.setText(self._fit_header(
-            'Sent <b>%s</b> to the Simulation tab%s' % (html_escape(
+            'Sent <b>%s</b> to %s' % (html_escape(
                 '%s %s' % (w.unit, label) if label[:1].isdigit()
-                else label),
-                self._whose(p, part))))
+                else label), self._to_models(sent))))
         self.btn_revert.setEnabled(True)
 
     def revert_fit(self):
-        if self._fit_start is not None and not self.busy():
-            params, x = self._fit_start
-            self.simulation.set_parameters(params, x)
-            # the bounds too (Apply ±σ to bounds changes them)
-            self.simulation.set_bounds(params, [p[3] for p in params],
-                                       [p[4] for p in params])
-            self._fit_out.setText('Parameters and bounds restored to '
-                                  'their values before the fit.')
-            self.btn_revert.setEnabled(False)
+        """Every model the last result went to back to its values and
+        bounds before the fit, a model a send made removed, and each
+        dataset back to its link (_snapshot)."""
+        if self._fit_start is None or self.busy():
+            return
+        sim = self.simulation
+        for m, rows, dataset, link in self._fit_start:
+            if rows is None:
+                sim.remove_model(m)
+            elif m in sim.model_names():
+                sim.set_model_parameters(m, rows, [r[2] for r in rows])
+                # the bounds too (Apply ±σ to bounds changes them)
+                sim.set_model_bounds(m, rows, [r[3] for r in rows],
+                                     [r[4] for r in rows])
+            i = self._set_index(dataset) if dataset else None
+            if i is not None:
+                if link is None:
+                    self.sets[i].pop('link', None)
+                else:
+                    self.sets[i]['link'] = link
+        self._fit_out.setText('Parameters and bounds restored to their '
+                              'values before the fit.')
+        self.btn_revert.setEnabled(False)
+        self._resync_datasets_panel()
+        self.refresh_tree(self._selected())
 
     def _fit_progress(self, x, cost, gen):
         self._fit_out.setText(self._fit_header(

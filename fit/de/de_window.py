@@ -637,13 +637,16 @@ class DEWindow(QtWidgets.QWidget):
     def _fill_params(self):
         t = self.params
         t.clear()
-        layers = self.problem.stack.layers
         scopes = getattr(self.problem, 'scopes', None)
+        # a joint parameter's layer index is in the stack it came from
+        origin = getattr(self.problem, 'origin', None)
         for j, ((i, attr, _, lo, hi), v) in enumerate(
                 zip(self.problem.params, self._x)):
+            st = self.problem.parts[origin[j][0]].stack if origin \
+                else self.problem.stack
             label, scale, unit = PARAM_DISPLAY[attr]
-            row = ['(stack)' if i is None else self.problem.stack.entry_name(
-                i) if isinstance(i, tuple) else layers[i].name, label,
+            row = ['(stack)' if i is None else st.entry_name(
+                i) if isinstance(i, tuple) else st.layers[i].name, label,
                 '%.6g' % (v * scale), unit]
             if scopes is not None:
                 row.append(scopes[j] or 'shared')
@@ -663,10 +666,11 @@ class DEWindow(QtWidgets.QWidget):
     def _spread_rows(self, it, j, scopes):
         """A thickness spread's row says its target and distribution, with
         what it means below it (Stack.spread_summary), at the entry drawn,
-        as the dataset of its scope sees it (a shared one: the first)."""
+        as the dataset of its scope sees it (a shared one: the dataset it
+        takes its bounds from, fit.joint `origin`)."""
         names = getattr(self.problem, 'part_names', None)
         k = names.index(scopes[j]) if scopes is not None and scopes[j] \
-            else 0
+            else self.problem.origin[j][0] if scopes is not None else 0
         sub = parts(self.problem)[k]
         st = copy.deepcopy(sub.stack)
         sub.apply(part_x(self.problem, self._x, k), st)

@@ -1286,23 +1286,32 @@ class Stack:
             e['vary'] = True
         return n
 
-    def free_parameters(self):
+    def free_parameters(self, everything=False):
         """[(layer index, attr, value, min, max)] of every varied parameter:
         the layers' in order, then the ties (layer index ('tie', k), or
         ('tie', k, m) for the members of a 'total' tie, when any member is
-        ticked Fit), then the stack's own (layer index None)."""
+        ticked Fit), then the stack's own (layer index None), then the
+        mixture weights (('mix', k)).  everything: every parameter that
+        could be ticked Fit, as if all were (the Fit tab's list; bounds
+        default_fit where none was set)."""
         out = []
         tied = self.tied()
+
+        def entry(fit, attr):
+            e = fit.get(attr)
+            if everything:
+                return e or default_fit(attr)
+            return e if e and e['vary'] else None
         for i, l in enumerate(self.layers):
             for attr in FIT_PARAMS:
-                e = l.fit.get(attr)
-                if e and e['vary'] and self.fit_allowed(i, attr) and \
-                        (i, attr) not in tied:
+                e = entry(l.fit, attr)
+                if e and self.fit_allowed(i, attr) and (i, attr) not in tied:
                     out.append((i, attr, getattr(l, attr), e['min'], e['max']))
         for k, t in enumerate(self.ties):
             attr = t['members'][0][1]
-            if not any(self.layers[i].fit.get(a, {}).get('vary')
-                       and self.fit_allowed(i, a) for i, a in t['members']):
+            if not everything and not any(
+                    self.layers[i].fit.get(a, {}).get('vary')
+                    and self.fit_allowed(i, a) for i, a in t['members']):
                 continue
             if t['mode'] == 'total':
                 for m, (lo, hi) in enumerate(self.total_bounds(k)[1]):
@@ -1313,15 +1322,39 @@ class Stack:
                 out.append((('tie', k), attr, self.tie_value(k),
                             *self.tie_bounds(k)))
         for attr in STACK_FIT_PARAMS:
-            e = self.fit.get(attr)
-            if e and e['vary']:
+            e = entry(self.fit, attr)
+            if e:
                 out.append((None, attr, getattr(self, attr), e['min'],
                             e['max']))
         for k, m in enumerate(self.mixture):
-            if m['fit'].get('vary') and m['name'] in self._mix_stacks:
+            if (everything or m['fit'].get('vary')) and \
+                    m['name'] in self._mix_stacks:
                 out.append((('mix', k), 'weight', m['weight'],
                             m['fit']['min'], m['fit']['max']))
         return out
+
+    def is_varied(self, i, attr):
+        """Whether the free_parameters(everything=True) entry (i, attr) is
+        ticked Fit (a tie: any of its members)."""
+        if isinstance(i, tuple) and i[0] == 'tie':
+            return any(self.layers[j].fit.get(a, {}).get('vary')
+                       for j, a in self.ties[i[1]]['members'])
+        if isinstance(i, tuple):                       # ('mix', k)
+            return bool(self.mixture[i[1]]['fit'].get('vary'))
+        fit = self.fit if i is None else self.layers[i].fit
+        return bool(fit.get(attr, {}).get('vary'))
+
+    def set_varied(self, i, attr, on):
+        """Tick or untick Fit on the free_parameters(everything=True) entry
+        (i, attr): a tie ticks or unticks every member."""
+        if isinstance(i, tuple) and i[0] == 'tie':
+            for j, a in self.ties[i[1]]['members']:
+                self.layers[j].fit_entry(a)['vary'] = bool(on)
+        elif isinstance(i, tuple):
+            self.mixture[i[1]]['fit']['vary'] = bool(on)
+        else:
+            (self if i is None else self.layers[i]).fit_entry(attr)[
+                'vary'] = bool(on)
 
     def owner(self, i):
         """The object a free_parameters() entry with layer index i sets:

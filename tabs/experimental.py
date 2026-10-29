@@ -23,15 +23,20 @@ channel either has its own pair (set in the import dialog or with
 "Polarisation…" on its dataset) or follows the Simulation tab's
 Polarisation box.
 
-The "+ Simulation" button adds a live dataset holding the simulation tab's
-channels R++, R+-, R-+, R--, R+, R- (background included, once each) on its
-Q grid, with the Simulation tab's pairs unless it has its own, and the fixed
-norms of the dataset chosen in the Fit box.  With the 'licorne' resolution
-scheme a curve depends on the grid it is convolved on (model.stack
-RESOLUTION), so the live channels are then computed on that dataset's Q
-points, as the fit computes them (model_grid).  Starting a
-fit gives every live dataset the fitted channels' pairs, so what is drawn
-against the data is exactly what is fitted.  It is recomputed whenever the
+Every model of the Simulation tab's Model box has a live dataset, always
+there and listed last ('<model> (simulation)', named after it, not
+removable; unticked when new): the model's
+channels R++, R+-, R-+, R--, R+, R- (background included, once each) on the
+Simulation tab's Q grid, with the Simulation tab's pairs unless it has its
+own, and the fixed norms of the first dataset fitted with that model (else
+of the first dataset fitted).  With the 'licorne' resolution scheme a curve
+depends on the grid it is convolved on (model.stack RESOLUTION), so the
+live channels are then computed on that dataset's Q points, as the fit
+computes them (model_grid).  Starting a fit gives every live dataset the
+fitted channels' pairs (those of the first dataset fitted with its model),
+so what is drawn against the data is exactly what is fitted.  A measured
+dataset is linked to the model it is fitted with in the Fit tab (fit.panel
+MODELS; 'link', saved in the session).  It is recomputed whenever the
 simulation changes, drawn as lines without error bars, and can be frozen
 into a static copy from its context menu; the frozen copy is still drawn as
 lines and keeps the model it was computed from (Stack.to_dict, saved in the
@@ -808,6 +813,9 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         if simulation is not None:
             simulation.dq_sets = self.dq_sets
             simulation.reflectanceChanged.connect(self._update_live)
+            # a live dataset per model
+            simulation.modelsChanged.connect(self._models_changed)
+            simulation.modelRenamed.connect(self._model_renamed)
             # the live curves take that dataset's norms (and Licorne grid)
             self.fit_set.currentIndexChanged.connect(self._update_live)
             # the plotted Q range follows the Simulation tab's
@@ -838,18 +846,12 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         row = QtWidgets.QHBoxLayout()
         self.btn_import = QtWidgets.QPushButton('Import…')
         self.btn_new = QtWidgets.QPushButton('+ Dataset')
-        self.btn_sim = QtWidgets.QPushButton('+ Simulation')
-        self.btn_sim.setToolTip('Add a dataset that follows the reflectance '
-                                'of the Simulation tab')
-        self.btn_sim.setEnabled(self.simulation is not None)
         self.btn_remove = QtWidgets.QPushButton('− Remove')
-        for b in (self.btn_import, self.btn_new, self.btn_sim,
-                  self.btn_remove):
+        for b in (self.btn_import, self.btn_new, self.btn_remove):
             row.addWidget(b)
         bv.addLayout(row)
         self.btn_import.clicked.connect(self.import_data)
         self.btn_new.clicked.connect(lambda: self.new_set())
-        self.btn_sim.clicked.connect(self.add_simulation)
         self.btn_remove.clicked.connect(self.remove_selected)
 
         disp = QtWidgets.QGroupBox('Display')
@@ -937,6 +939,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
     # -- tree ---------------------------------------------------------------
     def refresh_tree(self, select=None):
         """Rebuild the tree from self.sets; select = (set, channel or None)."""
+        self._sync_live_sets()
         t = self.tree
         t.blockSignals(True)
         t.clear()
@@ -951,8 +954,12 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                      | QtCore.Qt.ItemFlag.ItemIsDropEnabled) \
                 & ~QtCore.Qt.ItemFlag.ItemIsDragEnabled
             if live:                          # its channels come from the model
-                flags &= ~QtCore.Qt.ItemFlag.ItemIsDropEnabled
-                top.setToolTip(0, 'Live: follows the Simulation tab')
+                flags &= ~(QtCore.Qt.ItemFlag.ItemIsDropEnabled
+                           | QtCore.Qt.ItemFlag.ItemIsEditable)
+                top.setToolTip(0, 'Live: follows the model %s'
+                               % s.get('link'))
+            elif s.get('link'):
+                top.setToolTip(0, 'Fitted with the model %s' % s['link'])
             top.setFlags(flags)
             top.setCheckState(0, QtCore.Qt.CheckState.Checked if s['visible']
                               else QtCore.Qt.CheckState.Unchecked)
@@ -1010,8 +1017,8 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
 
     def _update_buttons(self, *_):
         sel = self._selected()
-        self.btn_remove.setEnabled(sel is not None and not (
-            sel[1] is not None and self.sets[sel[0]].get('live')))
+        self.btn_remove.setEnabled(sel is not None and
+                                   not self.sets[sel[0]].get('live'))
 
     def _on_item_changed(self, item, _col):
         i, ch = item.data(0, ROLE)
@@ -1061,12 +1068,13 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         if ch is not None and not live:
             move = menu.addMenu('Move to')
             for j, s in enumerate(self.sets):
-                if j != i:
+                if j != i and not s.get('live'):
                     move.addAction(s['name'],
                                    lambda j=j: self.move_channel(i, ch, j))
             move.addAction('New dataset', lambda: self.move_channel(
                 i, ch, self.new_set(refresh=False)))
-        menu.addAction('Remove', self.remove_selected)
+        if not live:              # a model's dataset stays with its model
+            menu.addAction('Remove', self.remove_selected)
         menu.exec(self.tree.viewport().mapToGlobal(pos))
 
     def dq_sets(self):
@@ -1170,18 +1178,26 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self.refresh_tree((i, None))
 
     # -- data management ----------------------------------------------------
+    def _add_set(self, s):
+        """Add dataset s before the models' live datasets (which stay
+        last); return its index."""
+        i = next((k for k, t in enumerate(self.sets) if t.get('live')),
+                 len(self.sets))
+        self.sets.insert(i, s)
+        return i
+
     def new_set(self, name=None, refresh=True):
-        """Append an empty dataset, return its index."""
+        """Add an empty dataset, return its index."""
         names = {s['name'] for s in self.sets}
         if name is None:
             n = len(self.sets) + 1
             while 'Set %d' % n in names:
                 n += 1
             name = 'Set %d' % n
-        self.sets.append(dict(name=name, visible=True, channels={}))
+        i = self._add_set(dict(name=name, visible=True, channels={}))
         if refresh:
-            self.refresh_tree((len(self.sets) - 1, None))
-        return len(self.sets) - 1
+            self.refresh_tree((i, None))
+        return i
 
     def _set_index(self, name):
         """Index of the static (non-live) dataset called `name`."""
@@ -1197,32 +1213,67 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
             name, n = '%s %d' % (base, n), n + 1
         return name
 
-    def add_simulation(self):
-        """Add a live dataset mirroring the simulation tab's reflectance."""
+    @staticmethod
+    def _live_name(model):
+        return '%s (simulation)' % model
+
+    def _sync_live_sets(self):
+        """A live dataset per model of the Simulation tab, in the Model
+        box's order where new; one whose model is gone is removed.  A
+        session from before MODELS: its first live dataset becomes the
+        shown model's.  A link to a model that is gone goes too (back to
+        the shown model)."""
         sim = self.simulation
         if sim is None:
             return
-        if sim.last_R is None:
-            sim.recompute()
-        if sim.last_R is None:
-            QtWidgets.QMessageBox.warning(
-                self, 'Simulation', 'The simulation has no valid '
-                'reflectance yet:\n%s' % sim.status.text())
-            return
-        s = dict(name=self._unique_name('Simulation'), visible=True,
-                 live=True, line=True)
-        s['channels'] = self._live_channels(s)
-        self.sets.append(s)
-        self.refresh_tree((len(self.sets) - 1, None))
-        self.redraw()
+        names = sim.model_names()
+        for s in self.sets:
+            if not s.get('live') and s.get('link') not in names:
+                s.pop('link', None)
+        old = [s for s in self.sets if s.get('live') and not s.get('link')]
+        have = {s.get('link') for s in self.sets if s.get('live')}
+        if old and sim.shown_model() not in have:
+            old[0]['link'] = sim.shown_model()
+        self.sets = [s for s in self.sets if not s.get('live')
+                     or s.get('link') in names]
+        have = {s['link'] for s in self.sets if s.get('live')}
+        for m in names:
+            if m not in have:
+                # unticked: drawn once ticked
+                self.sets.append(dict(name='', visible=False, live=True,
+                                      line=True, link=m, channels={}))
+        for s in self.sets:
+            if s.get('live'):
+                s['name'] = self._live_name(s['link'])
+                if not s['channels'] and sim.last_R is not None:
+                    s['channels'] = self._live_channels(s)
+
+    def _models_changed(self):
+        """A model added, removed, renamed, shown or written into: the live
+        datasets follow."""
+        if self.simulation.last_R is not None:
+            self._update_live()           # the tree and the plot too
+        else:
+            self.refresh_tree(self._selected())
+            self.redraw()
+
+    def _model_renamed(self, old, new):
+        for s in self.sets:
+            if s.get('link') == old:
+                s['link'] = new
 
     def _live_channels(self, s):
-        """Channels of live dataset s: the Simulation tab's model with the
-        norms of the dataset chosen in the Fit box, on its Q points with
-        the 'licorne' resolution scheme (model_grid; the grid chosen for
-        the fit when its channels differ)."""
+        """Channels of live dataset s: its model with the norms of the
+        first dataset fitted with that model (else of the first one
+        fitted), on its Q points with the 'licorne' resolution scheme
+        (model_grid; the grid chosen for the fit when its channels differ).
+        A model the Simulation tab does not show is computed from its
+        stored dict, again only when that dict, the grid, the norms or the
+        pairs change."""
         sim = self.simulation
-        data = next(iter(self._fit_sets()), None)
+        sets = self._fit_sets()
+        data = next((t for t in sets if self._link(t) == s.get('link')),
+                    next(iter(sets), None))
         channels = data['channels'] if data else None
         grid = None
         ch = data and self._grid_choice.get(data['name'])
@@ -1231,21 +1282,41 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
             grid = grid[np.isfinite(grid)]
         norms = {c: d.get('norm', 1.0) for c, d in channels.items()} \
             if channels else None
-        return model_channels(sim.stack,
-                              model_grid(sim.stack, sim.last_Q, channels,
-                                         grid),
-                              self.live_vectors(s), norms)
+        model = s.get('link') or sim.shown_model()
+        vectors = self.live_vectors(s)
+        stored = sim.stored_model(model)
+        if stored is None:                    # the shown model
+            return model_channels(sim.stack,
+                                  model_grid(sim.stack, sim.last_Q, channels,
+                                             grid), vectors, norms)
+        key = (repr(sorted((norms or {}).items())), repr(vectors),
+               sim.last_Q.tobytes(), None if grid is None
+               else grid.tobytes(), data and data['name'])
+        cache = s.get('_cache')
+        if cache is not None and cache[0] is stored and cache[1] == key:
+            return cache[2]
+        try:
+            st = sim.model_stack(model)
+            st.build_sublayers()
+            out = model_channels(st, model_grid(st, sim.last_Q, channels,
+                                                grid), vectors, norms)
+        except Exception:                     # e.g. a model that cannot be
+            out = {}                          # computed: no curve
+        s['_cache'] = (stored, key, out)
+        return out
 
     def freeze_simulation(self, i):
         """Static copy of live dataset i, e.g. to compare two models."""
         s = self.sets[i]
-        self.sets.append(dict(
+        st = self.simulation.model_stack(s.get('link')) or \
+            self.simulation.stack
+        k = self._add_set(dict(
             name=self._unique_name(s['name'] + ' (frozen)'), visible=True,
-            line=True, model=copy.deepcopy(self.simulation.stack.to_dict()),
+            line=True, model=copy.deepcopy(st.to_dict()),
             channels={ch: dict(d, path='simulation (frozen)',
                                pol=self.channel_vectors(s, ch))
                       for ch, d in s['channels'].items()}))
-        self.refresh_tree((len(self.sets) - 1, None))
+        self.refresh_tree((k, None))
         self.redraw()
 
     def send_model(self, i):
@@ -1355,8 +1426,8 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         if sel is None:
             return
         i, ch = sel
-        if ch is not None and self.sets[i].get('live'):
-            return                       # the simulation would restore it
+        if self.sets[i].get('live'):
+            return                       # its model would restore it
         if ch is not None:
             del self.sets[i]['channels'][ch]
             self.refresh_tree((i, None))
@@ -1382,6 +1453,8 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         for s in self.sets:
             e = dict(name=s['name'], visible=s['visible'],
                      live=bool(s.get('live')), line=bool(s.get('line')))
+            if s.get('link'):                   # MODELS
+                e['link'] = s['link']
             for k in ('colour', 'channel_colours'):
                 if s.get(k):
                     e[k] = s[k]
@@ -1443,7 +1516,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self.sets = []
         for e in state.get('sets', []):
             s = dict(name=e['name'], visible=e['visible'], channels={})
-            for k in ('colour', 'channel_colours'):
+            for k in ('colour', 'channel_colours', 'link'):
                 if e.get(k):
                     s[k] = copy.deepcopy(e[k])
             if e.get('live'):

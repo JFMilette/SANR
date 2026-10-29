@@ -54,6 +54,12 @@ def tab(scheme='licorne', norm=1.0):
     return sim, exp
 
 
+def live_set(exp):
+    """The model's live dataset (always there), up to date."""
+    exp._update_live()
+    return next(s for s in exp.sets if s.get('live'))
+
+
 def test_de_window_draws_the_fitted_model(app):
     sim, exp = tab()
     s, vec, data, qmin, qmax, grid = exp._fit_inputs(exp.fit_report)
@@ -73,22 +79,20 @@ def test_de_window_draws_the_fitted_model(app):
 
 def test_live_curves_on_the_data_grid(app):
     sim, exp = tab()
-    exp.add_simulation()
-    live = exp.sets[-1]['channels']
-    assert all(np.array_equal(c['Q'], Q1) for c in live.values())
+    live = live_set(exp)['channels']
+    assert live and all(np.array_equal(c['Q'], Q1) for c in live.values())
     # the quadrature keeps the Simulation tab's grid
     sim, exp = tab('quadrature')
-    exp.add_simulation()
     assert all(np.array_equal(c['Q'], sim.last_Q)
-               for c in exp.sets[-1]['channels'].values())
+               for c in live_set(exp)['channels'].values())
 
 
 def test_live_curves_take_the_norms(app):
     sim, exp = tab('quadrature', norm=0.5)
-    exp.add_simulation()
-    live = exp.sets[-1]['channels']
+    s = live_set(exp)
+    live = s['channels']
     Q = sim.last_Q
-    pair = vectors_pair(*exp.channel_vectors(exp.sets[-1], '+'))
+    pair = vectors_pair(*exp.channel_vectors(s, '+'))
     st = sim.stack
     bare = st.reflectivities(Q, [pair])[:, 0] - st.background
     assert np.allclose(live['+']['R'], 0.5 * bare + st.background,
@@ -97,23 +101,22 @@ def test_live_curves_take_the_norms(app):
 
 def test_frozen_copy_sends_its_model_back(app, monkeypatch):
     sim, exp = tab()
-    exp.add_simulation()
     t0 = sim.stack.layers[2].thickness
-    exp.freeze_simulation(len(exp.sets) - 1)
-    frozen = exp.sets[-1]
+    exp.freeze_simulation(exp.sets.index(live_set(exp)))
+    frozen = next(s for s in exp.sets if s.get('model'))
     assert frozen['model']['layers'][2]['thickness'] == t0
     # kept through a session
     exp.restore_state(exp.session_state('.'), '.')
-    frozen = exp.sets[-1]
+    frozen = next(s for s in exp.sets if s.get('model'))
     assert frozen['model']['layers'][2]['thickness'] == t0
     sim.stack.layers[2].thickness = t0 + 25.0
     sim.refresh_list(select=2)
     sim.recompute()
     monkeypatch.setattr(QtWidgets.QMessageBox, 'question', lambda *a: (
         QtWidgets.QMessageBox.StandardButton.Yes))
-    exp.send_model(len(exp.sets) - 1)
+    exp.send_model(exp.sets.index(frozen))
     assert sim.stack.layers[2].thickness == t0
     # the live copy follows the Simulation tab again
-    live = next(s for s in exp.sets if s.get('live'))
+    live = live_set(exp)
     assert np.allclose(live['channels']['+']['R'],
                        frozen['channels']['+']['R'])

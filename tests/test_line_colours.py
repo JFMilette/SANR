@@ -16,7 +16,7 @@ sys.path.insert(0, str(HERE.parent))
 
 QtWidgets = pytest.importorskip('PyQt6.QtWidgets')
 import line_colours                                             # noqa: E402
-from test_live_model import tab                                 # noqa: E402
+from test_live_model import live_set, tab                       # noqa: E402
 from fit.de.de_window import DEWindow                           # noqa: E402
 from fit.problem import FitProblem                              # noqa: E402
 from tabs.experimental import model_grid                        # noqa: E402
@@ -54,9 +54,16 @@ def test_set_colours_keeps_valid_entries(defaults):
     assert 'x' not in line_colours.colours()
 
 
+def show_live(exp):
+    """Tick the model's live dataset (unticked when made)."""
+    live_set(exp)['visible'] = True
+    exp.refresh_tree()
+    exp.redraw()
+
+
 def test_plots_follow_a_change(app, defaults):
     sim, exp = tab()
-    exp.add_simulation()
+    show_live(exp)
     line_colours.set_colours({'++': NEW, '+': NEW})
     assert sim.refl_curves[0].opts['pen'].color().name() == NEW
     assert sim.hp_curves[0].opts['pen'].color().name() == NEW
@@ -81,7 +88,7 @@ def test_plots_follow_a_change(app, defaults):
 
 def test_dataset_colours(app, defaults, monkeypatch):
     sim, exp = tab()
-    exp.add_simulation()
+    show_live(exp)
     QtGui = pytest.importorskip('PyQt6.QtGui')
     picked = iter(['#aa0000', '#00bb00'])
     monkeypatch.setattr(QtWidgets.QColorDialog, 'getColor',

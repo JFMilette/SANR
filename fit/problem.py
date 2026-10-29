@@ -153,6 +153,10 @@ class FitProblem:
         # what it is built from, for a session to build it again (fit.saved)
         self.inputs = dict(data=[dict(e) for e in data], qmin=qmin,
                            qmax=qmax, grid=grid, error_floor=error_floor)
+        # the Simulation tab's model the stack is taken from and the dataset
+        # fitted, whose name the model a result is sent to has (fit.panel
+        # MODELS); None: unknown (the model shown)
+        self.model_name = self.dataset_name = None
         # the caller's stack may be edited while the fit runs
         self.stack = copy.deepcopy(stack)
         self.cost = cost

@@ -1171,7 +1171,9 @@ class LayerEditor(QtWidgets.QGroupBox):
         g.setVerticalSpacing(2)
         g.addWidget(QtWidgets.QLabel('Name'), 0, 0)
         g.addWidget(self.name, 0, 1, 1, 4)
-        for c, h in enumerate(['', 'Value', 'Min', 'Max', 'Fit']):
+        # what is fitted is ticked in the Fit tab (fit.datasets_panel); the
+        # hidden Fit boxes only mirror Layer.fit's 'vary' for _store
+        for c, h in enumerate(['', 'Value', 'Min', 'Max', '']):
             lab = QtWidgets.QLabel('<b>%s</b>' % h)
             lab.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             g.addWidget(lab, 1, c)
@@ -1186,6 +1188,7 @@ class LayerEditor(QtWidgets.QGroupBox):
             for c, w in enumerate((lab, val, bmin, bmax)):
                 g.addWidget(w, r, c)
             g.addWidget(cb, r, 4, alignment=QtCore.Qt.AlignmentFlag.AlignCenter)
+            cb.hide()
             g.addWidget(self.sliders[attr], r + 1, 1, 1, 3)
             g.addWidget(self.priors[attr], r + 1, 4)
             if attr == 'MSLD_sigma':
@@ -1489,6 +1492,10 @@ class SimulationTab(QtWidgets.QWidget):
 
     # emitted after every successful recompute; read last_Q / last_R
     reflectanceChanged = QtCore.pyqtSignal()
+    # the Model box changed (a model added, removed, renamed, shown or
+    # written into); a rename also gives (old name, new name)
+    modelsChanged = QtCore.pyqtSignal()
+    modelRenamed = QtCore.pyqtSignal(str, str)
 
     def __init__(self, stack=None, parent=None):
         super().__init__(parent)
@@ -1961,6 +1968,7 @@ class SimulationTab(QtWidgets.QWidget):
             b.clicked.connect(lambda _, a=attr: self.tick_all(a))
             row.addWidget(b)
         for b in [self.btn_untick] + list(self.btn_tick.values()):
+            b.hide()                    # the Fit tab has its own
             b.setMinimumWidth(0)
             b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
                             QtWidgets.QSizePolicy.Policy.Fixed)
@@ -2032,6 +2040,7 @@ class SimulationTab(QtWidgets.QWidget):
         row.addWidget(QtWidgets.QLabel('–'))
         row.addWidget(bmax, 2)
         row.addWidget(cb)
+        cb.hide()                       # ticked in the Fit tab
         row.addWidget(self.stack_priors[attr])
         return row
 
@@ -2091,6 +2100,7 @@ class SimulationTab(QtWidgets.QWidget):
         t.setHorizontalHeaderLabels(['Use', 'Model', 'Weight', 'Min', 'Max',
                                      'Fit'])
         t.verticalHeader().hide()
+        t.setColumnHidden(5, True)      # a weight is ticked in the Fit tab
         t.horizontalHeader().setSectionResizeMode(
             1, QtWidgets.QHeaderView.ResizeMode.Stretch)
         t.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
@@ -2102,11 +2112,11 @@ class SimulationTab(QtWidgets.QWidget):
         box = self.shared_box = QtWidgets.QGroupBox('Shared parameters')
         lv = QtWidgets.QVBoxLayout(box)
         note = QtWidgets.QLabel(
-            'Every parameter ticked Fit in this model is shared: the mixed '
-            'models take its value, layers matched by name (a model without '
-            'that layer skips it).  Show the model with the most layers.  '
-            'Ticked here: the layer\'s thickness is fitted, one value for '
-            'all models.')
+            'Every parameter of this model ticked Fit (in the Fit tab) is '
+            'shared: the mixed models take its value, layers matched by '
+            'name (a model without that layer skips it).  Show the model '
+            'with the most layers.  A layer\'s thickness ticked there is '
+            'one value for all models.')
         note.setWordWrap(True)
         note.setProperty('role', 'muted')
         lv.addWidget(note)
@@ -2114,6 +2124,7 @@ class SimulationTab(QtWidgets.QWidget):
         QtWidgets.QVBoxLayout(self.mix_layers).setContentsMargins(0, 0, 0, 0)
         self._mix_layer_key = None
         lv.addWidget(self.mix_layers)
+        self.mix_layers.hide()          # ticked in the Fit tab
         v.addWidget(box)
         v.addStretch(1)
 
@@ -2487,10 +2498,8 @@ class SimulationTab(QtWidgets.QWidget):
         self.refresh_list(select=self.list.currentRow())
         self.schedule()
 
-    def set_bounds(self, params, lo, hi):
-        """Write fit bounds [lo, hi] of Stack.free_parameters() entries
-        `params`, clipped to what the editor's boxes can hold, and refresh
-        the editor."""
+    def _bound_limits(self):
+        """attr -> (lo, hi): the bounds the editor's boxes can hold."""
         limits = {attr: (a / scale, b / scale)
                   for attr, _, a, b, *_, scale in EDITOR_PARAMS}
         limits.update(scale=(self.scale.minimum(), self.scale.maximum()),
@@ -2501,11 +2510,21 @@ class SimulationTab(QtWidgets.QWidget):
                       thickness_spread=(self.spread.minimum() / 100,
                                         self.spread.maximum() / 100),
                       weight=(0.0, 1.0))
+        return limits
+
+    def _write_bounds(self, stack, params, lo, hi):
+        limits = self._bound_limits()
         for (i, attr, *_), a, b in zip(params, lo, hi):
             lim_lo, lim_hi = sorted(limits[attr])
-            e = self.stack.owner(i).fit_entry(attr)
+            e = stack.owner(i).fit_entry(attr)
             e['min'] = float(min(max(a, lim_lo), lim_hi))
             e['max'] = float(min(max(b, lim_lo), lim_hi))
+
+    def set_bounds(self, params, lo, hi):
+        """Write fit bounds [lo, hi] of Stack.free_parameters() entries
+        `params`, clipped to what the editor's boxes can hold, and refresh
+        the editor."""
+        self._write_bounds(self.stack, params, lo, hi)
         self._load_stack_fit()
         self._refresh_mixture_table()
         self.refresh_list(select=self.list.currentRow())
@@ -3095,7 +3114,8 @@ class SimulationTab(QtWidgets.QWidget):
 
     # -- models -------------------------------------------------------------
     def _refresh_models(self):
-        """The Model box from self._models, its current item the shown one."""
+        """The Model box from self._models, its current item the shown one;
+        modelsChanged tells the Experimental tab (a dataset per model)."""
         b = self.model_box
         b.blockSignals(True)
         b.clear()
@@ -3104,9 +3124,79 @@ class SimulationTab(QtWidgets.QWidget):
         b.blockSignals(False)
         self.model_btns['delete'].setEnabled(
             len(self._models) > 1 and not self._locked)
+        self.modelsChanged.emit()
 
     def model_names(self):
         return [m['name'] for m in self._models]
+
+    def shown_model(self):
+        """The name of the model the tab shows."""
+        return self._models[self._model_index]['name']
+
+    def stored_model(self, name):
+        """The stored dict (Stack.to_dict) of model `name`, None for the
+        shown one (its stack is the tab's) or an unknown name."""
+        return next((m['model'] for m in self._models if m['name'] == name),
+                    None)
+
+    def model_stack(self, name):
+        """The Stack of model `name` as a fit or a curve takes it: the
+        tab's own for the shown model, else a new one from its stored dict
+        with the models of its mixture linked (Stack._mix_stacks); None for
+        an unknown name."""
+        if name == self.shown_model():
+            return self.stack
+        d = self.stored_model(name)
+        if d is None:
+            return None
+        st = Stack.from_dict(copy.deepcopy(d))
+        dicts = {m['name']: m['model'] for m in self._models
+                 if m['model'] is not None}
+        dicts[self.shown_model()] = self.stack.to_dict()
+        st._mix_stacks = {e['name']: Stack.from_dict(dicts[e['name']])
+                          for e in st.mixture if e['name'] in dicts}
+        return st
+
+    def _edit_stored(self, name, edit):
+        """edit(stack) on a Stack of stored model `name`, written back as a
+        new dict (so that whatever caches the old one sees the change)."""
+        m = next(m for m in self._models if m['name'] == name)
+        st = Stack.from_dict(copy.deepcopy(m['model']))
+        edit(st)
+        m['model'] = st.to_dict()
+        self.modelsChanged.emit()
+
+    def set_model_parameters(self, name, params, x):
+        """set_parameters into model `name`, shown or stored."""
+        if name == self.shown_model():
+            self.set_parameters(params, x)
+            return
+
+        def edit(st):
+            for (i, attr, *_), v in zip(params, x):
+                setattr(st.owner(i), attr, float(v))
+        self._edit_stored(name, edit)
+
+    def set_model_varied(self, name, edit):
+        """edit(stack) changes the Fit ticks of model `name` (e.g.
+        Stack.set_varied, tick_all, untick_all), shown or stored; the
+        shown one's editor and boxes follow."""
+        if name != self.shown_model():
+            self._edit_stored(name, edit)
+            return
+        edit(self.stack)
+        self._load_stack_fit()
+        self._refresh_mixture_table()
+        self.refresh_list(select=self.list.currentRow())
+        self.schedule()
+
+    def set_model_bounds(self, name, params, lo, hi):
+        """set_bounds into model `name`, shown or stored."""
+        if name == self.shown_model():
+            self.set_bounds(params, lo, hi)
+            return
+        self._edit_stored(name, lambda st: self._write_bounds(
+            st, params, lo, hi))
 
     def _unique_name(self, base):
         names = set(self.model_names())
@@ -3188,6 +3278,7 @@ class SimulationTab(QtWidgets.QWidget):
             return
         old, m['name'] = m['name'], self._unique_name(name)
         self._rename_in_mixtures(old, m['name'])
+        self.modelRenamed.emit(old, m['name'])
         self._refresh_models()
         self._refresh_mixture_table()
 
@@ -3200,10 +3291,19 @@ class SimulationTab(QtWidgets.QWidget):
                 self, 'Delete model', 'Delete the model %s?' % name) != \
                 QtWidgets.QMessageBox.StandardButton.Yes:
             return
-        gone = self._model_index
-        self.switch_model(gone - 1 if gone > 0 else 1)
-        if self._model_index == gone:          # could not switch
+        self.remove_model(name)
+
+    def remove_model(self, name):
+        """Delete model `name` without asking (the shown one: its neighbour
+        is shown first); never the last one."""
+        names = self.model_names()
+        if name not in names or len(names) < 2:
             return
+        gone = names.index(name)
+        if gone == self._model_index:
+            self.switch_model(gone - 1 if gone > 0 else 1)
+            if self._model_index == gone:      # could not switch
+                return
         del self._models[gone]
         if self._model_index > gone:
             self._model_index -= 1
@@ -3211,6 +3311,21 @@ class SimulationTab(QtWidgets.QWidget):
         self._refresh_models()
         self._refresh_mixture_table()
         self.schedule()
+
+    def add_model(self, name, d):
+        """Append model dict d (Stack.to_dict) as `name`, not shown."""
+        self._models.append(dict(name=self._unique_name(name), model=d,
+                                 selected_layer=1))
+        self._refresh_models()
+        self._refresh_mixture_table()
+        return self._models[-1]['name']
+
+    def model_dict(self, name):
+        """A copy of model `name` as a dict (Stack.to_dict), the shown one
+        with its widgets' values."""
+        if name == self.shown_model():
+            return self._shown_model()[0]
+        return copy.deepcopy(self.stored_model(name))
 
     # -- mixture (model.stack MIXTURE) -------------------------------------
     def _refresh_mixture_table(self):

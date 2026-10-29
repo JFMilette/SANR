@@ -4,21 +4,24 @@ or temperatures) with one model: a JointProblem has the interface of
 fit.problem.FitProblem over one FitProblem per dataset, so that DE
 (fit.de), multistart (fit.multistart) and DREAM (fit.dream) take either.
 
-PARAMETERS -- every dataset sees the stack's varied parameters
-(Stack.free_parameters(), named as fit.problem.parameter_names).  In each
-dataset each one is
+PARAMETERS -- each dataset is fitted with its own stack: the model linked
+to it (fit.panel MODELS), so the datasets may vary different parameters
+(Stack.free_parameters(), named as fit.problem.parameter_names).  The
+parameters are matched by name across the datasets; in each dataset that
+has it, each one is
   'shared'  fitted, one value for every dataset sharing it (the default)
   'own'     fitted, a value of this dataset alone
-  'fixed'   not fitted in this dataset: a value of its own, `values`
-            {dataset name: {parameter name: value}}, else its value when
-            the fit started
+  'fixed'   not fitted in this dataset: it keeps its value in that
+            dataset's stack (its model's)
 `modes` {dataset name: {parameter name: mode}} gives those that are not
 'shared'; `fixed` holds the values a 'fixed' parameter takes, one row per
-dataset (K, n).  The joint parameters are, for each stack parameter in turn, the
-shared one (if any dataset shares it), then one per dataset where it is
-'own', named 'name [dataset]'; each has the parameter's bounds and prior and
-starts at its current value.  part_x(x, k) gives the stack's parameter
-values that dataset k sees.
+dataset of its own parameters.  The joint parameters are, for each name in
+the order the datasets first give it, the shared one (if any dataset shares
+it), then one per dataset where it is 'own', named 'name [dataset]'; each
+takes its bounds, prior and start from one dataset it stands for
+(`origin`), i.e. from that dataset's model: a shared one from the dataset
+`sources` names for it, else the first sharing it.  part_x(x, k) gives the values
+of dataset k's own parameters.
 
 COST -- the residuals of every dataset one after the other: the mean over
 all their points (every point weighs the same, whichever dataset it is
@@ -42,14 +45,16 @@ class JointProblem:
     """Cost of one stack against several datasets (see the module
     docstring)."""
 
-    def __init__(self, parts, modes=None, fixed=None, values=None):
-        """parts: [(dataset name, FitProblem)], built from the same stack
-        with the same cost; fixed: the stack parameters' values for 'fixed',
-        (n,) for every dataset or (K, n) one row per dataset (default: their
-        values in the FitProblems, i.e. at the start); values {dataset:
-        {parameter name: value}} replace them where that parameter is
-        'fixed' in that dataset (a value given for another mode is
-        ignored)."""
+    def __init__(self, parts, modes=None, fixed=None, sources=None):
+        """parts: [(dataset name, FitProblem)] with the same cost and
+        target, each built from its dataset's own stack (the model linked to
+        it: PARAMETERS); fixed: the values a dataset's parameters keep where
+        'fixed', one row per dataset of its own parameters (or one row for
+        all, when they have the same parameters); default: their values in
+        that dataset's FitProblem, i.e. its model's; sources: {parameter
+        name: dataset} a shared parameter takes its bounds, start and prior
+        from (default, or when that dataset does not share it: the first
+        one sharing it)."""
         if not parts:
             raise ValueError('no dataset to fit')
         self.part_names = [n for n, _ in parts]
@@ -58,10 +63,9 @@ class JointProblem:
         self.parts = [p for _, p in parts]
         first = self.parts[0]
         for p in self.parts[1:]:
-            if p.names != first.names or p.cost != first.cost or \
-                    p.target != first.target:
+            if p.cost != first.cost or p.target != first.target:
                 raise ValueError('the datasets are not fitted with the same '
-                                 'parameters, cost and target')
+                                 'cost and target')
         self.stack, self.cost = first.stack, first.cost
         self.target = first.target
         self.error_floor, self.grid = first.error_floor, None
@@ -74,39 +78,51 @@ class JointProblem:
                                     ', '.join(MODES)))
         self.modes = {n: {a: v for a, v in (modes.get(n) or {}).items()
                           if v != 'shared'} for n in self.part_names}
-        base = first.params
-        f = np.array([p[2] for p in base], dtype=float) \
-            if fixed is None else np.asarray(fixed, dtype=float)
-        self.fixed = np.array(np.broadcast_to(f, (len(self.parts), len(base))))
-        for k, n in enumerate(self.part_names):
-            for name, v in ((values or {}).get(n) or {}).items():
-                if name not in first.names:
-                    raise ValueError('a value for an unknown parameter %r'
-                                     % name)
-                if self.modes[n].get(name) == 'fixed':
-                    self.fixed[k, first.names.index(name)] = float(v)
+        self.sources = {a: n for a, n in (sources or {}).items()
+                        if n in self.part_names}
+        if fixed is None:
+            fixed = [[q[2] for q in p.params] for p in self.parts]
+        elif np.ndim(fixed) == 1 and len(fixed) and np.ndim(fixed[0]) == 0:
+            fixed = [fixed] * len(self.parts)       # one row for all
+        self.fixed = [np.array(f, dtype=float) for f in fixed]
+        if [len(f) for f in self.fixed] != [len(p.params)
+                                            for p in self.parts]:
+            raise ValueError('the fixed values do not match the datasets\' '
+                             'parameters')
 
-        # the joint parameters; index[k][i]: joint index of the stack's
-        # parameter i in dataset k, None where it is fixed
+        # every dataset's parameters, by name, in the order they first
+        # appear; index[k][i]: joint index of parameter i of dataset k,
+        # None where it is fixed; origin[j]: (dataset, its parameter) the
+        # joint parameter j takes its bounds, start and prior from
+        names = []
+        for p in self.parts:
+            names += [n for n in p.names if n not in names]
         self.params, self.names, self.scopes, self.priors = [], [], [], []
-        self.index = [[None] * len(base) for _ in self.parts]
-        for i, (p, name, prior) in enumerate(zip(base, first.names,
-                                                 first.priors)):
-            m = [self.modes[s].get(name, 'shared') for s in self.part_names]
-            groups = [(name, None, [k for k, v in enumerate(m)
-                                    if v == 'shared'])]
-            groups += [('%s [%s]' % (name, s), s, [k])
-                       for k, (v, s) in enumerate(zip(m, self.part_names))
-                       if v == 'own']
+        self.origin = []
+        self.index = [[None] * len(p.params) for p in self.parts]
+        for name in names:
+            has = [k for k, p in enumerate(self.parts) if name in p.names]
+            m = {k: self.modes[self.part_names[k]].get(name, 'shared')
+                 for k in has}
+            groups = [(name, None, [k for k in has if m[k] == 'shared'])]
+            groups += [('%s [%s]' % (name, self.part_names[k]),
+                        self.part_names[k], [k])
+                       for k in has if m[k] == 'own']
             for label, scope, ks in groups:
                 if not ks:
                     continue
+                src = self.sources.get(name) if scope is None else None
+                k0 = next((k for k in ks if self.part_names[k] == src),
+                          ks[0])
+                i0 = self.parts[k0].names.index(name)
                 for k in ks:
-                    self.index[k][i] = len(self.params)
-                self.params.append(p)
+                    self.index[k][self.parts[k].names.index(name)] = \
+                        len(self.params)
+                self.params.append(self.parts[k0].params[i0])
                 self.names.append(label)
                 self.scopes.append(scope)      # None: shared
-                self.priors.append(prior)
+                self.priors.append(self.parts[k0].priors[i0])
+                self.origin.append((k0, i0))
         if not self.params:
             raise ValueError('no parameter is fitted in any dataset')
         self.lo = np.array([p[3] for p in self.params], dtype=float)
@@ -122,7 +138,9 @@ class JointProblem:
                   if getattr(p, 'spread_nodes', None)]
         if counts:
             for p in self.parts:
-                p.stack.thickness_spread_nodes = p.spread_nodes = max(counts)
+                if getattr(p, 'spread_nodes', None):
+                    p.stack.thickness_spread_nodes = p.spread_nodes = \
+                        max(counts)
         self.channels, self.pairs, self.norms = [], [], []
         self.raw_sigma, self.channel_part = [], []
         Qs, off = [], 0
