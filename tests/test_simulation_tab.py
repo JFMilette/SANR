@@ -656,3 +656,49 @@ def test_right_axis_angles_or_roughness(app):
     r.set_mode('angles')
     assert sim.prof_plot.getAxis('right').labelText == 'MSLD φ, θ (deg)'
     assert not any(h.isVisible() for h in r.heads)
+
+
+def test_selected_band_repaints(app):
+    """Selecting another layer repaints the bands it re-tints at once: the
+    screen matches a full repaint (setBrush alone left the old colours up,
+    and the cursor then repainted them in strips)."""
+    from types import SimpleNamespace
+
+    import numpy as np
+    from PyQt6 import QtCore, QtGui
+    from tabs.simulation import LayerLabels, plot_widget
+
+    w, p = plot_widget('z', 'SLD')
+    w.resize(600, 400)
+    sel = [1]
+    labels = LayerLabels(p, lambda: sel[0])
+    layers = [SimpleNamespace(name=n, thickness=t) for n, t in
+              [('vacuum', 0), ('A', 20), ('B', 40), ('C', 30), ('sub', 0)]]
+    labels.set_layers(layers, [0, 20, 60, 90], -20, 110)
+    p.setXRange(-20, 110, padding=0)
+    p.setYRange(0, 5, padding=0)
+    w.show()
+
+    def settle():
+        for _ in range(3):
+            app.processEvents()
+            QtCore.QThread.msleep(10)
+
+    def screen():
+        img = app.primaryScreen().grabWindow(w.winId()).toImage()
+        return img.convertToFormat(QtGui.QImage.Format.Format_RGB32)
+
+    settle()
+    try:
+        for new in (3, 2):
+            sel[0] = new
+            labels.style()
+            settle()
+            shown = screen()
+            w.viewport().update()
+            settle()
+            assert np.array_equal(shown.constBits().asstring(shown.sizeInBytes()),
+                                  screen().constBits().asstring(
+                                      shown.sizeInBytes()))
+    finally:
+        w.close()

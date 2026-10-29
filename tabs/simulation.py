@@ -687,6 +687,9 @@ class LayerLabels:
                                style.BAND if j % 2 else '#00000000')
             band.setBrush(brush)
             band.setHoverBrush(brush)
+            # setBrush does not repaint: without this the old colour stays
+            # on screen and only the strips the cursor crosses get the new
+            band.update()
             font = t.textItem.font()
             font.setBold(j == sel)
             t.setFont(font)
