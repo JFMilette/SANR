@@ -5,8 +5,9 @@ Run with   python main.py
 
 A session file is the model JSON (Stack.to_dict) with the Simulation tab's
 settings under 'simulation' and the Experimental tab's under 'experimental'
-(datasets by file path, display and fit settings).  Opening a plain model
-file only replaces the model.
+(datasets by file path, display and fit settings), and the ended fit and
+DREAM tabs under 'fit_tabs' (fit.panel SESSION), reopened after the tabs
+already open.  Opening a plain model file only replaces the model.
 
 Settings -> Dark mode switches between the dark and light themes (style.py);
 the choice is remembered for the next launch.  Settings -> Line colours (or
@@ -151,10 +152,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 self, 'Open session', 'Could not load %s:\n%s' % (path, exc))
             return
         self.setWindowTitle('SANR — %s' % os.path.basename(path))
+        lost = self.experimental.restore_fit_tabs(d.get('fit_tabs', []))
         if missing:
             QtWidgets.QMessageBox.warning(
                 self, 'Open session', 'These channels could not be read '
                 'again and were left out:\n\n' + '\n'.join(missing))
+        if lost:
+            QtWidgets.QMessageBox.warning(
+                self, 'Open session', 'These fit tabs could not be opened '
+                'again:\n\n' + '\n'.join(lost))
 
     def _restore(self, d, base):
         """Load session dict d (files relative to folder `base`); returns the
@@ -290,6 +296,7 @@ class MainWindow(QtWidgets.QMainWindow):
             d = self.simulation.session_state()
             d['experimental'] = self.experimental.session_state(
                 os.path.dirname(os.path.abspath(path)))
+            d['fit_tabs'], running = self.experimental.fit_tabs_state()
             text = json.dumps(d, indent=2, default=_plain)
             with open(path, 'w') as f:
                 f.write(text)
@@ -298,6 +305,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self, 'Save session', 'Could not save %s:\n%s' % (path, exc))
             return
         self.setWindowTitle('SANR — %s' % os.path.basename(path))
+        if running:
+            QtWidgets.QMessageBox.information(
+                self, 'Save session', 'Saved without these tabs, whose fit '
+                'or run is still going on:\n\n' + '\n'.join(running))
 
 
 def settings():

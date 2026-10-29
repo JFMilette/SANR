@@ -239,12 +239,12 @@ def test_load_run_rebuilds_the_problem(tmp_path):
     assert problem.fit.pairs[1][1] is None
     x = res.best()[0]
     assert problem(x) == pp(x)
-    # the data no longer match their hash
+    # the data no longer match their hash (or the stored fit problem)
     with np.load(f) as z:
         arrays = dict(z)
     arrays['ch0_R'] = arrays['ch0_R'] * 1.01
     np.savez(tmp_path / 'bad.npz', **arrays)
-    with pytest.raises(ValueError, match='hash'):
+    with pytest.raises(ValueError, match='do not match'):
         load_run(tmp_path / 'bad.npz')
 
 

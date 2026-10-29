@@ -48,6 +48,7 @@ each chain's best kept state (chain_best), drawn over the bands.
 
 import copy
 import hashlib
+import io
 import json
 import math
 import os
@@ -61,6 +62,7 @@ from fit.priors import tension
 from fit.dream.dream import DreamResult, dream, ess, make_gaussian_loglike
 from fit.joint import JointProblem, part_x, parts
 from fit.problem import FitProblem, parameter_names  # noqa: F401 (API)
+from fit.saved import problem_from_state, problem_state
 from fit.workers import Wrapper, start as start_pool, stop as stop_pool
 from model.stack import Stack
 
@@ -387,7 +389,10 @@ def save_result(path, result, problem, sources=(), datasets=()):
     load_run can rebuild the PosteriorProblem (not its `priors`, which are
     functions).  `datasets`: the name of the dataset fitted (a joint fit
     stores its own, with its modes, fixed values and each dataset's Q grid,
-    and each channel's dataset)."""
+    and each channel's dataset).  The fit problem itself is stored too
+    (fit.saved.problem_state: dQ and a mixture's models included), which
+    load_run builds again when present.  path may be a writable file
+    object (a session keeps the bytes, fit.panel)."""
     fit = problem.fit
     st = fit.stack
     meta = dict(names=list(problem.names), bounds=problem.bounds,
@@ -403,7 +408,7 @@ def save_result(path, result, problem, sources=(), datasets=()):
                 channels=[dict(name=name, P0=P0, P=P, norm=norm)
                           for (name, *_), (P0, P), norm
                           in zip(fit.channels, fit.pairs, fit.norms)],
-                datasets=list(datasets))
+                datasets=list(datasets), problem=problem_state(fit))
     if isinstance(fit, JointProblem):
         meta.update(datasets=fit.part_names,
                     joint=dict(modes=fit.modes, fixed=fit.fixed,
@@ -442,9 +447,16 @@ def _plain(obj):
     raise TypeError('%s is not JSON serialisable' % type(obj).__name__)
 
 
+def _open(path):
+    """np.load of a file name or of the bytes save_result wrote."""
+    return np.load(io.BytesIO(path) if isinstance(path, (bytes, bytearray))
+                   else path)
+
+
 def load_result(path):
-    """(DreamResult, meta dict) written by save_result."""
-    with np.load(path) as f:
+    """(DreamResult, meta dict) written by save_result (path: a file name
+    or its bytes)."""
+    with _open(path) as f:
         meta = json.loads(str(f['meta']))
         res = DreamResult(
             chains=f['chains'], logp=f['logp'],
@@ -466,13 +478,16 @@ def load_result(path):
 def load_run(path):
     """(DreamResult, PosteriorProblem, meta) of a file written by
     save_result: the problem is rebuilt from the stored stack and data, and
-    checked against the stored data hash.  Without priors."""
+    checked against the stored data hash (path: a file name or its bytes).
+    A file with its fit problem (fit.saved) gets that problem back; an
+    older one, one rebuilt from the stored stack and points, without their
+    dQ."""
     res, meta = load_result(path)
     if 'channels' not in meta:
         raise ValueError('this file was saved without its data (an earlier '
                          'version): only fit.dream.dream_fit.load_result can read '
                          'its chains')
-    with np.load(path) as f:
+    with _open(path) as f:
         data = [dict(Q=f['ch%d_Q' % k], R=f['ch%d_R' % k],
                      dR=f['ch%d_dR' % k], name=c['name'],
                      P0=np.asarray(c['P0'], dtype=float),
@@ -486,7 +501,10 @@ def load_run(path):
                    floor_free=meta.get('floor_free', False))
     floor = meta.get('error_floor', 0.0)
     joint = meta.get('joint')
-    if joint is None:
+    if 'problem' in meta:
+        problem = PosteriorProblem(problem_from_state(meta['problem']),
+                                   **options)
+    elif joint is None:
         problem = posterior_problem(
             stack, data, grid=None if grid is None else np.array(grid),
             error_floor=floor, **options)
@@ -504,6 +522,15 @@ def load_run(path):
                          'chains have %s' % (problem.names, meta['names']))
     if data_hash(problem) != meta['data_hash']:
         raise ValueError('the stored data do not match their hash')
+    # the stored problem is built from its own copy of the points
+    fit = problem.fit
+    if 'problem' in meta and not (len(data) == len(fit.channels) and all(
+            np.array_equal(fit.Q[idx], d['Q']) and np.array_equal(R, d['R'])
+            and np.array_equal(dR, d['dR'])
+            for (_, idx, R, _), dR, d in zip(fit.channels, fit.raw_sigma,
+                                             data))):
+        raise ValueError('the stored data do not match the stored fit '
+                         'problem')
     return res, problem, meta
 
 

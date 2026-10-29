@@ -150,6 +150,9 @@ class FitProblem:
         if target not in TARGETS:
             raise ValueError('unknown target %r' % target)
         self.target = target
+        # what it is built from, for a session to build it again (fit.saved)
+        self.inputs = dict(data=[dict(e) for e in data], qmin=qmin,
+                           qmax=qmax, grid=grid, error_floor=error_floor)
         # the caller's stack may be edited while the fit runs
         self.stack = copy.deepcopy(stack)
         self.cost = cost

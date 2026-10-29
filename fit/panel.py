@@ -17,6 +17,12 @@ from the chosen dataset and the Simulation tab, running it in a background
 thread, following it in its window (a closable tab of the main window,
 page_tabs) and sending results back to the Simulation tab.
 
+SESSION -- a saved session keeps the ended fit and DREAM tabs
+(fit_tabs_state: each fit's problem, datasets and whole history, each
+DREAM run as the bytes "Save chains…" writes, base64); opening it adds them
+after the tabs already open (restore_fit_tabs), ended: they can be looked
+at and sent to the Simulation tab, not continued.
+
 JOINT FIT -- the Datasets to fit panel beside the fit box (the Fit tab's
 right side, fit.datasets_panel, `datasets_panel`) picks the datasets
 fitted, as it is ticked: one alone, or several fitted together with one
@@ -40,6 +46,7 @@ While a fit or a sampling runs (busy()), the Simulation tab is locked
 
 import copy
 import os
+import re
 import warnings
 from html import escape as html_escape
 
@@ -1585,6 +1592,70 @@ class FitPanel:
         if len(what) > TAB_NAME_MAX:
             what = what[:TAB_NAME_MAX - 1].rstrip() + '…'
         return '%s %d · %s' % (TAB_METHODS[method], self._n_tabs, what)
+
+    # -- session -----------------------------------------------------------
+    def fit_tabs_state(self):
+        """([state], [names]): the ended fit and DREAM tabs in their order,
+        as plain JSON for a session (DEWindow / DreamWindow saved_state,
+        with 'kind' 'fit' or 'dream'), and the names of those left out
+        because their fit or run is still going on."""
+        tabs = self.page_tabs
+        pages = [tabs.widget(i) for i in range(tabs.count())] \
+            if tabs is not None else [self.fit_window, self.dream_window]
+        states, running = [], []
+        for w in pages:
+            if isinstance(w, DEWindow):
+                if w.problem is None:            # never started
+                    continue
+                kind, d = 'fit', None if w.running else w.saved_state()
+            elif isinstance(w, DreamWindow):
+                kind, d = 'dream', w.saved_state()
+            else:
+                continue
+            if d is None:
+                running.append(getattr(w, 'tab_name', w.windowTitle()))
+            else:
+                states.append(dict(d, kind=kind))
+        return states, running
+
+    def restore_fit_tabs(self, states):
+        """Open the fit and DREAM tabs of a session (fit_tabs_state) after
+        those already open, as they were left: their entries can be sent to
+        the Simulation tab, nothing is continued.  Returns why any could not
+        be opened, as text."""
+        lost = []
+        for d in states:
+            fit = d.get('kind') == 'fit'
+            w = DEWindow(self) if fit else DreamWindow(self)
+            try:
+                w.show_saved(d)
+            except Exception as exc:
+                w.deleteLater()
+                lost.append('%s: %s' % (d.get('tab_name') or d.get('kind'),
+                                        exc))
+                continue
+            if fit:
+                w.sendRequested.connect(
+                    lambda x, label, part, w=w: self._send_fit(x, label,
+                                                               part, w))
+            else:
+                w.sendRequested.connect(
+                    lambda x, part, label, w=w: self._send_dream(x, part, w,
+                                                                 label))
+                w.boundsRequested.connect(
+                    lambda lo, hi, part, w=w: self._bounds_dream(lo, hi,
+                                                                 part, w))
+            w.tab_name = w.tab_name or w.windowTitle()
+            # new tabs are numbered after the session's
+            m = re.match(r'\S+ (\d+) · ', w.tab_name)
+            if m:
+                self._n_tabs = max(self._n_tabs, int(m.group(1)))
+            tabs = self.page_tabs
+            shown = tabs.currentIndex() if tabs is not None else -1
+            self._reveal(w)
+            if tabs is not None:
+                tabs.setCurrentIndex(shown)
+        return lost
 
     def _retire(self, w):
         """The fit or DREAM window w is no longer the newest: its entries

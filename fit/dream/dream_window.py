@@ -41,8 +41,11 @@ values as the dataset chosen beside them sees them.  "Save chains..."
 writes the run with fit.dream.dream_fit.save_result.
 """
 
+import base64
+import io
 import os
 import time
+import warnings
 from collections import deque
 
 import numpy as np
@@ -51,7 +54,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 
 from fit.dream.dream_fit import (FLOOR_NAME, SIGMA_NAME, chain_best,
                          chain_curves,
-                         chains_split, format_summary,
+                         chains_split, format_summary, load_run,
                          posterior_warnings, predictive_bands, profile_bands,
                          profile_layers,
                          sample, save_result, summary_table)
@@ -1083,6 +1086,35 @@ class DreamWindow(QtWidgets.QWidget):
         self.finish(result)
         self.status.setText('Saved run: %d generation(s), %d evaluations.'
                             % (result.generations[-1], result.n_evals))
+
+    def saved_state(self):
+        """The ended run as plain JSON for a session: what "Save chains…"
+        writes (save_result), as base64 text, with the tab's header and
+        report; None while it runs or if it ended without a result."""
+        if self.result is None:
+            return None
+        buf = io.BytesIO()
+        save_result(buf, self.result, self.problem, self.sources,
+                    self.datasets)
+        return dict(npz=base64.b64encode(buf.getvalue()).decode('ascii'),
+                    header=self.header.text(), status=self.status.text(),
+                    title=self.windowTitle(),
+                    tab_name=getattr(self, 'tab_name', None))
+
+    def show_saved(self, d):
+        """A run of a session (saved_state), shown ended: it can be looked
+        at and sent, not continued."""
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')     # said when it ran
+            result, problem, meta = load_run(base64.b64decode(d['npz']))
+        self.show_loaded(result, problem, d['header'],
+                         meta.get('sources', []), meta.get('datasets', []))
+        self.status.setText(d['status'])
+        self.setWindowTitle(d['title'])
+        self.tab_name = d['tab_name']
+        self.btn_continue.setEnabled(False)
+        self.btn_continue.setToolTip('A run reopened from a session cannot '
+                                     'be continued')
 
     def _reset_clock(self):
         """Start timing a run (or a continuation) now."""

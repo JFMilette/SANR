@@ -40,6 +40,7 @@ from fit.de.de_fit import run_de_restarts, run_lbfgs, run_lsq
 from fit.de import global_fit
 from fit.joint import JointProblem, part_x, parts
 from fit.multistart import merge
+from fit.saved import plain, problem_from_state, problem_state
 import line_colours
 import style
 from tabs.simulation import (POLARIZED, PARAM_DISPLAY, PROFILE_EXPORT_NAMES,
@@ -222,6 +223,7 @@ class DEWindow(QtWidgets.QWidget):
         'multistart' (the minima, given by show_minima)."""
         self.problem = problem
         self.method = method
+        self._started = (views, title)      # what saved_state keeps
         self.unit = dict(global_fit.UNITS, lbfgs='iteration',
                          lsq='iteration', multistart='minimum').get(
                              method, 'generation')
@@ -401,6 +403,67 @@ class DEWindow(QtWidgets.QWidget):
                html_escape(msg), note))
         self.btn_stop.setEnabled(False)
         self.btn_send.setEnabled(self.history.currentItem() is not None)
+
+    def saved_state(self):
+        """The ended fit as plain JSON for a session: its problem
+        (fit.saved), datasets, every entry and the report; show_saved
+        shows it again."""
+        views, title = self._started
+        cur = self.history.currentItem()
+        return plain(dict(
+            problem=problem_state(self.problem), method=self.method,
+            title=title, cost_label=self.cost_label, polish=self.polish,
+            tab_name=getattr(self, 'tab_name', None),
+            # a model grid's key None (every other channel) as JSON allows
+            views=[dict(v, grids=list(v['grids'].items())) for v in views],
+            entries=self.entries, status=self.status.text(),
+            failed=bool(self.status.styleSheet()),
+            selected=-1 if cur is None
+            else self.history.indexOfTopLevelItem(cur),
+            tab=self.tabs.currentIndex()))
+
+    def show_saved(self, d):
+        """An ended fit of a session (saved_state), as it was left: it can
+        be looked at and sent, not continued."""
+        problem = problem_from_state(d['problem'])
+        views = [dict(v, data={ch: {k: None if a is None else
+                                    np.asarray(a, dtype=float)
+                                    for k, a in c.items()}
+                               for ch, c in v['data'].items()},
+                      grids={k: np.asarray(q, dtype=float)
+                             for k, q in v['grids']})
+                 for v in d['views']]
+        self.start(problem, views, d['title'], d['cost_label'],
+                   d['polish'], d['method'])
+        self.tab_name = d['tab_name']
+        self.running = False
+        self.progress.hide()
+        self.btn_stop.setEnabled(False)
+        h = self.history
+        h.blockSignals(True)
+        self.entries = [(label, float(cost), np.array(x, dtype=float))
+                        for label, cost, x in d['entries']]
+        items = []
+        for label, cost, _ in self.entries:
+            it = QtWidgets.QTreeWidgetItem([label, '%.6g' % cost])
+            it.setTextAlignment(1, QtCore.Qt.AlignmentFlag.AlignRight
+                                | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            items.append(it)
+        h.addTopLevelItems(items)
+        if items:          # the best entry in bold, as _append marks it
+            it = items[int(np.argmin([e[1] for e in self.entries]))]
+            font = it.font(0)
+            font.setBold(True)
+            for c in range(2):
+                it.setFont(c, font)
+        h.blockSignals(False)
+        self.tabs.setCurrentIndex(max(d['tab'], 0))
+        self.status.setText(d['status'])
+        self.status.setStyleSheet('color: %s' % style.ERROR
+                                  if d['failed'] else '')
+        if 0 <= d['selected'] < len(items):
+            h.setCurrentItem(items[d['selected']])
+            h.scrollToItem(items[d['selected']])
 
     def set_starts(self, done, total):
         """How many starts of a running multistart have ended."""
