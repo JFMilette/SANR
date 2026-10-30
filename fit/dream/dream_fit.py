@@ -265,7 +265,7 @@ def sample(problem, *, n_gen=30000, archive=True, n_chains=None, x0=None,
            n_workers=1, seed=None, stop_when_converged=True,
            min_gen_after_converged=5000, callback=None, de_options=None,
            resume=None, rhat_target=1.1, p_snooker=0.1, beta_start=1e-3,
-           temper_until=None):
+           temper_until=None, z0=None):
     """DREAM posterior sample of `problem` (a PosteriorProblem), chains in
     physical units.
 
@@ -273,8 +273,11 @@ def sample(problem, *, n_gen=30000, archive=True, n_chains=None, x0=None,
         'de' to start from the best members of a fit.de.de_fit.run_de final
         population (run with de_options), or 'current' for jittered copies
         of the current values (jittered_start).  The DREAM(ZS) archive is
-        still seeded from the prior, and the adaptation phase is still
-        discarded.
+        still seeded from the prior (unless z0), and the adaptation phase is
+        still discarded.
+    z0: None, or (M0, d) states (physical units) the DREAM(ZS) archive
+        starts with instead of prior draws, e.g. samples of a neural
+        posterior (fit.npe); ignored without the archive or with resume.
     p_snooker: snooker updates (archive only; 0 without it).
     beta_start, temper_until: the tempered burn-in of fit.dream.dream
         (beta_start 1: none).
@@ -314,6 +317,8 @@ def sample(problem, *, n_gen=30000, archive=True, n_chains=None, x0=None,
         else:
             raise ValueError("x0 must be None, an array, 'de' or 'current'")
     u0 = None if x0 is None else np.clip(problem.to_u(x0), 0.0, 1.0)
+    uz = None if z0 is None or not archive or resume is not None else \
+        np.clip(problem.to_u(z0), 0.0, 1.0)
 
     def cb(t, U, logp, pCR, rhat):
         return callback(t, problem.to_x(U), logp, rhat) is True
@@ -338,7 +343,8 @@ def sample(problem, *, n_gen=30000, archive=True, n_chains=None, x0=None,
                     callback=cb if callback is not None else None,
                     resume=state, rhat_target=rhat_target,
                     p_snooker=p_snooker, beta_start=beta_start,
-                    temper_until=temper_until, logpdf_split=unit.split)
+                    temper_until=temper_until, logpdf_split=unit.split,
+                    z0=uz)
     finally:
         if pool is not None:
             stop_pool(pool, unit.token)

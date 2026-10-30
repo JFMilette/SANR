@@ -233,6 +233,7 @@ def dream(
     logpdf_split: Optional[Callable] = None,
     temper_until: Optional[int] = None,
     beta_start: float = 1.0,
+    z0: Optional[np.ndarray] = None,
 ) -> DreamResult:
     """Run DREAM.
 
@@ -260,6 +261,9 @@ def dream(
              two (N,) arrays if vectorized; their sum is logpdf.  Needed,
              and used for every evaluation, when beta_start < 1.
     temper_until, beta_start : the tempered burn-in (module docstring).
+    z0     : optional (M0, d) initial archive (archive only), e.g. samples
+             of a neural posterior (fit.npe), instead of M0 prior draws;
+             ignored with resume.
     """
     rng = np.random.default_rng(seed)
     lo, hi = (np.asarray(b, float) for b in zip(*bounds))
@@ -339,6 +343,14 @@ def dream(
         m = st['m']
         Z = np.empty((m + (n_gen // archive_every + 1) * N, d))
         Z[:m] = st['Z']
+    elif archive and z0 is not None:
+        z0 = np.asarray(z0, float)
+        if z0.ndim != 2 or z0.shape[1] != d or len(z0) < 2 * delta + 1:
+            raise ValueError(f"z0 must have shape (M0 >= {2 * delta + 1}, "
+                             f"{d})")
+        m = m0 = len(z0)
+        Z = np.empty((m0 + (n_gen // archive_every + 1) * N, d))
+        Z[:m0] = z0
     elif archive:
         m0 = archive_m0 or max(10 * d, 2 * delta + 1)
         Z = np.empty((m0 + (n_gen // archive_every + 1) * N, d))
