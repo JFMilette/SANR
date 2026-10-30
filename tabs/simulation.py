@@ -63,7 +63,7 @@ CHANNELS = ['++', '+-', '-+', '--']
 AUTO_NAME = re.compile(r'L\d+')        # default layer names, renumbered
 # combo label, axis label, colour
 PROFILE_QUANTITIES = [
-    ('NSLD', 'NSLD real (10⁻⁶ Å⁻²)', '#5b9bd5'),
+    ('NSLD', 'NSLD Re (10⁻⁶ Å⁻²)', '#5b9bd5'),
     ('MSLD ρ', 'MSLD ρ = |M| (10⁻⁶ Å⁻²)', '#4fc08d'),
     ('φ', 'MSLD φ, in plane (deg)', '#e0a458'),
     ('θ', 'MSLD θ, out of plane (deg)', '#e36fa8'),
@@ -778,8 +778,8 @@ class LayerLabels:
 # attr, label, lo, hi, decimals, step, suffix, display = stored * scale
 EDITOR_PARAMS = [
     ('thickness', 'Thickness (Å)', 0.0, 1e5, 4, 1.0, '', 1.0),
-    ('NSLD_real', 'NSLD real', -100, 100, 6, 0.1, '', 1 / SLD_SCALE),
-    ('NSLD_img', 'NSLD imag', -100, 100, 7, 0.001, '', 1 / SLD_SCALE),
+    ('NSLD_real', 'NSLD Re', -100, 100, 6, 0.1, '', 1 / SLD_SCALE),
+    ('NSLD_img', 'NSLD Im', -100, 100, 7, 0.001, '', 1 / SLD_SCALE),
     ('MSLD_rho', 'MSLD ρ', -100, 100, 6, 0.1, '', 1 / SLD_SCALE),
     ('MSLD_theta', 'MSLD φ', -360, 360, 4, 5.0, ' °', 360.0),
     ('MSLD_phi', 'MSLD θ', -90, 90, 4, 5.0, ' °', 360.0),
