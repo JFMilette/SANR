@@ -10,6 +10,13 @@ Fitting benchmark on a saved Licorne session (not part of pytest).
   multistart fit.multistart.run_multistart (the GUI's multistart page): the
              distinct minima, their hits and the parameters on a bound.
 
+dream --start lhs (default), de or npe: where the chains start; npe
+(--seed-npe, plans/npe_plan_v1.md V3) trains a network on the session
+(fit.npe.train.run_npe: --npe-rounds, --npe-sims, coarse simulator unless
+--npe-full) and starts the chains at the seeds of fit.npe.seed, without
+the current values; the time recorded includes the training, and the
+clusters found are printed and recorded.
+
 The free parameters are the session's own fit flags (default), or --vary
 "i:attr,i:attr,..." with i the layer index in the SANR stack (0 = fronting).
 Results are appended as JSON lines to --out and printed as a table.
@@ -24,6 +31,8 @@ Examples (run from the repo root):
       --vary 1:thickness,2:thickness,3:thickness,1:roughness_sigma,2:roughness_sigma,3:roughness_sigma,4:roughness_sigma
   python benchmarks/bench_fit.py dream tests/data/private/session_A --seeds 1 2 3 \
       --n-gen 5000 --chains 3
+  python benchmarks/bench_fit.py dream tests/data/private/session_A --untie \
+      --seeds 1 2 3 --n-gen 5000 --chains 8 --seed-npe --workers 8
 """
 import argparse
 import json
@@ -104,7 +113,26 @@ def landscape(p, names, starts, seed):
     return dict(kind='landscape', names=names, runs=runs)
 
 
-def dream_runs(p, names, seeds, n_gen, chains, archive, sigma_free, extra):
+def npe_seeds(pp, seed, chains, npe, workers):
+    """(x0, record) of NPE-seeded chains (see the module docstring)."""
+    from fit.npe.seed import format_clusters, seed_chains
+    from fit.npe.train import run_npe
+    res = run_npe(pp.fit, coarse=not npe['full'], rounds=npe['rounds'],
+                  sims_per_round=npe['sims'], seed=seed, n_workers=workers)
+    seeds = seed_chains(res, pp, chains or 8, rng=seed,
+                        n_samples=npe['samples'], n_workers=workers)
+    print(format_clusters(seeds))
+    rec = dict(rounds=[{k: v for k, v in r.items() if 'loss' not in k}
+                       for r in res.rounds], coarse=res.meta['coarse'],
+               clusters=[dict(weight=c['weight'], chains=c['chains'],
+                              chi2=c['chi2'], at_bound=c['at_bound'],
+                              best_x=list(map(float, c['best_x'])))
+                         for c in seeds.clusters])
+    return seeds.x0, rec
+
+
+def dream_runs(p, names, seeds, n_gen, chains, archive, sigma_free, extra,
+               start=None, npe=None, workers=1):
     from fit.dream.dream_fit import PosteriorProblem, sample
     out = []
     print('%4s %10s %40s %8s %6s  %s' % ('seed', 'chi2 MAP', 'chi2/N of each chain at the end',
@@ -112,7 +140,12 @@ def dream_runs(p, names, seeds, n_gen, chains, archive, sigma_free, extra):
     for seed in seeds:
         pp = PosteriorProblem(p, sigma_free=sigma_free)
         t = time.time()
-        r = sample(pp, n_gen=n_gen, seed=seed, n_chains=chains, archive=archive,
+        x0, npe_rec = start, None
+        if start == 'npe':
+            x0, npe_rec = npe_seeds(pp, seed, chains, npe, workers)
+        r = sample(pp, n_gen=n_gen, seed=seed,
+                   n_chains=chains if x0 is None or isinstance(x0, str)
+                   else len(x0), archive=archive, x0=x0, n_workers=workers,
                    stop_when_converged=False, **extra)
         nP = len(p.params)
         end = [pp.chi2_per_point(x[:nP]) for x in r.chains[-1]]
@@ -128,7 +161,8 @@ def dream_runs(p, names, seeds, n_gen, chains, archive, sigma_free, extra):
                    median=list(map(float, np.median(s, 0))),
                    q025=list(map(float, np.percentile(s, 2.5, 0))),
                    q975=list(map(float, np.percentile(s, 97.5, 0))),
-                   at_bound=frac.tolist(), seconds=time.time() - t)
+                   at_bound=frac.tolist(), seconds=time.time() - t,
+                   start=start or 'lhs', npe=npe_rec)
         out.append(rec)
         print('%4d %10.4f %40s %8.2f %6.3f  %s'
               % (seed, rec['chi2_map'], np.round(end, 2).tolist()[:8],
@@ -177,6 +211,15 @@ def main():
     a.add_argument('--method', default='lbfgs', choices=['lbfgs', 'de'],
                    help='multistart local fit')
     a.add_argument('--workers', type=int, default=1)
+    a.add_argument('--start', default='lhs', choices=['lhs', 'de', 'npe'],
+                   help='dream: where the chains start')
+    a.add_argument('--seed-npe', action='store_true',
+                   help='dream: --start npe')
+    a.add_argument('--npe-rounds', type=int, default=5)
+    a.add_argument('--npe-sims', type=int, default=20000)
+    a.add_argument('--npe-samples', type=int, default=10000)
+    a.add_argument('--npe-full', action='store_true',
+                   help='train on the full-fidelity model')
     a.add_argument('--out', default='benchmarks/results.jsonl')
     o = a.parse_args()
     p, names = load(o.session, o.vary, o.untie)
@@ -191,8 +234,13 @@ def main():
         # without --p-snooker / --temper, the plain sampler of before
         extra = dict(p_snooker=0.0 if o.p_snooker is None else o.p_snooker,
                      beta_start=1e-3 if o.temper else 1.0)
+        start = 'npe' if o.seed_npe else o.start
         recs = dream_runs(p, names, o.seeds, o.n_gen, o.chains, not o.classic,
-                          o.sigma_free, extra)
+                          o.sigma_free, extra,
+                          start=None if start == 'lhs' else start,
+                          npe=dict(rounds=o.npe_rounds, sims=o.npe_sims,
+                                   samples=o.npe_samples, full=o.npe_full),
+                          workers=o.workers)
     os.makedirs(os.path.dirname(os.path.abspath(o.out)), exist_ok=True)
     with open(o.out, 'a') as fh:
         for r in recs:
