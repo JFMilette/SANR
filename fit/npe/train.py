@@ -433,10 +433,14 @@ def train(simulator, *, rounds=5, sims_per_round=20_000, truncation=True,
     embedding: (hidden widths, output size) of the MLP; flow: sbi
         posterior_nn arguments (default FLOW); training: NPE.train
         arguments (early stopping on the validation loss by default).
-    callback(event, info): 'simulate' (done, total), 'train' (round), and
-        'round' (that round's statistics) as it goes; cancelled() True
-        stops (RuntimeError 'stopped'), also within a training: it is
-        asked before every batch."""
+    callback(event, info): 'simulate' (done, total), 'train' (round),
+        'epoch' after each epoch of a training ({'round', 'epoch',
+        'validation_loss', 'training_loss' (this round's so far),
+        'since_best' (epochs without a better validation loss),
+        'patience' (after how many it stops)}) and 'round' (that round's
+        statistics) as it goes; cancelled() True stops (RuntimeError
+        'stopped'), also within a training: it is asked before every
+        batch."""
     from fit.dream.dream_fit import _git_hash, data_hash
     from fit.saved import problem_state
 
@@ -456,11 +460,31 @@ def train(simulator, *, rounds=5, sims_per_round=20_000, truncation=True,
                     show_progress_bars=False, tracker=_NoTracker())
     opts = dict(training or {})
     opts['force_first_round_loss'] = True
+    patience = opts.get('stop_after_epochs', 20)    # sbi's default
+    live = dict(round=0, start=0, seen=0)        # the epochs said so far
+
+    def report_epoch():
+        # a finished epoch not said yet (sbi 0.27 appends its losses to the
+        # trainer's _summary as it goes)
+        s = getattr(inference, '_summary', {})
+        v = s.get('validation_loss', [])
+        if len(v) > live['seen']:
+            live['seen'] = len(v)
+            cb('epoch', dict(
+                round=live['round'] + 1, epoch=len(v) - live['start'],
+                validation_loss=[float(a) for a in v[live['start']:]],
+                training_loss=[float(a) for a in
+                               s.get('training_loss', [])[live['start']:]],
+                since_best=int(getattr(
+                    inference, '_epochs_since_last_improvement', 0)),
+                patience=patience))
 
     def collate(batch):
-        # every batch of the training: the one place a stop gets through
+        # every batch of the training: the one place a stop gets through,
+        # and where the epoch before is seen (the last one: after it)
         if stop():
             raise RuntimeError('stopped')
+        report_epoch()
         return default_collate(batch)
 
     opts['dataloader_kwargs'] = dict(opts.get('dataloader_kwargs') or {},
@@ -498,10 +522,14 @@ def train(simulator, *, rounds=5, sims_per_round=20_000, truncation=True,
         if stop():
             raise RuntimeError('stopped')
         cb('train', r)
+        live.update(round=r, start=len(
+            getattr(inference, '_summary', {}).get('validation_loss', [])))
+        live['seen'] = live['start']
         inference.append_simulations(
             torch.as_tensor(to_theta(u), dtype=torch.float32),
             torch.as_tensor(x))
         est = inference.train(**opts)
+        report_epoch()
         networks.append(copy.deepcopy(est))
         posterior = DirectPosterior(est, prior).set_default_x(
             torch.as_tensor(x_o[None]))

@@ -15,7 +15,10 @@ ends it at the next simulation chunk or training batch.
              epochs, best validation loss, time), the calibration, the
              symmetry probe, and the clusters as text
   Training   the validation loss (solid) and training loss (dashed) of
-             every epoch, one colour per round, updated after each round
+             every epoch, one colour per round, the round being trained
+             drawn as it goes; the status line says its epoch, its loss and
+             how many epochs have passed without a better one (the round
+             ends after 20)
   Clusters   the candidate solutions (fit.npe.seed clusters): weight,
              chains, best chi^2/N, parameters at a bound, best values
   Marginals  one parameter at a time: the network's samples (a proposal,
@@ -61,6 +64,7 @@ class NPEThread(QtCore.QThread):
 
     stage = QtCore.pyqtSignal(str)                    # what it does now
     sims = QtCore.pyqtSignal(int, int, int)           # round, done, total
+    epoch = QtCore.pyqtSignal(object)                 # a training's epoch
     roundDone = QtCore.pyqtSignal(object)             # a round's statistics
     coarse = QtCore.pyqtSignal(object)                # choose_coarse report
     done = QtCore.pyqtSignal(object)                  # NPERun
@@ -90,6 +94,8 @@ class NPEThread(QtCore.QThread):
             self.sims.emit(*info)
         elif event == 'train':
             self.stage.emit('Round %d: training the network…' % (info + 1))
+        elif event == 'epoch':
+            self.epoch.emit(info)
         elif event == 'round':
             self.roundDone.emit(info)
 
@@ -347,6 +353,19 @@ class NPEWindow(QtWidgets.QWidget):
         self.status.setText('Round %d: %d / %d simulations  (%s)'
                             % (r + 1, done, total, self._elapsed()))
 
+    def epoch_done(self, info):
+        """An epoch of the round being trained: the status line and its
+        loss curve so far."""
+        v = info['validation_loss']
+        self.status.setText(
+            'Round %d: training, epoch %d, validation loss %.5g; best %s '
+            '(stops after %d without improvement)  (%s)'
+            % (info['round'], info['epoch'], v[-1],
+               'this epoch' if not info['since_best'] else
+               '%d epoch(s) ago' % info['since_best'], info['patience'],
+               self._elapsed()))
+        self._draw_loss(info)
+
     def round_done(self, stats):
         self._rounds.append(stats)
         self.report.appendPlainText(
@@ -357,10 +376,12 @@ class NPEWindow(QtWidgets.QWidget):
                stats['best_validation_loss'], duration(stats['seconds'])))
         self._draw_loss()
 
-    def _draw_loss(self):
+    def _draw_loss(self, current=None):
+        """The finished rounds' losses, and the round being trained
+        (current: an 'epoch' event of fit.npe.train) after them."""
         self.loss_plot.clear()
         start = 0
-        for r in self._rounds:
+        for r in self._rounds + ([current] if current else []):
             c = CHAIN_COLOURS[(r['round'] - 1) % len(CHAIN_COLOURS)]
             e = start + np.arange(len(r['validation_loss']))
             self.loss_plot.plot(e, r['validation_loss'],

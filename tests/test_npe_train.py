@@ -188,3 +188,19 @@ def test_fitted_error_scale():
         res.check(p)                     # without the error scale
     back = res.posterior_problem()
     assert back.names == pp.names and back.sigma_free
+
+
+def test_every_epoch_is_reported():
+    """The 'epoch' events: one per epoch of each round, the last of a round
+    holding the losses its statistics end with."""
+    from fit.npe.simulator import Simulator
+    from fit.npe.train import train
+    got = []
+    res = train(Simulator(toy(), seed=1), rounds=2, sims_per_round=400,
+                seed=1, training=dict(max_num_epochs=6),
+                callback=lambda e, i: got.append(i) if e == 'epoch' else None)
+    for r, stats in enumerate(res.rounds, 1):
+        mine = [e for e in got if e['round'] == r]
+        assert [e['epoch'] for e in mine] == list(range(1, len(mine) + 1))
+        assert mine[-1]['validation_loss'] == stats['validation_loss']
+        assert mine[-1]['patience'] == 20

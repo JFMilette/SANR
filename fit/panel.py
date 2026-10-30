@@ -1205,6 +1205,7 @@ class FitPanel:
         w = self.npe_window
         self._npe.stage.connect(w.stage)
         self._npe.sims.connect(w.sims)
+        self._npe.epoch.connect(w.epoch_done)
         self._npe.roundDone.connect(w.round_done)
         self._npe.coarse.connect(w.coarse)
         self._npe.done.connect(self._npe_done)

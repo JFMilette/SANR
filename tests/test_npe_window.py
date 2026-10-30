@@ -79,6 +79,10 @@ def test_npe_page_and_tab(app, monkeypatch):
     assert exp.page_tabs.indexOf(w) >= 0
     w.sims(1, 50, 100)
     assert w.bar.value() == 150
+    w.epoch_done(dict(STATS, round=2, epoch=3, since_best=1, patience=20))
+    assert 'epoch 3' in w.status.text() and '1 epoch(s) ago' in \
+        w.status.text()
+    assert len(w.loss_plot.listDataItems()) == 2   # the round so far
     w.round_done(STATS)
     run = fake_run(problem)
     exp._npe_done(run)
@@ -144,6 +148,8 @@ def test_train_in_the_gui(app):
     exp.npe_calibrate.setChecked(False)
     exp.start_npe()
     assert exp._npe is not None
+    epochs = []
+    exp._npe.epoch.connect(epochs.append)
     loop = QtCore.QEventLoop()
     exp._npe.finished.connect(loop.quit)
     QtCore.QTimer.singleShot(600_000, loop.quit)
@@ -153,6 +159,7 @@ def test_train_in_the_gui(app):
     assert w.run is not None, w.status.text()
     assert len(exp._npe_seeds[1]) == 8 and w.table.rowCount() >= 1
     assert len(w.run.result.rounds) == 2
+    assert {e['round'] for e in epochs} == {1, 2}       # live, every round
 
 
 def test_npe_fits_the_noise_ticked_on_the_dream_page(app):
