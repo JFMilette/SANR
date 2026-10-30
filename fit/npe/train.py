@@ -156,6 +156,28 @@ class LogitPrior(Distribution):
         return self.sample((10_000,)).var(0)
 
 
+class _NoTracker:
+    """sbi's Tracker protocol doing nothing: its default writes TensorBoard
+    logs into ./sbi-logs."""
+
+    log_dir = None
+
+    def log_metric(self, name, value, step=None):
+        pass
+
+    def log_metrics(self, metrics, step=None):
+        pass
+
+    def log_params(self, params):
+        pass
+
+    def add_figure(self, name, figure, step=None):
+        pass
+
+    def flush(self):
+        pass
+
+
 def embedding_net(n_in, hidden=EMBEDDING[0], n_out=EMBEDDING[1]):
     """The MLP of NETWORK."""
     layers, w = [], n_in
@@ -424,7 +446,7 @@ def train(simulator, *, rounds=5, sims_per_round=20_000, truncation=True,
         embedding_net=embedding_net(len(x_o), *embedding),
         **dict(FLOW, **(flow or {})))
     inference = NPE(prior=prior, density_estimator=builder,
-                    show_progress_bars=False)
+                    show_progress_bars=False, tracker=_NoTracker())
     opts = dict(training or {})
     opts['force_first_round_loss'] = True
 
