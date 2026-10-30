@@ -19,27 +19,26 @@ ROUNDS -- round 1 draws from the prior: its network is an amortised estimator
 over the whole prior, kept apart (NPEResult.networks[0]).  Each later round
 draws from the prior truncated to the current posterior's highest-density
 region at x_o, the measured data (TSNPE, Deistler et al. 2022): the region
-holds all but `quantile` of the posterior mass, its threshold on log q
+(Region) holds all but `quantile` of the posterior mass, its threshold on log q
 estimated from SUPPORT_SAMPLES samples (as sbi's get_density_thresholder,
 without its progress bar), and the network is trained on every round so far
 with the plain maximum-likelihood loss (force_first_round_loss), which the
 truncation leaves unbiased.  The truncated prior is drawn by rejection from the
 prior while at least PRIOR_ACCEPT of its draws are kept; below that (sharp
 posteriors in many dimensions) by importance resampling from a defensive
-envelope: ENVELOPE_PRIOR of the prior and the rest a Gaussian mixture fitted to
-posterior samples in theta, its covariances widened ENVELOPE_WIDEN^2 times.
-The weights prior / envelope of the draws inside the region are at most 1 /
-ENVELOPE_PRIOR, wherever the region reaches (a flow's thin far tails included),
-and the round's draws are taken from a pool of at least 10 n of them, without
-replacement, by weight, the pool grown until its effective size is 2 n (at most
-100 n draws; 'over' 1 when that was not reached).  This is an approximation of
-the truncated prior, close when the pool is large; where the region is mostly a
-flow's thin tails it is rough (tests/test_npe_train.py: means within 0.25 sd,
-spreads within 35 %), which only makes that round's proposal a little off: the
-loss stays the plain maximum likelihood and DREAM decides.  The exact rejection
-costs one log q per prior draw (about 1e7 per round of 2e4 at the switch).
-Each round says which was used and its acceptance (the effective sample size
-per draw for the envelope).
+envelope: ENVELOPE_PRIOR of the prior and the rest the posterior q itself,
+whose draws fall in the region by its definition (all but `quantile` of them),
+however many parameters there are.  The weights prior / envelope of the draws
+inside the region are at most 1 / ENVELOPE_PRIOR, and the round's draws are
+taken from a pool of at least 10 n of them, without replacement, by weight, the
+pool grown until its effective size is 2 n (at most 100 n draws; 'over' 1 when
+that was not reached).  This is an approximation of the truncated prior, close
+when the pool is large; where the region is mostly a flow's thin tails it is
+rough (tests/test_npe_train.py), which only makes that round's proposal a
+little off: the loss stays the plain maximum likelihood and DREAM decides.  The
+exact rejection costs one log q per prior draw (about 1e7 per round of 2e4 at
+the switch).  Each round says which was used and its acceptance (the effective
+sample size per draw for the envelope).
 
 RESULT -- NPEResult holds every round's network, the prior, the observed
 features x_o, the names and bounds, the data hash, the fit problem
@@ -81,9 +80,7 @@ LOGIT_EPS = 1e-6
 EMBEDDING = ((256, 256), 64)
 FLOW = dict(model='nsf', hidden_features=64, num_transforms=5)
 PRIOR_ACCEPT = 2e-3
-ENVELOPE_WIDEN = 2.0
 ENVELOPE_PRIOR = 0.3
-ENVELOPE_COMPONENTS = 6
 SUPPORT_SAMPLES = 100_000       # posterior samples for the threshold
 CHUNK = 100_000                 # rows of one log q evaluation
 SBC_PASS = 0.05
@@ -194,73 +191,46 @@ def versions():
 
 
 # -- truncated proposals ------------------------------------------------------
-class _Envelope:
-    """Gaussian mixture in theta, its covariances widened (see ROUNDS)."""
+class Region:
+    """The region holding all but `quantile` of the posterior's mass at its
+    default x (see ROUNDS): log q of theta, and whether theta is inside."""
 
-    def __init__(self, samples, rng):
-        from sklearn.mixture import GaussianMixture
-        best = None
-        for k in range(1, ENVELOPE_COMPONENTS + 1):
-            if len(samples) < 20 * k:
-                break
-            g = GaussianMixture(k, covariance_type='full', reg_covar=1e-6,
-                                random_state=int(rng.integers(2**31)))
-            g.fit(samples)
-            bic = g.bic(samples)
-            if best is None or bic < best[0]:
-                best = (bic, g)
-        g = best[1]
-        self.w = g.weights_
-        self.mu = g.means_
-        self.cov = g.covariances_ * ENVELOPE_WIDEN ** 2
-        self.chol = np.linalg.cholesky(self.cov)
-        d = self.mu.shape[1]
-        self.log_norm = np.log(self.w) - 0.5 * d * np.log(2 * np.pi) - \
-            np.log(np.diagonal(self.chol, axis1=1, axis2=2)).sum(axis=1)
+    def __init__(self, posterior, quantile, n=SUPPORT_SAMPLES):
+        self.posterior = posterior
+        with torch.no_grad():
+            s = posterior.sample((n,), show_progress_bars=False)
+            self.t = float(torch.quantile(posterior.log_prob(s), quantile))
 
-    def sample(self, n, rng):
-        k = rng.choice(len(self.w), size=n, p=self.w)
-        z = rng.standard_normal((n, self.mu.shape[1]))
-        return self.mu[k] + np.einsum('nij,nj->ni', self.chol[k], z)
-
-    def log_prob(self, x):
-        out = []
-        for m, L, c in zip(self.mu, self.chol, self.log_norm):
-            y = np.linalg.solve(L, (x - m).T).T
-            out.append(c - 0.5 * np.sum(y ** 2, axis=1))
-        return np.logaddexp.reduce(np.array(out), axis=0)
-
-
-def density_region(posterior, quantile, n=SUPPORT_SAMPLES):
-    """inside(theta) -> bool tensor: theta in the region holding all but
-    `quantile` of the posterior's mass at its default x."""
-    with torch.no_grad():
-        s = posterior.sample((n,), show_progress_bars=False)
-        lq = posterior.log_prob(s)
-    t = torch.quantile(lq, quantile)
-
-    def inside(theta):
-        return posterior.log_prob(theta) > t
-    return inside
-
-
-def truncated_draws(prior, posterior, inside, n, rng, pilot=20_000):
-    """(u (n, d), info): draws of the prior truncated to the region
-    inside(theta) (see ROUNDS); info {'proposal', 'acceptance', 'over'}."""
-    unit = prior.unit
-
-    def keep(theta):
-        # in chunks: a flow's activations for millions of rows at once
-        # would take gigabytes
+    def log_q(self, theta):
+        """log q of each row of theta (numpy), in chunks: a flow's
+        activations for millions of rows at once would take gigabytes."""
         out = []
         with torch.no_grad():
             for c in np.array_split(theta, max(1, -(-len(theta) // CHUNK))):
-                out.append(inside(torch.as_tensor(c, dtype=torch.float32)
-                                  ).cpu().numpy().astype(bool))
-        return np.concatenate(out) if out else np.zeros(0, dtype=bool)
+                out.append(self.posterior.log_prob(
+                    torch.as_tensor(c, dtype=torch.float32)).numpy())
+        return np.concatenate(out).astype(float) if out else np.zeros(0)
+
+    def __call__(self, theta):
+        """Inside or not, for a tensor theta (as sbi's thresholder)."""
+        with torch.no_grad():
+            return self.posterior.log_prob(theta) > self.t
+
+
+def density_region(posterior, quantile, n=SUPPORT_SAMPLES):
+    return Region(posterior, quantile, n)
+
+
+def truncated_draws(prior, posterior, region, n, rng, pilot=20_000):
+    """(u (n, d), info): draws of the prior truncated to the Region
+    `region` (see ROUNDS); info {'proposal', 'acceptance', 'over'}."""
+    unit = prior.unit
+
+    def inside(theta):
+        return region.log_q(theta) > region.t
 
     u = unit.sample(pilot, rng)
-    ok = keep(to_theta(u))
+    ok = inside(to_theta(u))
     acc = ok.mean()
     if acc >= PRIOR_ACCEPT:
         got = [u[ok]]
@@ -268,38 +238,32 @@ def truncated_draws(prior, posterior, inside, n, rng, pilot=20_000):
         while kept < n:
             m = int(min(2 * (n - kept) / acc + 1000, 2_000_000))
             u = unit.sample(m, rng)
-            ok = keep(to_theta(u))
+            ok = inside(to_theta(u))
             got.append(u[ok])
             total, kept = total + m, kept + int(ok.sum())
         return np.vstack(got)[:n], dict(proposal='prior',
                                         acceptance=kept / total, over=0)
-    with torch.no_grad():
-        s = posterior.sample((pilot,), show_progress_bars=False).numpy()
-    env = _Envelope(s.astype(float), rng)
-
-    def log_g(theta):
-        u = to_u(theta)
-        lp = unit.log_prob(u) + log_jacobian(u)
-        lg = np.logaddexp(np.log(ENVELOPE_PRIOR) + lp,
-                          np.log1p(-ENVELOPE_PRIOR) + env.log_prob(theta))
-        return lg, lp
-
+    # the envelope: ENVELOPE_PRIOR of the prior, the rest the posterior
     pool_t, pool_w = [], []
     total = 0
     m = max(10 * n, pilot)
     while True:
-        k = rng.random(m) < ENVELOPE_PRIOR
-        t = np.empty((m, unit.d))
-        t[k] = to_theta(unit.sample(int(k.sum()), rng))
-        t[~k] = env.sample(int((~k).sum()), rng)
-        ok = keep(t)
-        lg, lp = log_g(t[ok])
+        k = int((rng.random(m) < ENVELOPE_PRIOR).sum())
+        with torch.no_grad():
+            tq = posterior.sample((m - k,), show_progress_bars=False).numpy()
+        t = np.vstack([to_theta(unit.sample(k, rng)), tq.astype(float)])
+        lq = region.log_q(t)
+        ok = lq > region.t
+        uk = to_u(t[ok])
+        lp = unit.log_prob(uk) + log_jacobian(uk)
+        lg = np.logaddexp(np.log(ENVELOPE_PRIOR) + lp,
+                          np.log1p(-ENVELOPE_PRIOR) + lq[ok])
         pool_t.append(t[ok])
         pool_w.append(lp - lg)
         total += m
         lw = np.concatenate(pool_w)
-        w = np.exp(lw - lw.max())
-        ess = w.sum() ** 2 / (w ** 2).sum()
+        w = np.exp(lw - lw.max()) if lw.size else lw
+        ess = w.sum() ** 2 / (w ** 2).sum() if w.size else 0.0
         if ess >= 2 * n or total >= 100 * n:
             break
     if np.count_nonzero(w) < n:
@@ -428,7 +392,8 @@ def train(simulator, *, rounds=5, sims_per_round=20_000, truncation=True,
     of a coarse problem) for its measured data (see ROUNDS).
 
     problem: the full-fidelity problem (default: the simulator's), whose
-        names, bounds, data hash, noise options and state are stored; coarse: the
+        names, bounds, data hash, noise options and state are stored;
+        coarse: the
         choose_coarse report.
     embedding: (hidden widths, output size) of the MLP; flow: sbi
         posterior_nn arguments (default FLOW); training: NPE.train
