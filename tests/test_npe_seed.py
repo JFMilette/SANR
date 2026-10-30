@@ -112,3 +112,15 @@ def test_initial_archive():
     assert not np.array_equal(a.state['Z'][:40], res.state['Z'][:40])
     with pytest.raises(ValueError, match='z0'):
         sample(pp, n_gen=10, seed=1, z0=z0[:3])
+
+
+def test_seeds_state_round_trip():
+    """What a saved network keeps of its seeds (fit.npe.train save)."""
+    from fit.npe.seed import Seeds
+    s = seed_chains(Network(), Posterior(), 6, rng=1, n_samples=1000)
+    back = Seeds.from_state(s.state())
+    for k in Seeds.FIELDS:
+        assert np.array_equal(getattr(back, k), getattr(s, k))
+    assert [c['weight'] for c in back.clusters] == \
+        [c['weight'] for c in s.clusters]
+    assert np.array_equal(back.clusters[0]['best_x'], s.clusters[0]['best_x'])

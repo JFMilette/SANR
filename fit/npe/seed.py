@@ -15,6 +15,10 @@ cluster with the most); a cluster's chains
 start at its best distinct samples (highest posterior).  With more such
 clusters than chains, the heaviest ones get a chain each.
 
+Seeds.state() / Seeds.from_state(): plain arrays and lists, kept with the
+network (fit.npe.train NPEResult.save) so that a loaded network shows the
+seeds and clusters it had.
+
 Seeds.clusters reports each cluster: weight, samples, chains, best log p
 and chi^2/N, its best state and the parameters within EDGE of a bound
 there: the candidate solutions, useful on their own.  The posterior is
@@ -115,9 +119,23 @@ class Seeds:
     """seed_chains' result: x0 (n_chains, d) physical, the clusters, and
     the samples with their labels, log posterior and log q (u)."""
 
+    FIELDS = ('x0', 'u', 'labels', 'logp', 'logq')
+
     def __init__(self, x0, clusters, u, labels, logp, logq):
         self.x0, self.clusters = x0, clusters
         self.u, self.labels, self.logp, self.logq = u, labels, logp, logq
+
+    def state(self):
+        """A plain dict of numpy arrays and lists (see the module
+        docstring)."""
+        d = {k: np.asarray(getattr(self, k)) for k in self.FIELDS}
+        d['clusters'] = [dict(c) for c in self.clusters]
+        return d
+
+    @classmethod
+    def from_state(cls, d):
+        return cls(clusters=[dict(c) for c in d['clusters']],
+                   **{k: np.asarray(d[k]) for k in cls.FIELDS})
 
 
 def seed_chains(npe_result, posterior_problem, n_chains, rng=None,

@@ -43,9 +43,12 @@ sample size per draw for the envelope).
 RESULT -- NPEResult holds every round's network, the prior, the observed
 features x_o, the names and bounds, the data hash, the fit problem
 (fit.saved.problem_state), the coarse settings and fidelity report, the git
-hash, sbi / torch versions, the seed and each round's statistics.  save()
-writes it with torch.save; load_npe() reads it and refuses a problem whose
-names, bounds or data differ.  sample() and log_prob() are in u; samples are
+hash, sbi / torch versions, the seed and each round's statistics, and once
+a run has seeded DREAM (fit.npe.seed) its seeds and clusters (`seeds`), the
+settings they were drawn with (`seeding`: samples, chains, seed) and the
+symmetry probe (meta 'probe').  save() writes it with torch.save; load_npe()
+reads it (a file saved before the seeds were kept has seeds None) and
+refuses a problem whose names, bounds or data differ.  sample() and log_prob() are in u; samples are
 proposals for DREAM (fit.npe.seed), never results.
 
 CALIBRATION -- calibrate(): simulation-based calibration of a round's
@@ -288,6 +291,8 @@ class NPEResult:
         self.x_o = np.asarray(x_o, dtype=np.float32)
         self.meta = meta
         self.simulator = None      # the training Simulator, if known
+        self.seeds = None          # fit.npe.seed Seeds, once seeded
+        self.seeding = None        # {'n_samples', 'n_chains', 'seed'}
 
     @property
     def names(self):
@@ -327,7 +332,10 @@ class NPEResult:
     def save(self, path):
         torch.save(dict(format=FORMAT, networks=self.networks,
                         unit=self.prior.unit, x_o=self.x_o,
-                        meta=json.dumps(self.meta, default=_plain)), path)
+                        meta=json.dumps(self.meta, default=_plain),
+                        seeds=None if self.seeds is None
+                        else self.seeds.state(),
+                        seeding=self.seeding), path)
 
     def check(self, problem):
         """ValueError unless problem (a PosteriorProblem, or a FitProblem
@@ -367,6 +375,10 @@ def load_npe(path, problem=None):
         raise ValueError('%s is not a SANR NPE file' % path)
     res = NPEResult(d['networks'], LogitPrior(d['unit']), d['x_o'],
                     json.loads(d['meta']))
+    if d.get('seeds') is not None:
+        from fit.npe.seed import Seeds
+        res.seeds = Seeds.from_state(d['seeds'])
+        res.seeding = d.get('seeding')
     if problem is not None:
         res.check(problem)
     return res

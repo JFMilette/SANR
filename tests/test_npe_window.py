@@ -168,6 +168,46 @@ def test_train_in_the_gui(app):
     assert len(w.run.result.rounds) == 2
     assert {e['round'] for e in epochs} == {1, 2}       # live, every round
 
+    # saved with its seeds: loaded, shown at once, nothing recomputed
+    import tempfile
+    path = os.path.join(tempfile.mkdtemp(), 'net.npe')
+    w.run.result.save(path)
+    seeds = w.run.seeds
+    QtWidgets.QFileDialog.getOpenFileName = staticmethod(
+        lambda *a, **k: (path, ''))
+    exp.load_npe_network()
+    w2 = exp.npe_window
+    assert w2 is not w and exp._npe is None and w2.run is not None
+    assert np.array_equal(w2.run.seeds.x0, seeds.x0)
+    assert w2.table.rowCount() == w.table.rowCount()
+    assert np.array_equal(exp._npe_seeds[1], seeds.x0)
+    assert 'seeds as saved' in w2.header.text()
+
+    def finish():
+        loop = QtCore.QEventLoop()
+        exp._npe.finished.connect(loop.quit)
+        QtCore.QTimer.singleShot(600_000, loop.quit)
+        loop.exec()
+        app.processEvents()
+
+    # Re-seed: a new tab from the same network; the old one keeps its seeds
+    exp.npe_seed.setValue(11)
+    w2.btn_reseed.click()
+    assert exp._npe is not None
+    finish()
+    w3 = exp.npe_window
+    assert w3 is not w2 and w3.run is not None
+    assert w3.run.result.seeding['seed'] == 11
+    assert np.array_equal(w2.run.result.seeds.x0, seeds.x0)
+    # a file saved before the seeds were kept: seeded again
+    old = w.run.result
+    old.seeds = None
+    old.save(path)
+    exp.load_npe_network()
+    assert exp._npe is not None
+    finish()
+    assert exp.npe_window.run is not None
+
 
 def test_npe_fits_the_noise_ticked_on_the_dream_page(app):
     """The DREAM page's error scale / floor ticks: NPE samples them too, so

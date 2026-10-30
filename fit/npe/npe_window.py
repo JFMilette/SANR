@@ -7,8 +7,11 @@ chooses the training simulator (fit.npe.simulator choose_coarse, unless
 coarse training is off), trains the network round after round
 (fit.npe.train), checks the calibration of its amortised round 1 (when
 asked), and seeds the DREAM chains with the exact posterior
-(fit.npe.seed).  A network loaded from a file only does the seeding.  Stop
-ends it at the next simulation chunk or training batch.
+(fit.npe.seed).  Re-seeding a network (the tab's "Re-seed", or a network
+file saved without its seeds) only does the seeding.  Stop ends it at the
+next simulation chunk or training batch.  The seeds, clusters and probe are
+kept with the network (fit.npe.train NPEResult), so that "Load network…"
+shows them as they were, at once.
 
   Report     what was done: the training simulator and its fidelity, each
              round (simulations, failures, proposal and its acceptance,
@@ -32,8 +35,9 @@ ends it at the next simulation chunk or training batch.
 the Simulation tab (in a joint fit, as the dataset chosen sees it); "DREAM
 from seeds" samples the posterior with DREAM from the seeds, with the
 DREAM page's settings (the chains: one per seed).  "Save network…" writes
-the network (fit.npe.train NPEResult.save, .npe) for "Load network…" in
-the fit box.  The network's samples are never a result: only DREAM's are.
+the network, its seeds and clusters (fit.npe.train NPEResult.save, .npe)
+for "Load network…" in the fit box; "Re-seed" draws new seeds from the
+network with the NPE page's Samples, Seeds and Seed (a new tab).  The network's samples are never a result: only DREAM's are.
 Values are shown in the Simulation tab's units.  An NPE tab is not kept in
 sessions.
 """
@@ -136,6 +140,10 @@ class NPEThread(QtCore.QThread):
                     'Seeding: the exact posterior of %d / %d samples…'
                     % (d, n)),
                 cancelled=lambda: self._stop)
+            # kept with the network (Save network…, Load network…)
+            res.seeds, res.meta['probe'] = seeds, rows
+            res.seeding = dict(n_samples=self.n_samples,
+                               n_chains=self.n_chains, seed=o['seed'])
         except Exception as exc:              # report, don't kill the app
             msg = 'stopped' if self._stop else \
                 '%s: %s' % (type(exc).__name__, exc)
@@ -184,8 +192,10 @@ def report_text(run):
     out.append('Symmetry probe:')
     out.append(format_probe(run.probe))
     out.append('')
+    sd = getattr(run.result, 'seeding', None) or {}
     out.append('Clusters of %d network samples (the chains start at the '
-               'best ones):' % len(run.seeds.u))
+               'best ones; %d seeds, seed %s):'
+               % (len(run.seeds.u), len(run.seeds.x0), sd.get('seed')))
     out.append(format_clusters(run.seeds))
     out.append('')
     out.append('The network only proposes: sample the posterior with '
@@ -204,6 +214,7 @@ class NPEWindow(QtWidgets.QWidget):
     # state x, dataset whose values are sent, what it is ('cluster 2')
     sendRequested = QtCore.pyqtSignal(object, int, str)
     dreamRequested = QtCore.pyqtSignal()
+    reseedRequested = QtCore.pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent, QtCore.Qt.WindowType.Window)
@@ -287,6 +298,12 @@ class NPEWindow(QtWidgets.QWidget):
             'Sample the posterior with DREAM (the DREAM page\'s settings), '
             'one chain per seed:\nthe network proposes, DREAM decides')
         self.btn_dream.clicked.connect(self.dreamRequested)
+        self.btn_reseed = QtWidgets.QPushButton('Re-seed')
+        self.btn_reseed.setToolTip(
+            'Draw new seeds from this network with the NPE page\'s Samples, '
+            'Seeds and Seed (the exact posterior is computed again), in a '
+            'new tab')
+        self.btn_reseed.clicked.connect(self.reseedRequested)
         self.part_box = QtWidgets.QComboBox()
         self.part_box.setToolTip('Joint fit: the dataset whose values "Load '
                                  'into model" writes')
@@ -297,6 +314,7 @@ class NPEWindow(QtWidgets.QWidget):
         bottom.addWidget(self.part_label)
         bottom.addWidget(self.part_box)
         bottom.addWidget(self.btn_save)
+        bottom.addWidget(self.btn_reseed)
         bottom.addSpacing(12)
         bottom.addWidget(self.cluster_box)
         bottom.addWidget(self.btn_send)
@@ -334,7 +352,8 @@ class NPEWindow(QtWidgets.QWidget):
         for page in self.pages.values():
             page.setCurrentIndex(0)
         self.btn_stop.setEnabled(True)
-        for b in (self.btn_save, self.btn_send, self.btn_dream):
+        for b in (self.btn_save, self.btn_send, self.btn_dream,
+                  self.btn_reseed):
             b.setEnabled(False)
         self.cluster_box.clear()
         self.tabs.setCurrentWidget(self.report)
@@ -458,7 +477,8 @@ class NPEWindow(QtWidgets.QWidget):
         self.cluster_box.addItems(
             ['cluster %d (χ²/N %.4g)' % (k, c['chi2'])
              for k, c in enumerate(run.seeds.clusters, 1)])
-        for b in (self.btn_save, self.btn_send, self.btn_dream):
+        for b in (self.btn_save, self.btn_send, self.btn_dream,
+                  self.btn_reseed):
             b.setEnabled(True)
 
     def fail(self, msg):

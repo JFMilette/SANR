@@ -81,7 +81,7 @@ from fit.dream.dream_window import SESSIONS_DIR, DreamThread, DreamWindow
 from fit.joint import JointProblem, part_index, part_x, parts
 from fit.multistart import merge, run_multistart
 from fit.npe import missing as npe_missing
-from fit.npe.npe_window import NPEThread, NPEWindow
+from fit.npe.npe_window import NPERun, NPEThread, NPEWindow
 
 DIALOG_OPTIONS = QtWidgets.QFileDialog.Option.DontUseNativeDialog
 FIT_COSTS = [('chi2', 'χ² (weighted by dR)'), ('log', 'log R (per decade)')]
@@ -1222,7 +1222,8 @@ class FitPanel:
         self._npe.start()
 
     def load_npe_network(self):
-        """Seed DREAM with a network saved from an NPE tab."""
+        """A network saved from an NPE tab: its seeds and clusters shown as
+        they were saved (a file without them is seeded again)."""
         if self.busy():
             return
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -1237,7 +1238,53 @@ class FitPanel:
             QtWidgets.QMessageBox.critical(
                 self, 'Load network', 'Could not load %s:\n%s' % (path, exc))
             return
-        self.start_npe(result, os.path.basename(path))
+        if result.seeds is None:                 # saved before seeds were kept
+            self.start_npe(result, os.path.basename(path))
+        else:
+            self._show_saved_npe(result, os.path.basename(path))
+
+    def _show_saved_npe(self, result, label):
+        """A new NPE tab with the seeds, clusters and probe saved with
+        `result`, for the datasets fitted now (which must be those it was
+        trained on): nothing is computed."""
+        if self.simulation is None or self.busy():
+            return
+        built = self._npe_problem()
+        if built is None:
+            return
+        problem, inputs, qmin, qmax, note = built
+        try:
+            result.check(problem)
+        except ValueError as exc:
+            self.npe_report.setText(self._error(exc))
+            return
+        self._set_fit_start(problem.fit)
+        names = [s['name'] for s, *_ in inputs]
+        self._make_npe_window([label])
+        sd = result.seeding or {}
+        self.npe_window.start(problem, note + html_escape(
+            'Network %s — %d parameter(s), %d points of %s; its seeds as '
+            'saved (%s samples, seed %s)' % (
+                label, problem.ndim, problem.fit.npoints, ' + '.join(names),
+                sd.get('n_samples', '?'), sd.get('seed'))), 0, names)
+        self._show_npe_window()
+        self._npe_done(NPERun(result, problem, result.seeds,
+                              result.meta.get('probe', []),
+                              result.meta.get('calibration')))
+        self.npe_report.setText(
+            'Loaded %s with its %d seeds in %d cluster(s); Re-seed in its '
+            'tab draws new ones.' % (html_escape(label),
+                                     len(result.seeds.x0),
+                                     len(result.seeds.clusters)))
+
+    def _reseed_npe(self, w):
+        """Seed DREAM again from the network of NPE tab w (a new tab)."""
+        if self.busy() or w.run is None:
+            return
+        # a copy: tab w keeps (and saves) its own seeds
+        result = copy.copy(w.run.result)
+        result.meta = copy.deepcopy(result.meta)
+        self.start_npe(result, 'reseed of %s' % w.tab_name)
 
     def _make_npe_window(self, names):
         """A new NPE tab (the last one stays, as DREAM's)."""
@@ -1249,6 +1296,7 @@ class FitPanel:
         w.sendRequested.connect(
             lambda x, part, label, w=w: self._send_npe(x, part, w, label))
         w.dreamRequested.connect(lambda w=w: self._npe_dream(w))
+        w.reseedRequested.connect(lambda w=w: self._reseed_npe(w))
         w.tab_name = self._tab_name('npe', names)
         w.setWindowTitle('Neural posterior estimation (NPE) — '
                          + ' + '.join(names))
