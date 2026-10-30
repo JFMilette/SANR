@@ -69,3 +69,33 @@ python benchmarks/bench_fit.py multistart tests/data/private/session_A --untie -
 Without `--p-snooker` or `--temper`, `dream` runs the plain sampler (snooker 0,
 no tempering), so its numbers compare with the reference ones. `sample()`'s
 defaults, and the GUI's, are snooker 0.1 and the tempered burn-in.
+
+## NPE-seeded DREAM (`plans/npe_plan_v1.md` B0, V3)
+
+`bench_npe_sim.py` (B0) times the training simulator; `bench_fit.py dream
+--seed-npe` (V3.1, V3.2) trains a network on the session and starts DREAM
+at its seeds, without the current values; `bench_npe_joint.py` (V3.3) does
+the same for a joint fit of a saved SANR session. Measured on JF's M1 (8
+cores), 2026-10-30.
+
+**B0, session A untied:** about 0.7–1.3 ms per draw (3 to 9 slabs per
+interface, compiled product on, resolution on or off), 20–59 slabs; 10⁵
+simulations take well under a minute on 8 cores, so training, not
+simulation, takes the time.
+
+**V3.1, session A untied**, 5 rounds × 2·10⁴ simulations (full fidelity: no
+coarse setting was within 0.3 σ), 10⁴ seeding samples, then DREAM 8 chains,
+5000 generations, snooker 0.1 and the tempered burn-in:
+
+| Seed | MAP χ²/N | Chains at the end | Max R̂ | Wall time (training included) |
+|---|---|---|---|---|
+| 1 | 4.9494 | 4.97–5.02 | 3.1 | 33 min |
+| 2 | 4.9895 | 4.99–5.42 | 4.1 | 33 min |
+| 3 | 4.9533 | 4.98–5.06 | 4.7 | 49 min |
+
+Every chain of every seed starts in the 4.927 basin, which the Latin
+hypercube start with the same settings never reaches (6.95 and 12.37
+above); the criterion χ²/N ≤ 4.95 in all 3 seeds is met by seed 1 only:
+5000 generations do not converge inside the basin (R̂ 3–5). Layer 5's
+thickness and the substrate roughness sit on their bounds, as in the warm
+start. Rounds 3–5 drew from the envelope proposal (`fit.npe.train` ROUNDS).
