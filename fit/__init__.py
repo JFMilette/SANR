@@ -9,5 +9,7 @@ Fitting of a model.stack.Stack to measured reflectivity channels.
   dream/    Bayesian sampling with DREAM: dream (the sampler), dream_fit
             (posterior, sample, save / load), dream_plots (matplotlib),
             dream_window (GUI)
+  npe/      neural posterior estimation seeding DREAM (optional torch, sbi):
+            simulator, train, seed, symmetry, npe_window (GUI)
   panel     the Fit tool box of the Experimental tab (GUI)
 """

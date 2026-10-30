@@ -17,6 +17,15 @@ The last step needs a C compiler (on macOS: `xcode-select --install`). Without
 it everything works with the numpy version of the same product, only slower.
 Build again after editing `model/_transfer.pyx`.
 
+The fit box's **Neural posterior (NPE)** method (a network trained on
+simulations finds the regions compatible with the data and seeds DREAM there,
+`fit/npe`, `plans/npe_plan_v1.md`) needs torch, sbi and scikit-learn, which
+SANR otherwise does without:
+
+```bash
+pip install -r requirements-npe.txt
+```
+
 ## Run
 
 ```bash

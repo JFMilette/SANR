@@ -11,8 +11,11 @@ followed in the same fit window as DE), least squares
 current values, likewise), multistart (fit.multistart: local fits from many
 starts, followed in the fit window, which lists the minima they reach as
 does the multistart table, both updated as each start ends; DE restarts
-fill the table too) and Bayesian DREAM (fit.dream, which can start around a
-minimum of that table), with everything they do: building the fit problem
+fill the table too), Bayesian DREAM (fit.dream, which can start around a
+minimum of that table) and neural posterior estimation (fit.npe: a network
+trained on simulations proposes the regions compatible with the data,
+followed in its NPE tab, whose seeds DREAM can start from: the DREAM start
+'NPE seeds'), with everything they do: building the fit problem
 from the chosen dataset and the Simulation tab, running it in a background
 thread, following it in its window (a closable tab of the main window,
 page_tabs) and sending results back to the Simulation tab.
@@ -77,6 +80,8 @@ from fit.dream.dream_fit import (PosteriorProblem, jittered_start, load_run,
 from fit.dream.dream_window import SESSIONS_DIR, DreamThread, DreamWindow
 from fit.joint import JointProblem, part_index, part_x, parts
 from fit.multistart import merge, run_multistart
+from fit.npe import missing as npe_missing
+from fit.npe.npe_window import NPEThread, NPEWindow
 
 DIALOG_OPTIONS = QtWidgets.QFileDialog.Option.DontUseNativeDialog
 FIT_COSTS = [('chi2', 'χ² (weighted by dR)'), ('log', 'log R (per decade)')]
@@ -89,14 +94,16 @@ FIT_TARGETS = [('channels', 'R per channel', ''),
 # minimum selected in the multistart table
 DREAM_STARTS = [('Latin hypercube', None), ('DE population', 'de'),
                 ('current values', 'current'),
-                ('multistart minimum', 'multistart')]
+                ('multistart minimum', 'multistart'),
+                ('NPE seeds', 'npe')]
 # the Method box: key, label
 FIT_METHODS = [('de', 'Differential evolution'),
                ('basinhopping', 'Basin hopping'),
                ('dual_annealing', 'Dual annealing'), ('shgo', 'SHGO'),
                ('direct', 'DIRECT'), ('lbfgs', 'L-BFGS-B'),
                ('lsq', 'Least squares'), ('multistart', 'Multistart'),
-               ('dream', 'Bayesian (DREAM)')]
+               ('dream', 'Bayesian (DREAM)'),
+               ('npe', 'Neural posterior (NPE)')]
 SHGO_SAMPLING = [('sobol', 'Sobol'), ('halton', 'Halton'),
                  ('simplicial', 'simplicial')]
 MS_METHODS = [('L-BFGS-B', 'lbfgs'), ('least squares', 'lsq'),
@@ -113,7 +120,7 @@ TAB_METHODS = {'de': 'DE', 'lbfgs': 'L-BFGS-B', 'lsq': 'LSQ',
                'basinhopping': 'BH', 'dual_annealing': 'DA', 'shgo': 'SHGO',
                'direct': 'DIRECT',
                'multistart': 'Multistart',
-               'dream': 'DREAM'}
+               'dream': 'DREAM', 'npe': 'NPE'}
 TAB_NAME_MAX = 18
 
 
@@ -329,7 +336,9 @@ class FitPanel:
             'from the current values.\n'
             'Multistart: local fits from the current values and from points '
             'spread over the bounds.\n'
-            'Bayesian (DREAM): samples the posterior.')
+            'Bayesian (DREAM): samples the posterior.\n'
+            'Neural posterior (NPE): a network trained on simulations finds '
+            'the regions compatible with the data and seeds DREAM there.')
         line = QtWidgets.QFrame()
         line.setFrameShape(QtWidgets.QFrame.Shape.HLine)
         line.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
@@ -390,7 +399,8 @@ class FitPanel:
             'lsq': self._build_lsq_page(),
             **self._build_global_pages(),
             'multistart': self._build_multistart_page(),
-            'dream': self._build_dream_page()}
+            'dream': self._build_dream_page(),
+            'npe': self._build_npe_page()}
         content = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(content)
         v.setContentsMargins(0, 0, 0, 0)
@@ -747,7 +757,7 @@ class FitPanel:
         self._ms.finished.connect(self._ms_cleanup)
         sim.set_locked(True)
         for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
-                  *self._global_buttons, self.btn_sample,
+                  *self._global_buttons, self.btn_sample, self.btn_npe_train,
                   self.btn_revert, self.btn_ms_run, self.btn_ms_apply,
                   self.btn_ms_dream):
             b.setEnabled(False)
@@ -781,7 +791,7 @@ class FitPanel:
         self._ms = None
         self.simulation.set_locked(False)
         for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
-                  *self._global_buttons, self.btn_sample,
+                  *self._global_buttons, self.btn_sample, self.btn_npe_train,
                   self.btn_ms_run):
             b.setEnabled(True)
         self.btn_ms_stop.setEnabled(False)
@@ -1030,6 +1040,266 @@ class FitPanel:
         self.dream_window = None
         return page
 
+    # -- neural posterior estimation (fit.npe) ------------------------------
+    def _build_npe_page(self):
+        """The NPE options of the fit box."""
+        page, f = self._page()
+        self.npe_rounds = QtWidgets.QSpinBox()
+        self.npe_rounds.setRange(1, 20)
+        self.npe_rounds.setValue(5)
+        self.npe_rounds.setToolTip(
+            'Training rounds: the first draws from the prior (a network '
+            'for any data), each next one from the prior truncated to the '
+            'region the last network finds for these data')
+        self.npe_sims = QtWidgets.QSpinBox()
+        self.npe_sims.setRange(500, 1_000_000)
+        self.npe_sims.setSingleStep(1000)
+        self.npe_sims.setValue(20000)
+        self.npe_sims.setToolTip('Simulations per round (one model '
+                                 'evaluation each, in the worker processes)')
+        self.npe_samples = QtWidgets.QSpinBox()
+        self.npe_samples.setRange(500, 1_000_000)
+        self.npe_samples.setSingleStep(1000)
+        self.npe_samples.setValue(10000)
+        self.npe_samples.setToolTip(
+            'Network samples whose exact posterior is computed to choose '
+            'the DREAM seeds (one model evaluation each)')
+        self.npe_chains = QtWidgets.QSpinBox()
+        self.npe_chains.setRange(0, 200)
+        self.npe_chains.setSpecialValueText('auto')
+        self.npe_chains.setToolTip(
+            'Seeds, i.e. DREAM chains; auto as the DREAM page (8 with the '
+            'archive, otherwise max(7, d + 1))')
+        self.npe_seed = QtWidgets.QSpinBox()
+        self.npe_seed.setRange(-1, 999_999)
+        self.npe_seed.setValue(-1)
+        self.npe_seed.setSpecialValueText('random')
+        self.npe_seed.setToolTip('Random seed: the same seed and settings '
+                                 'give the same simulations')
+        self.npe_coarse = QtWidgets.QCheckBox('coarse training simulator')
+        self.npe_coarse.setChecked(True)
+        self.npe_coarse.setToolTip(
+            'Train on fewer slabs per interface and a coarser resolution '
+            'grid when they stay within the threshold\n(99 % of the draws, '
+            'worst Q point, in units of dR); DREAM always uses the full '
+            'model')
+        self.npe_threshold = QtWidgets.QDoubleSpinBox()
+        self.npe_threshold.setRange(0.01, 5.0)
+        self.npe_threshold.setSingleStep(0.05)
+        self.npe_threshold.setValue(0.3)
+        self.npe_threshold.setSuffix(' σ')
+        self.npe_threshold.setToolTip('Largest gap of the coarse simulator, '
+                                      'in units of dR')
+        self.npe_coarse.toggled.connect(self.npe_threshold.setEnabled)
+        self.npe_calibrate = QtWidgets.QCheckBox('calibrate round 1')
+        self.npe_calibrate.setChecked(True)
+        self.npe_calibrate.setToolTip(
+            'Simulation-based calibration of the first-round network (300 '
+            'more simulations); only a calibrated one should be used for '
+            'scenario studies (scripts/npe_scenarios.py)')
+        f.addRow(self._grid([('Rounds', self.npe_rounds),
+                             ('Simulations', self.npe_sims),
+                             ('Samples', self.npe_samples),
+                             ('Seeds', self.npe_chains),
+                             ('Seed', self.npe_seed),
+                             ('Threshold', self.npe_threshold)]))
+        opts = QtWidgets.QHBoxLayout()
+        opts.addWidget(self.npe_coarse)
+        opts.addWidget(self.npe_calibrate)
+        opts.addStretch(1)
+        f.addRow(opts)
+        missing = npe_missing()
+        f.addRow(QtWidgets.QLabel(
+            '<i>The network only proposes: the seeds it gives start DREAM '
+            '("DREAM from seeds" in its tab, or the DREAM start "NPE seeds"),'
+            ' which samples the exact posterior.  χ² likelihood with the '
+            'measured dR.</i>' if not missing else self._error(
+                'NPE needs %s: pip install -r requirements-npe.txt'
+                % ', '.join(missing)), wordWrap=True))
+        row = QtWidgets.QHBoxLayout()
+        self.btn_npe_train = QtWidgets.QPushButton('Train')
+        self.btn_npe_train.setToolTip(
+            'Train a network on simulations of the parameters ticked Fit in '
+            'the Simulation tab, then seed DREAM')
+        self.btn_npe_window = QtWidgets.QPushButton('Show')
+        self.btn_npe_window.setToolTip('Show the last NPE run')
+        self.btn_npe_window.setEnabled(False)
+        self.btn_npe_load = QtWidgets.QPushButton('Load network…')
+        self.btn_npe_load.setToolTip(
+            'Seed DREAM with a network saved with "Save network…" in the '
+            'NPE tab, for the same parameters, bounds and data')
+        for b in (self.btn_npe_train, self.btn_npe_window, self.btn_npe_load):
+            row.addWidget(b)
+        f.addRow(row)
+        self.btn_npe_train.clicked.connect(lambda: self.start_npe())
+        self.btn_npe_load.clicked.connect(self.load_npe_network)
+        self.btn_npe_window.clicked.connect(self._show_npe_window)
+        for b in (self.btn_npe_train, self.btn_npe_load):
+            b.setEnabled(not missing)
+        self.npe_report = QtWidgets.QLabel(wordWrap=True)
+        self.npe_report.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        f.addRow(self.npe_report)
+        self._npe = None                # running NPEThread
+        self.npe_window = None
+        self._npe_seeds = None          # (names, x0) DREAM starts from
+        return page
+
+    def _npe_problem(self):
+        """(PosteriorProblem, inputs, qmin, qmax, warnings) of the datasets
+        to fit, for NPE; None, with the reason in the NPE report."""
+        built = self._problem(self.npe_report, 'chi2', 'channels')
+        if built is None:
+            return None
+        fit, inputs, qmin, qmax, note = built
+        try:
+            problem = PosteriorProblem(fit)
+        except ValueError as exc:
+            self.npe_report.setText(self._error(exc))
+            return None
+        return problem, inputs, qmin, qmax, note
+
+    def start_npe(self, result=None, label=None):
+        """Train a network on the fitted datasets (or seed from `result`,
+        a loaded fit.npe.train NPEResult) in an NPEThread followed by a
+        new NPE tab."""
+        if self.simulation is None or self.busy() or npe_missing():
+            return
+        built = self._npe_problem()
+        if built is None:
+            return
+        problem, inputs, qmin, qmax, note = built
+        if result is not None:
+            try:
+                result.check(problem)
+            except ValueError as exc:
+                self.npe_report.setText(self._error(exc))
+                return
+        self._set_fit_start(problem.fit)
+        n = self.npe_chains.value() or (
+            8 if self.dream_archive.isChecked()
+            else max(7, problem.ndim + 1))
+        seed = None if self.npe_seed.value() < 0 else self.npe_seed.value()
+        rounds, sims = self.npe_rounds.value(), self.npe_sims.value()
+        names = [s['name'] for s, *_ in inputs]
+        self._make_npe_window(names if label is None else [label])
+        what = '%d parameter(s), %d points of %s (Q %.4g – %.4g Å⁻¹)' % (
+            problem.ndim, problem.fit.npoints, ' + '.join(names), qmin, qmax)
+        if result is not None:
+            what = 'Network %s — %s' % (html_escape(label), what)
+        self.npe_window.start(problem, note + html_escape(what),
+                              0 if result is not None else rounds * sims,
+                              names)
+        self._show_npe_window()
+        self._npe = NPEThread(
+            problem, result=result, coarse=self.npe_coarse.isChecked(),
+            threshold=self.npe_threshold.value(), seed=seed,
+            n_workers=self.fit_workers.value(), rounds=rounds,
+            sims_per_round=sims, n_samples=self.npe_samples.value(),
+            n_chains=n, calibrate=self.npe_calibrate.isChecked())
+        w = self.npe_window
+        self._npe.stage.connect(w.stage)
+        self._npe.sims.connect(w.sims)
+        self._npe.roundDone.connect(w.round_done)
+        self._npe.coarse.connect(w.coarse)
+        self._npe.done.connect(self._npe_done)
+        self._npe.failed.connect(self._npe_failed)
+        self._npe.finished.connect(self._npe_cleanup)
+        self.simulation.set_locked(True)
+        for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
+                  *self._global_buttons, self.btn_sample, self.btn_npe_train,
+                  self.btn_npe_load, self.btn_revert, self.btn_ms_run):
+            b.setEnabled(False)
+        self.npe_report.setText(note + ('Seeding from ' if result is not None
+                                        else 'Training on ')
+                                + html_escape(what) + '…')
+        self._npe.start()
+
+    def load_npe_network(self):
+        """Seed DREAM with a network saved from an NPE tab."""
+        if self.busy():
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, 'Load network', SESSIONS_DIR,
+            'NPE network (*.npe);;All files (*)', options=DIALOG_OPTIONS)
+        if not path:
+            return
+        try:
+            from fit.npe.train import load_npe
+            result = load_npe(path)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self, 'Load network', 'Could not load %s:\n%s' % (path, exc))
+            return
+        self.start_npe(result, os.path.basename(path))
+
+    def _make_npe_window(self, names):
+        """A new NPE tab (the last one stays, as DREAM's)."""
+        old = self.npe_window
+        if old is not None:
+            old.stopRequested.disconnect()
+        w = self.npe_window = NPEWindow(self)
+        w.stopRequested.connect(self.stop_npe)
+        w.sendRequested.connect(
+            lambda x, part, label, w=w: self._send_npe(x, part, w, label))
+        w.dreamRequested.connect(lambda w=w: self._npe_dream(w))
+        w.tab_name = self._tab_name('npe', names)
+        w.setWindowTitle('Neural posterior estimation (NPE) — '
+                         + ' + '.join(names))
+        self.btn_npe_window.setEnabled(True)
+
+    def _show_npe_window(self):
+        if self.npe_window is not None:
+            self._reveal(self.npe_window)
+
+    def stop_npe(self):
+        if self._npe is not None:
+            self._npe.stop()
+            self.npe_window.btn_stop.setEnabled(False)
+
+    def _npe_done(self, run):
+        self.npe_window.finish(run)
+        self._npe_seeds = (list(run.problem.names), run.seeds.x0)
+        self.dream_start.setCurrentIndex(self.dream_start.findData('npe'))
+        self.npe_report.setText(
+            'Done: %d seeds in %d cluster(s); "DREAM from seeds" in the NPE '
+            'tab samples the posterior.' % (len(run.seeds.x0),
+                                            len(run.seeds.clusters)))
+
+    def _npe_failed(self, msg):
+        self.npe_window.fail(msg)
+        self.npe_report.setText('Stopped.' if msg == 'stopped' else
+                                self._error('NPE failed: %s' % msg))
+
+    def _npe_cleanup(self):
+        self._npe.deleteLater()
+        self._npe = None
+        self.simulation.set_locked(False)
+        for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
+                  *self._global_buttons, self.btn_sample, self.btn_npe_train,
+                  self.btn_npe_load, self.btn_ms_run):
+            b.setEnabled(True)
+
+    def _send_npe(self, x, part, w, label):
+        """Write a cluster's best state of NPE tab w into the models of its
+        datasets (_send_values)."""
+        if self.busy():
+            return
+        sent = self._send_values(w.problem.fit, x, part, w, 'Load into model')
+        if sent is not None:
+            self.npe_report.setText('%s sent to %s.' % (
+                label, self._to_models(sent)))
+            self.btn_revert.setEnabled(True)
+
+    def _npe_dream(self, w):
+        """Start DREAM from the seeds of NPE tab w."""
+        if self.busy() or w.run is None:
+            return
+        self._npe_seeds = (list(w.run.problem.names), w.run.seeds.x0)
+        self.dream_start.setCurrentIndex(self.dream_start.findData('npe'))
+        self.fit_method.setCurrentIndex(self.fit_method.findData('dream'))
+        self.start_dream()
+
     def _fittable(self):
         """Names of the datasets that can be fitted: static ones holding
         channels."""
@@ -1236,7 +1506,7 @@ class FitPanel:
     def busy(self):
         """A fit, a multistart or a DREAM run is going on."""
         return self._fit is not None or self._dream is not None or \
-            self._ms is not None
+            self._ms is not None or self._npe is not None
 
     def _fit_inputs(self, report):
         """(dataset, {channel: [Pi, Pa]}, data list, qmin, qmax, grid) of
@@ -1699,7 +1969,7 @@ class FitPanel:
         # a result is only sent to the stack the fit started from
         sim.set_locked(True)
         for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
-                  *self._global_buttons, self.btn_sample,
+                  *self._global_buttons, self.btn_sample, self.btn_npe_train,
                   self.btn_revert, self.btn_ms_run):
             b.setEnabled(False)
         self._fit_out.setText(
@@ -1775,6 +2045,20 @@ class FitPanel:
                                         else max(7, problem.ndim + 1))
             options['x0'] = jittered_start(problem, n, options['seed'],
                                            row['x'])
+        elif options['x0'] == 'npe':
+            seeds = self._npe_seeds
+            if seeds is None or seeds[0] != problem.names:
+                self.dream_report.setText(self._error(
+                    'Train a network on these parameters first (the NPE '
+                    'method), without the error scale or floor.'))
+                return
+            options['x0'] = seeds[1]
+            options['n_chains'] = len(seeds[1])
+            if not options['archive'] and len(seeds[1]) < 7:
+                self.dream_report.setText(self._error(
+                    'Classic DREAM needs 7 chains or more: the network gave '
+                    '%d seeds.' % len(seeds[1])))
+                return
         self._make_dream_window([s['name'] for s, *_ in inputs])
         header = ('%d parameter(s), %d points of %s (Q %.4g – %.4g Å⁻¹)'
                   % (problem.ndim, problem.fit.npoints,
@@ -1801,7 +2085,7 @@ class FitPanel:
         if self.simulation is not None:
             self.simulation.set_locked(True)
         for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
-                  *self._global_buttons, self.btn_sample,
+                  *self._global_buttons, self.btn_sample, self.btn_npe_train,
                   self.btn_revert, self.btn_dream_load, self.btn_ms_run):
             b.setEnabled(False)
         self.dream_report.setText(report)
@@ -1994,9 +2278,13 @@ class FitPanel:
         tabs.setCurrentIndex(i)
 
     def close_page(self, w):
-        """The close button of tab w of page_tabs: the fit or DREAM tab is
-        deleted with its history; not while its fit or run goes on."""
-        if isinstance(w, DEWindow):
+        """The close button of tab w of page_tabs: the fit, DREAM or NPE
+        tab is deleted with its history; not while its fit or run goes
+        on."""
+        if isinstance(w, NPEWindow):
+            running, what = w is self.npe_window and \
+                self._npe is not None, 'NPE run'
+        elif isinstance(w, DEWindow):
             running, what = w is self.fit_window and (
                 self._fit is not None or self._ms is not None), 'fit'
         elif isinstance(w, DreamWindow):
@@ -2017,6 +2305,9 @@ class FitPanel:
         elif w is self.dream_window:
             self.dream_window = None
             buttons = (self.btn_dream_window,)
+        elif w is self.npe_window:
+            self.npe_window = None
+            buttons = (self.btn_npe_window,)
         for b in buttons:
             b.setEnabled(False)
         self.page_tabs.removeTab(self.page_tabs.indexOf(w))
@@ -2038,7 +2329,7 @@ class FitPanel:
         self._dream = None
         self.simulation.set_locked(False)
         for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
-                  *self._global_buttons, self.btn_sample,
+                  *self._global_buttons, self.btn_sample, self.btn_npe_train,
                   self.btn_dream_load, self.btn_ms_run):
             b.setEnabled(True)
 
@@ -2159,7 +2450,7 @@ class FitPanel:
         self._fit = None
         self.simulation.set_locked(False)
         for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
-                  *self._global_buttons, self.btn_sample,
+                  *self._global_buttons, self.btn_sample, self.btn_npe_train,
                   self.btn_ms_run):
             b.setEnabled(True)
 
@@ -2178,7 +2469,9 @@ class FitPanel:
             self.fit_window.hide()
         if self.dream_window is not None:
             self.dream_window.hide()
-        for t in (self._fit, self._dream, self._ms):
+        if self.npe_window is not None:
+            self.npe_window.hide()
+        for t in (self._fit, self._dream, self._ms, self._npe):
             if t is not None:
                 t.stop()
                 t.wait()

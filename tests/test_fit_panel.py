@@ -278,7 +278,7 @@ def test_method_box_shows_its_options(app):
     exp = tab(QA, QA, licorne=False)
     keys = [exp.fit_method.itemData(k) for k in range(exp.fit_method.count())]
     assert keys == ['de', 'basinhopping', 'dual_annealing', 'shgo',
-                    'direct', 'lbfgs', 'lsq', 'multistart', 'dream']
+                    'direct', 'lbfgs', 'lsq', 'multistart', 'dream', 'npe']
     for key in keys:
         exp.fit_method.setCurrentIndex(exp.fit_method.findData(key))
         assert [k for k, p in exp._method_pages.items()
@@ -286,7 +286,7 @@ def test_method_box_shows_its_options(app):
     state = exp.session_state('.')
     exp.fit_method.setCurrentIndex(0)
     exp.restore_state(state, '.')
-    assert exp.fit_method.currentData() == 'dream'
+    assert exp.fit_method.currentData() == 'npe'
     exp.fit_method.setCurrentIndex(0)
     exp.start_dream = lambda: None
     exp._ms_dream()
