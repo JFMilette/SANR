@@ -1,0 +1,6 @@
+# Optional: neural posterior estimation (fit.npe, plans/npe_plan_v1.md).
+# pip install -r requirements.txt -r requirements-npe.txt
+# fit.npe.train is written against sbi 0.27.0; torch on the CPU.
+torch==2.12.1
+sbi==0.27.0
+scikit-learn==1.7.2
