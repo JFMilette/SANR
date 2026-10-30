@@ -99,3 +99,9 @@ above); the criterion χ²/N ≤ 4.95 in all 3 seeds is met by seed 1 only:
 5000 generations do not converge inside the basin (R̂ 3–5). Layer 5's
 thickness and the substrate roughness sit on their bounds, as in the warm
 start. Rounds 3–5 drew from the envelope proposal (`fit.npe.train` ROUNDS).
+
+**V3.2, session B** (7 parameters, `--vary` as above), the same NPE
+settings, DREAM 8 chains, 8000 generations, snooker 0.1 and the tempered
+burn-in: MAP χ²/N 13.2893, 13.2897, 13.2890 for seeds 1–3, every chain at
+13.29–13.33, R̂ 1.08, 1.04, 1.05: it matches the reference (13.29, R̂ ≤
+1.09).
