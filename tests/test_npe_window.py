@@ -82,7 +82,14 @@ def test_npe_page_and_tab(app, monkeypatch):
     w.epoch_done(dict(STATS, round=2, epoch=3, since_best=1, patience=20))
     assert 'epoch 3' in w.status.text() and '1 epoch(s) ago' in \
         w.status.text()
-    assert len(w.loss_plot.listDataItems()) == 2   # the round so far
+    # the round so far: points on the curves, a star at the best epoch
+    items = [i for i in w.loss_plot.listDataItems()
+             if i.getData()[0] is not None and len(i.getData()[0])]
+    val = [i for i in items if i.name() == 'round 2']
+    assert len(val) == 1 and val[0].opts['symbol'] == 'o'
+    assert list(val[0].getData()[1]) == STATS['validation_loss']
+    star = [i for i in items if i.opts['symbol'] == 'star']
+    assert len(star) == 1 and star[0].getData()[1][0] == -1.5
     w.round_done(STATS)
     run = fake_run(problem)
     exp._npe_done(run)

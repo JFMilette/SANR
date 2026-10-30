@@ -14,9 +14,13 @@ ends it at the next simulation chunk or training batch.
              round (simulations, failures, proposal and its acceptance,
              epochs, best validation loss, time), the calibration, the
              symmetry probe, and the clusters as text
-  Training   the validation loss (solid) and training loss (dashed) of
-             every epoch, one colour per round, the round being trained
-             drawn as it goes; the status line says its epoch, its loss and
+  Training   the loss -log q(theta | x) of every epoch (lower is better),
+             one colour per round: on the 10 % of the simulations held
+             out of the training (validation, solid line and filled
+             points; it ends a round and picks its network, the best
+             epoch's, starred) and on the 90 % trained on (training,
+             dashed, hollow points); a dashed vertical line where each
+             round starts; the round being trained drawn as it goes; the status line says its epoch, its loss and
              how many epochs have passed without a better one (the round
              ends after 20)
   Clusters   the candidate solutions (fit.npe.seed clusters): weight,
@@ -47,6 +51,7 @@ from fit.dream.dream_window import (CHAIN_COLOURS, SESSIONS_DIR, axis_label,
 
 DIALOG_OPTIONS = QtWidgets.QFileDialog.Option.DontUseNativeDialog
 OK, BAD = '#4ade80', '#f87171'
+LOSS_KEY = '#9aa0a6'              # the Training plot's legend key
 
 
 class NPERun:
@@ -228,8 +233,10 @@ class NPEWindow(QtWidgets.QWidget):
         self.report.setLineWrapMode(
             QtWidgets.QPlainTextEdit.LineWrapMode.NoWrap)
         self.loss = pg.GraphicsLayoutWidget()
-        self.loss_plot = plot_item('epoch', 'loss (−log q)')
-        self.loss_plot.addLegend(offset=(-10, 10))
+        self.loss_plot = plot_item('epoch (all rounds)',
+                                   'loss  −log q(θ | x)   (lower is better)')
+        # bottom left: the loss falls from round to round, leaving it free
+        self.loss_plot.addLegend(offset=(10, -10))
         self.loss.addItem(self.loss_plot)
         self.table = QtWidgets.QTableWidget()
         self.table.setEditTriggers(
@@ -378,18 +385,45 @@ class NPEWindow(QtWidgets.QWidget):
 
     def _draw_loss(self, current=None):
         """The finished rounds' losses, and the round being trained
-        (current: an 'epoch' event of fit.npe.train) after them."""
-        self.loss_plot.clear()
+        (current: an 'epoch' event of fit.npe.train) after them (see
+        Training in the module docstring)."""
+        p = self.loss_plot
+        p.clear()
+        grey = pg.mkPen(LOSS_KEY, width=1.5)
+        # the legend's first rows say which line is which
+        p.plot([], [], pen=grey, symbol='o', symbolSize=6, symbolPen=None,
+               symbolBrush=LOSS_KEY,
+               name='validation (held out): ends a round')
+        p.plot([], [], pen=pg.mkPen(LOSS_KEY, width=1,
+                                    style=QtCore.Qt.PenStyle.DashLine),
+               symbol='o', symbolSize=5, symbolPen=LOSS_KEY,
+               symbolBrush=None, name='training')
+        p.plot([], [], pen=None, symbol='star', symbolSize=13,
+               symbolPen=LOSS_KEY, symbolBrush=LOSS_KEY,
+               name="best epoch: the round's network")
         start = 0
         for r in self._rounds + ([current] if current else []):
             c = CHAIN_COLOURS[(r['round'] - 1) % len(CHAIN_COLOURS)]
-            e = start + np.arange(len(r['validation_loss']))
-            self.loss_plot.plot(e, r['validation_loss'],
-                                pen=pg.mkPen(c, width=1.5),
-                                name='round %d' % r['round'])
-            self.loss_plot.plot(e, r['training_loss'], pen=pg.mkPen(
-                c, width=1, style=QtCore.Qt.PenStyle.DashLine))
-            start += len(e)
+            v = np.asarray(r['validation_loss'], dtype=float)
+            e = start + np.arange(1, len(v) + 1)
+            if start:
+                p.addItem(pg.InfiniteLine(
+                    start + 0.5, angle=90, label='round %d' % r['round'],
+                    labelOpts=dict(position=0.95, color=c),
+                    pen=pg.mkPen(LOSS_KEY, width=1,
+                                 style=QtCore.Qt.PenStyle.DotLine)))
+            p.plot(e, v, pen=pg.mkPen(c, width=1.5), symbol='o',
+                   symbolSize=6, symbolPen=None, symbolBrush=c,
+                   name='round %d' % r['round'])
+            p.plot(e, r['training_loss'],
+                   pen=pg.mkPen(c, width=1,
+                                style=QtCore.Qt.PenStyle.DashLine),
+                   symbol='o', symbolSize=5, symbolPen=c, symbolBrush=None)
+            if len(v):
+                b = int(np.argmin(v))
+                p.plot([e[b]], [v[b]], pen=None, symbol='star',
+                       symbolSize=13, symbolPen=c, symbolBrush=c)
+            start += len(v)
 
     def finish(self, run):
         """The run ended: its report, clusters and marginals."""
