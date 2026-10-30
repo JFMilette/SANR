@@ -51,6 +51,66 @@ TICKS = [('untick', 'Untick all',
 FIT_COL, NAME_COL, FROM_COL, ALL_COL = range(4)
 
 
+class CentredCheck(QtWidgets.QStyledItemDelegate):
+    """A checkable cell's tick drawn in its middle, toggled by a click
+    anywhere in the cell (Qt's own: at the left, the box only)."""
+
+    def paint(self, painter, option, index):
+        opt = QtWidgets.QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        style = opt.widget.style() if opt.widget else \
+            QtWidgets.QApplication.style()
+        box = style.subElementRect(
+            QtWidgets.QStyle.SubElement.SE_ItemViewItemCheckIndicator, opt,
+            opt.widget)
+        tick = QtWidgets.QStyleOptionViewItem(opt)
+        tick.rect = QtWidgets.QStyle.alignedRect(
+            opt.direction, QtCore.Qt.AlignmentFlag.AlignCenter, box.size(),
+            option.rect)
+        state = opt.checkState
+        tick.state = (tick.state & ~QtWidgets.QStyle.StateFlag.State_HasFocus
+                      & ~QtWidgets.QStyle.StateFlag.State_On
+                      & ~QtWidgets.QStyle.StateFlag.State_Off
+                      & ~QtWidgets.QStyle.StateFlag.State_NoChange) | (
+            QtWidgets.QStyle.StateFlag.State_On
+            if state == QtCore.Qt.CheckState.Checked
+            else QtWidgets.QStyle.StateFlag.State_NoChange
+            if state == QtCore.Qt.CheckState.PartiallyChecked
+            else QtWidgets.QStyle.StateFlag.State_Off)
+        # the cell without its tick, then the tick in the middle
+        opt.features &= \
+            ~QtWidgets.QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
+        style.drawControl(QtWidgets.QStyle.ControlElement.CE_ItemViewItem,
+                          opt, painter, opt.widget)
+        style.drawPrimitive(
+            QtWidgets.QStyle.PrimitiveElement.PE_IndicatorItemViewItemCheck,
+            tick, painter, opt.widget)
+
+    def editorEvent(self, event, model, option, index):
+        flags = index.flags()
+        if not (flags & QtCore.Qt.ItemFlag.ItemIsUserCheckable
+                and flags & QtCore.Qt.ItemFlag.ItemIsEnabled):
+            return False
+        kind = event.type()
+        mouse = (QtCore.QEvent.Type.MouseButtonPress,
+                 QtCore.QEvent.Type.MouseButtonDblClick)
+        if kind in mouse:
+            return event.button() == QtCore.Qt.MouseButton.LeftButton
+        if kind == QtCore.QEvent.Type.MouseButtonRelease:
+            if event.button() != QtCore.Qt.MouseButton.LeftButton or \
+                    not option.rect.contains(event.position().toPoint()):
+                return False
+        elif not (kind == QtCore.QEvent.Type.KeyPress and event.key() in (
+                QtCore.Qt.Key.Key_Space, QtCore.Qt.Key.Key_Select)):
+            return False
+        # partly ticked (some models only) ticks it everywhere
+        on = index.data(QtCore.Qt.ItemDataRole.CheckStateRole) in (
+            QtCore.Qt.CheckState.Checked, QtCore.Qt.CheckState.Checked.value)
+        return model.setData(index, QtCore.Qt.CheckState.Unchecked if on
+                             else QtCore.Qt.CheckState.Checked,
+                             QtCore.Qt.ItemDataRole.CheckStateRole)
+
+
 class DatasetsPanel(QtWidgets.QWidget):
     """Pick datasets, their models, the parameters fitted and their modes
     (see the module docstring)."""
@@ -87,6 +147,8 @@ class DatasetsPanel(QtWidgets.QWidget):
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        self.table.setItemDelegateForColumn(FIT_COL,
+                                            CentredCheck(self.table))
         self.table.itemChanged.connect(self._fit_ticked)
         self.all_combos = {}           # parameter -> "All datasets" combo
         self.from_combos = {}          # parameter -> its From combo

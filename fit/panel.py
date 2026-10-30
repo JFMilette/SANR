@@ -82,7 +82,7 @@ DIALOG_OPTIONS = QtWidgets.QFileDialog.Option.DontUseNativeDialog
 FIT_COSTS = [('chi2', 'χ² (weighted by dR)'), ('log', 'log R (per decade)')]
 # what the cost compares (fit.problem TARGET); the label's end names it in
 # the fit window
-FIT_TARGETS = [('channels', 'every channel', ''),
+FIT_TARGETS = [('channels', 'R per channel', ''),
                ('sum', '(R+ + R−)/2', ' of (R+ + R−)/2'),
                ('asym', 'spin asymmetry SA', ' of SA')]
 # DREAM start (dream_fit.sample x0): label, key; 'multistart': around the
@@ -209,7 +209,7 @@ class FitPanel:
         self.fit_target.setToolTip(
             'What every method but DREAM compares with the data (DREAM '
             'always samples every channel):\n'
-            'every channel: each channel (R+, R−, or all four) on its own.\n'
+            'R per channel: each channel (R+, R−, or all four) on its own.\n'
             '(R+ + R−)/2: their mean point by point, where magnetism only '
             'enters at second order:\n  the NSLD, thicknesses and '
             'roughnesses, e.g. shared by datasets whose magnetism differs.\n'

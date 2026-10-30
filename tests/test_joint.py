@@ -273,6 +273,32 @@ def test_fit_ticks_go_to_the_models():
     assert all(cb.isHidden() for *_, cb, _ in sim.editor.rows.values())
 
 
+def test_fit_tick_anywhere_in_its_cell():
+    """The Fit tick sits in the middle of its cell and a click anywhere in
+    the cell ticks it, a second one unticks it."""
+    from PyQt6 import QtCore, QtTest
+    sim, exp = gui()
+    choose_joint(exp, {})
+    panel = exp.datasets_panel
+    t = panel.table
+    p = 'L1.NSLD_real'
+    t.setColumnWidth(0, 80)
+
+    def click():
+        rect = t.visualRect(t.model().index(panel.params.index(p), 0))
+        QtTest.QTest.mouseClick(t.viewport(), QtCore.Qt.MouseButton.LeftButton,
+                                pos=QtCore.QPoint(rect.right() - 3,
+                                                  rect.center().y()))
+        APP[0].processEvents()
+
+    assert panel.varied[p] is False
+    click()
+    assert panel.varied[p] is True
+    assert sim.stack.layers[1].fit['NSLD_real']['vary']
+    click()
+    assert panel.varied[p] is False
+
+
 def test_panel_follows_and_sets_the_dataset_box():
     """Ticking a second dataset makes the joint entry; picking one dataset
     in the Dataset box ticks it alone; picking the joint entry again
