@@ -15,7 +15,11 @@ dream --start lhs (default), de or npe: where the chains start; npe
 (fit.npe.train.run_npe: --npe-rounds, --npe-sims, coarse simulator unless
 --npe-full) and starts the chains at the seeds of fit.npe.seed, without
 the current values; the time recorded includes the training, and the
-clusters found are printed and recorded.
+clusters found are printed and recorded.  --npe-archive both (plan Q1)
+runs DREAM twice from the same seeds: with the DREAM(ZS) archive drawn from
+the bounds (the default, 'prior') and with it drawn from the network's
+samples ('npe', dream_fit.sample z0: 10 d of them at random); 'npe' alone
+runs only the second.
 
 The free parameters are the session's own fit flags (default), or --vary
 "i:attr,i:attr,..." with i the layer index in the SANR stack (0 = fronting).
@@ -114,7 +118,8 @@ def landscape(p, names, starts, seed):
 
 
 def npe_seeds(pp, seed, chains, npe, workers):
-    """(x0, record) of NPE-seeded chains (see the module docstring)."""
+    """(x0, record, z0) of NPE-seeded chains (see the module docstring),
+    z0 an archive of the network's samples."""
     from fit.npe.seed import format_clusters, seed_chains
     from fit.npe.train import run_npe
     res = run_npe(pp, coarse=not npe['full'], rounds=npe['rounds'],
@@ -128,7 +133,10 @@ def npe_seeds(pp, seed, chains, npe, workers):
                               chi2=c['chi2'], at_bound=c['at_bound'],
                               best_x=list(map(float, c['best_x'])))
                          for c in seeds.clusters])
-    return seeds.x0, rec
+    rng = np.random.default_rng(seed)
+    m0 = min(max(10 * pp.ndim, 7), len(seeds.u))
+    z0 = pp.to_x(seeds.u[rng.choice(len(seeds.u), m0, replace=False)])
+    return seeds.x0, rec, z0
 
 
 def dream_runs(p, names, seeds, n_gen, chains, archive, sigma_free, extra,
@@ -140,35 +148,52 @@ def dream_runs(p, names, seeds, n_gen, chains, archive, sigma_free, extra,
     for seed in seeds:
         pp = PosteriorProblem(p, sigma_free=sigma_free)
         t = time.time()
-        x0, npe_rec = start, None
+        x0, npe_rec, z0 = start, None, None
         if start == 'npe':
-            x0, npe_rec = npe_seeds(pp, seed, chains, npe, workers)
-        r = sample(pp, n_gen=n_gen, seed=seed,
-                   n_chains=chains if x0 is None or isinstance(x0, str)
-                   else len(x0), archive=archive, x0=x0, n_workers=workers,
-                   stop_when_converged=False, **extra)
-        nP = len(p.params)
-        end = [pp.chi2_per_point(x[:nP]) for x in r.chains[-1]]
-        s = r.samples(0.5)
-        u = (s[:, :nP] - p.lo) / (p.hi - p.lo)
-        frac = np.mean(at_bound(u, 0.01), axis=0)
-        rec = dict(kind='dream', seed=seed, n_gen=n_gen, chains=chains,
-                   archive=archive, sigma_free=sigma_free, extra=extra,
-                   names=pp.names,
-                   chi2_map=pp.chi2_per_point(r.best()[0][:nP]),
-                   chi2_end=end, rhat=list(map(float, r.rhat_history[-1][1])),
-                   acc=float(r.acceptance[r.adapt_until:].mean()),
-                   median=list(map(float, np.median(s, 0))),
-                   q025=list(map(float, np.percentile(s, 2.5, 0))),
-                   q975=list(map(float, np.percentile(s, 97.5, 0))),
-                   at_bound=frac.tolist(), seconds=time.time() - t,
-                   start=start or 'lhs', npe=npe_rec)
-        out.append(rec)
-        print('%4d %10.4f %40s %8.2f %6.3f  %s'
-              % (seed, rec['chi2_map'], np.round(end, 2).tolist()[:8],
-                 max(rec['rhat']), rec['acc'],
-                 [n for n, f in zip(names, frac) if f > 0.05]), flush=True)
+            x0, npe_rec, z0 = npe_seeds(pp, seed, chains, npe, workers)
+        t_npe = time.time() - t
+        which = {'prior': ['prior'], 'npe': ['npe'],
+                 'both': ['prior', 'npe']}[npe['archive'] if start == 'npe'
+                                           else 'prior']
+        for arch in which:
+            t1 = time.time()
+            r = sample(pp, n_gen=n_gen, seed=seed,
+                       n_chains=chains if x0 is None or isinstance(x0, str)
+                       else len(x0), archive=archive, x0=x0,
+                       n_workers=workers, stop_when_converged=False,
+                       z0=z0 if arch == 'npe' else None, **extra)
+            out.append(_record(p, names, pp, r, seed, n_gen, chains, archive,
+                               sigma_free, extra, start, npe_rec, arch,
+                               t_npe + time.time() - t1))
     return out
+
+
+def _record(p, names, pp, r, seed, n_gen, chains, archive, sigma_free, extra,
+            start, npe_rec, arch, seconds):
+    """The JSON record of a DREAM run, printed as a table row."""
+    nP = len(p.params)
+    end = [pp.chi2_per_point(x[:nP]) for x in r.chains[-1]]
+    s = r.samples(0.5)
+    u = (s[:, :nP] - p.lo) / (p.hi - p.lo)
+    frac = np.mean(at_bound(u, 0.01), axis=0)
+    rec = dict(kind='dream', seed=seed, n_gen=n_gen, chains=chains,
+               archive=archive, sigma_free=sigma_free, extra=extra,
+               names=pp.names,
+               chi2_map=pp.chi2_per_point(r.best()[0][:nP]),
+               chi2_end=end, rhat=list(map(float, r.rhat_history[-1][1])),
+               acc=float(r.acceptance[r.adapt_until:].mean()),
+               median=list(map(float, np.median(s, 0))),
+               q025=list(map(float, np.percentile(s, 2.5, 0))),
+               q975=list(map(float, np.percentile(s, 97.5, 0))),
+               at_bound=frac.tolist(), seconds=seconds,
+               start=start or 'lhs', npe=npe_rec, initial_archive=arch)
+    print('%4d %10.4f %40s %8.2f %6.3f  %s%s'
+          % (seed, rec['chi2_map'], np.round(end, 2).tolist()[:8],
+             max(rec['rhat']), rec['acc'],
+             [n for n, f in zip(names, frac) if f > 0.05],
+             '  (archive: %s)' % arch if start == 'npe' else ''),
+          flush=True)
+    return rec
 
 
 def multistart(p, names, starts, seed, method, workers):
@@ -220,6 +245,9 @@ def main():
     a.add_argument('--npe-samples', type=int, default=10000)
     a.add_argument('--npe-full', action='store_true',
                    help='train on the full-fidelity model')
+    a.add_argument('--npe-archive', default='prior',
+                   choices=['prior', 'npe', 'both'],
+                   help='the initial DREAM(ZS) archive of an NPE start')
     a.add_argument('--out', default='benchmarks/results.jsonl')
     o = a.parse_args()
     p, names = load(o.session, o.vary, o.untie)
@@ -239,7 +267,8 @@ def main():
                           o.sigma_free, extra,
                           start=None if start == 'lhs' else start,
                           npe=dict(rounds=o.npe_rounds, sims=o.npe_sims,
-                                   samples=o.npe_samples, full=o.npe_full),
+                                   samples=o.npe_samples, full=o.npe_full,
+                                   archive=o.npe_archive),
                           workers=o.workers)
     os.makedirs(os.path.dirname(os.path.abspath(o.out)), exist_ok=True)
     with open(o.out, 'a') as fh:
