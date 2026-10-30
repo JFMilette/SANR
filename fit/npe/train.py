@@ -393,8 +393,7 @@ def train(simulator, *, rounds=5, sims_per_round=20_000, truncation=True,
 
     problem: the full-fidelity problem (default: the simulator's), whose
         names, bounds, data hash, noise options and state are stored;
-        coarse: the
-        choose_coarse report.
+        coarse: the choose_coarse report.
     embedding: (hidden widths, output size) of the MLP; flow: sbi
         posterior_nn arguments (default FLOW); training: NPE.train
         arguments (early stopping on the validation loss by default).
