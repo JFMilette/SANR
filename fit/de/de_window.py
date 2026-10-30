@@ -43,8 +43,9 @@ from fit.multistart import merge
 from fit.saved import plain, problem_from_state, problem_state
 import line_colours
 import style
-from tabs.simulation import (POLARIZED, PARAM_DISPLAY, PROFILE_EXPORT_NAMES,
-                             PROFILE_QUANTITIES, REFL_QUANTITIES, RIGHT,
+from tabs.simulation import (POLARIZED, PARAM_DISPLAY, PROFILE_BOX_ORDER,
+                             PROFILE_EXPORT_NAMES, PROFILE_QUANTITIES,
+                             PROFILE_SHOWN, REFL_QUANTITIES, RIGHT,
                              ProfileRightAxis, r_scale_combo,
                              Crosshair, LayerLabels, export_name, plot_widget,
                              profile_data, profile_layers, profile_readout)
@@ -731,15 +732,16 @@ class DatasetView(QtWidgets.QSplitter):
         bar = QtWidgets.QHBoxLayout()
         bar.addWidget(QtWidgets.QLabel('Depth profile:'))
         self.prof_boxes = []
-        for name, _, col in PROFILE_QUANTITIES:
+        for (name, tip, col), on in zip(PROFILE_QUANTITIES, PROFILE_SHOWN):
             cb = QtWidgets.QCheckBox(name)
-            cb.setChecked(True)
+            cb.setChecked(on)
+            cb.setToolTip(tip)
             cb.setStyleSheet('color: %s' % col)
             cb.toggled.connect(self._show_profile_curves)
             self.prof_boxes.append(cb)
         right = QtWidgets.QHBoxLayout()      # filled once prof_vb2 exists
-        for i, cb in enumerate(self.prof_boxes):
-            (right if i in RIGHT else bar).addWidget(cb)
+        for i in PROFILE_BOX_ORDER:
+            (right if i in RIGHT else bar).addWidget(self.prof_boxes[i])
         bar.addSpacing(10)
         bar.addWidget(QtWidgets.QLabel('Right axis:'))
         bar.addLayout(right)

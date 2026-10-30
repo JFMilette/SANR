@@ -67,11 +67,18 @@ PROFILE_QUANTITIES = [
     ('MSLD ρ', 'MSLD ρ = |M| (10⁻⁶ Å⁻²)', '#4fc08d'),
     ('φ', 'MSLD φ, in plane (deg)', '#e0a458'),
     ('θ', 'MSLD θ, out of plane (deg)', '#e36fa8'),
+    ('NSLD Im', 'NSLD Im, absorption (10⁻⁶ Å⁻²)', '#b392f0'),
 ]
 RIGHT = (2, 3)                        # PROFILE_QUANTITIES on the angle axis
+# ticked when a profile plot is made (the imaginary NSLD, ~100 times smaller
+# than the real one, is asked for); and the order of the boxes in its bar
+PROFILE_SHOWN = (True, True, True, True, False)
+PROFILE_BOX_ORDER = (0, 4, 1, 2, 3)
 # column names of the profile curves in pyqtgraph's CSV export ('<name>_x'
-# is the depth in A, '<name>_y' the value in the plot's units)
-PROFILE_EXPORT_NAMES = ('NSLD', 'MSLD_rho', 'MSLD_phi_deg', 'MSLD_theta_deg')
+# is the depth in A, '<name>_y' the value in the plot's units); every curve
+# is exported, ticked or not
+PROFILE_EXPORT_NAMES = ('NSLD', 'MSLD_rho', 'MSLD_phi_deg', 'MSLD_theta_deg',
+                        'NSLD_Im')
 
 
 def export_name(item, name):
@@ -199,7 +206,8 @@ def profile_data(st):
     mp = np.abs(rho * cos_turns(phi))
     curves = [nsld.real / SLD_SCALE, rho / SLD_SCALE,
               np.where(st.angle_defined(mp), theta * 360.0, np.nan),
-              np.where(st.angle_defined(rho), phi * 360.0, np.nan)]
+              np.where(st.angle_defined(rho), phi * 360.0, np.nan),
+              nsld.imag / SLD_SCALE]
     angles_all = {2: theta * 360.0, 3: phi * 360.0}
     # fronting and backing are semi-infinite: draw them as one bar each
     # out to the edges of the plotted range
@@ -212,7 +220,8 @@ def profile_data(st):
     slabs = [np.array([s.NSLD_real / SLD_SCALE for s in slabs_all]),
              slab_rho / SLD_SCALE,
              np.where(st.angle_defined(slab_mp), slab_theta, np.nan),
-             np.where(st.angle_defined(slab_rho), slab_phi, np.nan)]
+             np.where(st.angle_defined(slab_rho), slab_phi, np.nan),
+             np.array([s.NSLD_img / SLD_SCALE for s in slabs_all])]
     # with the bars shown, an angle curve is drawn over exactly the bars
     # that have that angle, so both start and stop at the same depths
     k = np.clip(np.searchsorted(e, z, side='right') - 1, 0, len(e) - 2)
@@ -2196,9 +2205,10 @@ class SimulationTab(QtWidgets.QWidget):
         bar = QtWidgets.QHBoxLayout()
         bar.addWidget(QtWidgets.QLabel('Depth profile:'))
         self.prof_boxes = []
-        for name, _, col in PROFILE_QUANTITIES:
+        for (name, tip, col), on in zip(PROFILE_QUANTITIES, PROFILE_SHOWN):
             cb = QtWidgets.QCheckBox(name)
-            cb.setChecked(True)
+            cb.setChecked(on)
+            cb.setToolTip(tip)
             cb.setStyleSheet('color: %s' % col)
             cb.toggled.connect(self._show_profile)
             self.prof_boxes.append(cb)
@@ -2210,8 +2220,8 @@ class SimulationTab(QtWidgets.QWidget):
         self.prof_show_bars = QtWidgets.QCheckBox('sublayers')
         self.prof_show_bars.setChecked(True)
         self.prof_show_bars.toggled.connect(self._show_profile)
-        for i, cb in enumerate(self.prof_boxes):
-            (right if i in RIGHT else bar).addWidget(cb)
+        for i in PROFILE_BOX_ORDER:
+            (right if i in RIGHT else bar).addWidget(self.prof_boxes[i])
         bar.addSpacing(10)
         bar.addWidget(QtWidgets.QLabel('Right axis:'))
         bar.addLayout(right)
