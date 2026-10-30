@@ -3,20 +3,24 @@ The simulator NPE trains on (plans/npe_plan_v1.md S1, S2): the fit
 problem's own model, prior and noise, so that every model feature SANR has
 is supported by construction and nothing of the physics is written again.
 
-PROBLEM -- a fit.problem.FitProblem or fit.joint.JointProblem with the
-'chi2' cost (or a fit.dream.dream_fit.PosteriorProblem of one, without a
-fitted error scale or floor: those are not NPE parameters yet).  The
-parameters are its free ones in its normalised coordinates u in [0, 1]^d
-(to_x / to_u): ties are one parameter, as in every fit.
+PROBLEM -- a fit.dream.dream_fit.PosteriorProblem, the one DREAM samples,
+or the fit.problem.FitProblem / fit.joint.JointProblem (the 'chi2' cost) it
+is made of, as a PosteriorProblem without a fitted error scale or floor.
+The parameters are its own in its normalised coordinates u in [0, 1]^d:
+the fit's free ones (ties are one parameter, as in every fit), then, when
+the PosteriorProblem fits them (sigma_free, floor_free), the error scale
+log10_sigma_scale and the floor log10_error_floor over their bounds.
 
 PRIOR -- UnitPrior: uniform in [0, 1]^d (the bounds) times the fit.priors
-term of each parameter that has one (a Gaussian or a soft box from another
+term of each parameter that has one (by name, as the PosteriorProblem has
+them) (a Gaussian or a soft box from another
 measurement), each normalised over the bounds, so that it is exactly the
 prior DREAM samples (fit.dream.dream_fit POSTERIOR) up to a constant.
 sample() draws the uniform and each prior term by rejection.
 
-SIMULATION -- Simulator.simulate(u): problem.model(problem.to_x(u)) of each
-row, every channel of every dataset one after the other, float64.  A row
+SIMULATION -- Simulator.simulate(u): fit.model(fit.to_x(u)) of each row
+(its fit parameters; the noise parameters only enter the noise), every
+channel of every dataset one after the other, float64.  A row
 whose model fails (an exception, a non-finite value) is reported in `ok`
 and must be dropped, never replaced.  n_workers > 1 evaluates the rows in
 'spawn' processes that get the problem once (fit.workers); the prior draws
@@ -24,8 +28,10 @@ and the noise are drawn in the calling process, so the simulations depend
 on the seed alone, not on the number of workers.
 
 NOISE -- add_noise: Gaussian with each point's error as the likelihood has
-it (the FitProblem's sigma: dR, or |R| where dR <= 0, with any fixed
-error_floor).
+it (PosteriorProblem.errors): the FitProblem's sigma (dR, or |R| where dR
+<= 0, with any fixed error_floor), or with the error scale s and floor f of
+each draw sqrt((s dR)^2 + (f R)^2), R the measured one.  `sigma` stays the
+FitProblem's (the unit of the fidelity gaps and of the features).
 
 FEATURES -- features(R): asinh(R / c_k), c_k the median error of channel k:
 linear around the background, logarithmic over the decades of R above it,
@@ -86,8 +92,13 @@ class UnitPrior:
         self.lo = np.asarray(problem.lo, dtype=float)
         self.hi = np.asarray(problem.hi, dtype=float)
         self.d = len(self.lo)
-        self.specs = [None if p is None else dict(p.spec)
-                      for p in problem.priors]
+        priors = problem.priors                   # a list, or by name
+        if isinstance(priors, dict):
+            priors = [priors.get(n) for n in problem.names]
+        if any(p is not None and not hasattr(p, 'spec') for p in priors):
+            raise ValueError('a prior given as a function cannot be drawn: '
+                             'give it as a fit.priors spec')
+        self.specs = [None if p is None else dict(p.spec) for p in priors]
         # log max of each term (rejection) and log of its integral over
         # [0, 1] in u, both relative to that max
         self.top = np.zeros(self.d)
@@ -156,16 +167,19 @@ class _Model(Wrapper):
 
 def _fit_problem(problem):
     """The FitProblem / JointProblem of problem (see PROBLEM)."""
-    fit = getattr(problem, 'fit', None)
-    if fit is not None:                      # a PosteriorProblem
-        if problem.n_extra:
-            raise ValueError('NPE does not sample a fitted error scale or '
-                             'floor yet: untick them')
-        problem = fit
+    problem = getattr(problem, 'fit', problem)    # of a PosteriorProblem
     if problem.cost != 'chi2':
         raise ValueError("NPE needs the 'chi2' cost (linear R with its "
                          "errors, the likelihood DREAM uses)")
     return problem
+
+
+def posterior_of(problem):
+    """The PosteriorProblem of problem (see PROBLEM)."""
+    from fit.dream.dream_fit import PosteriorProblem
+    if isinstance(problem, PosteriorProblem):
+        return problem
+    return PosteriorProblem(_fit_problem(problem))
 
 
 class Simulator:
@@ -173,15 +187,20 @@ class Simulator:
     module docstring)."""
 
     def __init__(self, problem, *, noise=True, seed=None):
-        self.problem = _fit_problem(problem)
-        p = self.problem
-        self.names = list(p.names)
-        self.d = len(p.params)
+        self.posterior = pp = posterior_of(problem)
+        self.problem = p = pp.fit
+        self.names = list(pp.names)
+        self.d = pp.ndim
+        self.k = len(p.params)               # the fit's, before the noise's
+        self.lo, self.hi = pp.lo, pp.hi
         self.noise = bool(noise)
         self.rng = np.random.default_rng(seed)
-        self.prior = UnitPrior(p)
+        self.prior = UnitPrior(pp)
         self.channel_names = [ch[0] for ch in p.channels]
         self.sigma = np.concatenate([ch[3] for ch in p.channels])
+        # the likelihood's errors before scale and floor, and the measured R
+        self._e = np.concatenate([e for _, e in pp.data])
+        self._r = np.concatenate([r for r, _ in pp.data])
         self.sizes = [len(ch[3]) for ch in p.channels]
         self.scales = np.array([np.median(ch[3]) for ch in p.channels])
         self._c = np.repeat(self.scales, self.sizes)
@@ -200,7 +219,7 @@ class Simulator:
         free; rows where ok is False failed (their R is NaN).
         progress(done, total) after each chunk; cancelled() True stops
         (RuntimeError)."""
-        u = np.atleast_2d(np.asarray(u, dtype=float))
+        u = np.atleast_2d(np.asarray(u, dtype=float))[:, :self.k]
         n = len(u)
         R = np.full((n, self.n_points), np.nan)
         ok = np.zeros(n, dtype=bool)
@@ -230,10 +249,27 @@ class Simulator:
         self.n_failed += int(n - ok.sum())
         return R, ok
 
-    def add_noise(self, R, rng=None):
-        """R plus Gaussian noise of the likelihood's errors (see NOISE)."""
+    def errors(self, u=None):
+        """The likelihood's error of every point, (n_points,), or (n,
+        n_points) with the error scale and floor of the rows of u (see
+        NOISE)."""
+        pp = self.posterior
+        if not pp.n_extra or u is None:
+            return self._e if not pp.n_extra else self.sigma
+        x = pp.to_x(np.atleast_2d(u))
+        s = 10.0 ** x[:, self.k] if pp.sigma_free else np.ones(len(x))
+        f = 10.0 ** x[:, -1] if pp.floor_free else np.zeros(len(x))
+        return np.sqrt((s[:, None] * self._e) ** 2 +
+                       (f[:, None] * self._r) ** 2)
+
+    def add_noise(self, R, rng=None, u=None):
+        """R plus Gaussian noise of the likelihood's errors (see NOISE),
+        those of the rows of u when the noise is fitted."""
         rng = self.rng if rng is None else rng
-        return R + rng.normal(size=np.shape(R)) * self.sigma
+        if self.posterior.n_extra and u is None:
+            raise ValueError('the error scale or floor is fitted: give the '
+                             'draws u the noise is drawn for')
+        return R + rng.normal(size=np.shape(R)) * self.errors(u)
 
     def features(self, R):
         """asinh(R / c_k), float32 (see FEATURES)."""
@@ -246,11 +282,12 @@ class Simulator:
     def draw(self, u, rng=None, **kw):
         """(u kept, features): the rows of u whose model works, simulated
         with noise (when self.noise), as features; kw go to simulate."""
+        u = np.atleast_2d(np.asarray(u, dtype=float))
         R, ok = self.simulate(u, **kw)
-        R = R[ok]
+        R, u = R[ok], u[ok]
         if self.noise:
-            R = self.add_noise(R, rng)
-        return np.asarray(u)[ok], self.features(R)
+            R = self.add_noise(R, rng, u)
+        return u, self.features(R)
 
     @property
     def failure_rate(self):

@@ -366,19 +366,26 @@ class NPEResult:
                         meta=json.dumps(self.meta, default=_plain)), path)
 
     def check(self, problem):
-        """ValueError unless problem (a FitProblem, JointProblem or
-        PosteriorProblem) has these names, bounds and data."""
-        from fit.dream.dream_fit import PosteriorProblem, data_hash
+        """ValueError unless problem (a PosteriorProblem, or a FitProblem
+        or JointProblem) has these names, bounds and data."""
+        from fit.dream.dream_fit import data_hash
         sim = Simulator(problem)
-        p = sim.problem
-        if list(p.names) != list(self.names):
+        if sim.names != list(self.names):
             raise ValueError('the network was trained for the parameters '
-                             '%s, not %s' % (self.names, list(p.names)))
-        if not (np.array_equal(p.lo, self.meta['lo']) and
-                np.array_equal(p.hi, self.meta['hi'])):
+                             '%s, not %s' % (self.names, sim.names))
+        if not (np.array_equal(sim.lo, self.meta['lo']) and
+                np.array_equal(sim.hi, self.meta['hi'])):
             raise ValueError('the network was trained with other bounds')
-        if data_hash(PosteriorProblem(p)) != self.meta['data_hash']:
+        if data_hash(sim.posterior) != self.meta['data_hash']:
             raise ValueError('the network was trained on other data')
+
+    def posterior_problem(self):
+        """The PosteriorProblem it was trained for, rebuilt from the
+        stored fit problem (fit.saved) and noise options."""
+        from fit.dream.dream_fit import PosteriorProblem
+        from fit.saved import problem_from_state
+        return PosteriorProblem(problem_from_state(self.meta['problem']),
+                                **self.meta.get('noise', {}))
 
 
 def _plain(obj):
@@ -421,7 +428,7 @@ def train(simulator, *, rounds=5, sims_per_round=20_000, truncation=True,
     of a coarse problem) for its measured data (see ROUNDS).
 
     problem: the full-fidelity problem (default: the simulator's), whose
-        names, bounds, data hash and state are stored; coarse: the
+        names, bounds, data hash, noise options and state are stored; coarse: the
         choose_coarse report.
     embedding: (hidden widths, output size) of the MLP; flow: sbi
         posterior_nn arguments (default FLOW); training: NPE.train
@@ -430,15 +437,15 @@ def train(simulator, *, rounds=5, sims_per_round=20_000, truncation=True,
         'round' (that round's statistics) as it goes; cancelled() True
         stops (RuntimeError 'stopped'), also within a training: it is
         asked before every batch."""
-    from fit.dream.dream_fit import PosteriorProblem, _git_hash, data_hash
+    from fit.dream.dream_fit import _git_hash, data_hash
     from fit.saved import problem_state
 
     cb = callback or (lambda event, info: None)
     stop = cancelled or (lambda: False)
     rng = np.random.default_rng(seed)
     torch.manual_seed(int(rng.integers(2**31)))
-    full = problem if problem is not None else simulator.problem
-    full = Simulator(full).problem
+    full = Simulator(problem if problem is not None
+                     else simulator.posterior).posterior
     prior = LogitPrior(simulator.prior, int(rng.integers(2**31)))
     x_o = simulator.observed_features()
     builder = posterior_nn(
@@ -459,8 +466,10 @@ def train(simulator, *, rounds=5, sims_per_round=20_000, truncation=True,
     opts['dataloader_kwargs'] = dict(opts.get('dataloader_kwargs') or {},
                                      collate_fn=collate)
     meta = dict(names=list(full.names), lo=full.lo, hi=full.hi,
-                data_hash=data_hash(PosteriorProblem(full)),
-                problem=problem_state(full), coarse=coarse,
+                data_hash=data_hash(full),
+                noise=dict(sigma_free=full.sigma_free,
+                           floor_free=full.floor_free),
+                problem=problem_state(full.fit), coarse=coarse,
                 git=_git_hash(), versions=versions(), seed=seed,
                 rounds=[], truncation=bool(truncation), quantile=quantile,
                 sims_per_round=sims_per_round, embedding=embedding,
@@ -509,18 +518,23 @@ def train(simulator, *, rounds=5, sims_per_round=20_000, truncation=True,
 def run_npe(problem, *, coarse=True, threshold=None, fidelity_draws=100,
             seed=None, n_workers=1, callback=None, cancelled=None, **kw):
     """choose_coarse (when `coarse`), then train on the chosen simulator:
-    the NPEResult of problem.  kw go to train."""
+    the NPEResult of problem (a PosteriorProblem, or a FitProblem /
+    JointProblem).  kw go to train."""
+    from fit.dream.dream_fit import PosteriorProblem
     from fit.npe.simulator import FIDELITY_THRESHOLD, choose_coarse
     cb = callback or (lambda event, info: None)
-    full = Simulator(problem).problem
+    full = Simulator(problem).posterior
     report = None
     train_on = full
     if coarse:
         cb('fidelity', 'choosing the training simulator…')
-        train_on, report = choose_coarse(
-            full, FIDELITY_THRESHOLD if threshold is None else threshold,
+        fit, report = choose_coarse(
+            full.fit, FIDELITY_THRESHOLD if threshold is None else threshold,
             fidelity_draws, seed, n_workers,
             progress=lambda text: cb('fidelity', text))
+        if fit is not full.fit:              # the coarse model, same noise
+            train_on = PosteriorProblem(fit, sigma_free=full.sigma_free,
+                                        floor_free=full.floor_free)
         cb('coarse', report)
     sim = Simulator(train_on, seed=seed)
     res = train(sim, seed=seed, n_workers=n_workers, problem=full,

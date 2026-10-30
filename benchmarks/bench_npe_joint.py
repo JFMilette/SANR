@@ -7,7 +7,11 @@ the mode the session's joint fit gives it, a dataset that joint fit lacks
 taking the modes of --like (default: the first dataset it has).  With the
 Licorne resolution, the Q grid of a dataset whose channels are not on the
 same points is the one of channel --grid (default: the first channel, as
-pressing OK in the Fit tab's dialog), said for each dataset.  Printed:
+pressing OK in the Fit tab's dialog), said for each dataset.  --free ticks
+Fit on more parameters by name (e.g. stack.thickness_spread), in every
+model fitted, as the Fit tab's ticks do (shared unless the session's modes
+say otherwise); --sigma-free / --floor-free fit the error scale / floor, as
+the DREAM page's ticks (NPE samples them too).  Printed:
 chi^2/N at the session's values (the current fit), the time per model
 evaluation, the training rounds, the clusters fit.npe.seed finds, and the
 DREAM result from the seeds; appended as a JSON line to --out.
@@ -30,8 +34,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 
-def joint_problem(session, sets, like=None, grid=None):
-    """(PosteriorProblem, warnings) of the joint fit of `sets` in session."""
+def joint_problem(session, sets, like=None, grid=None, free=(),
+                  sigma_free=False, floor_free=False):
+    """(PosteriorProblem, warnings) of the joint fit of `sets` in session
+    (see the module docstring)."""
     from PyQt6 import QtWidgets
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
@@ -71,11 +77,19 @@ def joint_problem(session, sets, like=None, grid=None):
                       sources=dict(old.get('sources') or {}))
     exp._refresh_fit_sets()
     exp.fit_set.setCurrentIndex(exp.fit_set.findData(JOINT))
+    if free:
+        exp._fit_toggled(list(free), True)
+    exp.dream_sigma.setChecked(sigma_free)
+    exp.dream_floor.setChecked(floor_free)
     built = exp._npe_problem()
     if built is None:
         raise SystemExit('no fit problem: %s' % exp.npe_report.text())
     pp, inputs, qmin, qmax, note = built
     app.processEvents()
+    lost = [n for n in free if not any(m == n or m.startswith(n + ' [')
+                                       for m in pp.names)]
+    if lost:
+        raise SystemExit('no parameter %s in the models fitted' % lost)
     return pp, note
 
 
@@ -86,6 +100,10 @@ def main():
     a.add_argument('session')
     a.add_argument('--sets', nargs='+', required=True)
     a.add_argument('--like', default=None)
+    a.add_argument('--free', nargs='+', default=[],
+                   help='more parameters to fit, by name')
+    a.add_argument('--sigma-free', action='store_true')
+    a.add_argument('--floor-free', action='store_true')
     a.add_argument('--grid', default=None,
                    help="channel ('+', '-', ...) whose Q the Licorne "
                         "resolution runs on")
@@ -103,7 +121,8 @@ def main():
     a.add_argument('--out', default=os.path.join(ROOT, 'benchmarks',
                                                  'results.jsonl'))
     o = a.parse_args()
-    pp, note = joint_problem(o.session, o.sets, o.like, o.grid)
+    pp, note = joint_problem(o.session, o.sets, o.like, o.grid, o.free,
+                             o.sigma_free, o.floor_free)
     fit = pp.fit
     x_now = fit.to_x(fit.x0())
     chi_now = pp.chi2_per_point(x_now)
@@ -135,7 +154,7 @@ def main():
         elif event == 'coarse':
             print('training simulator:', describe_coarse(info), flush=True)
 
-    res = run_npe(fit, coarse=not o.full, rounds=o.rounds,
+    res = run_npe(pp, coarse=not o.full, rounds=o.rounds,
                   sims_per_round=o.sims, seed=o.seed, n_workers=o.workers,
                   callback=say)
     t_train = time.time() - t0
@@ -152,6 +171,7 @@ def main():
           % (best['chi2'], chi_now, rhat, t_train, t_seed, time.time() - t0),
           flush=True)
     rec = dict(kind='npe_joint', session=o.session, sets=o.sets,
+               free=o.free, sigma_free=o.sigma_free, floor_free=o.floor_free,
                seed=o.seed, names=pp.names, chi2_session=chi_now,
                chi2_map=best['chi2'], rhat=rhat,
                rounds=[{k: v for k, v in s.items() if 'loss' not in k}

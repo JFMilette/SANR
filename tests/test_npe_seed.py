@@ -42,6 +42,9 @@ class Posterior:
     def __init__(self):
         self.fit = Fit()
 
+    def to_x(self, u):
+        return np.asarray(u, dtype=float)
+
     def __call__(self, x):
         d = ((np.asarray(x) - MODES) ** 2).sum(axis=1) / SD ** 2
         return float(np.log(0.7 * np.exp(-d[0] / 2) + 0.3 * np.exp(-d[1] / 2)))

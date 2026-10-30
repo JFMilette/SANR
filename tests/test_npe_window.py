@@ -153,3 +153,16 @@ def test_train_in_the_gui(app):
     assert w.run is not None, w.status.text()
     assert len(exp._npe_seeds[1]) == 8 and w.table.rowCount() >= 1
     assert len(w.run.result.rounds) == 2
+
+
+def test_npe_fits_the_noise_ticked_on_the_dream_page(app):
+    """The DREAM page's error scale / floor ticks: NPE samples them too, so
+    that its seeds start that DREAM."""
+    from fit.dream.dream_fit import FLOOR_NAME, SIGMA_NAME
+    exp = npe_tab(app)
+    problem, *_ = exp._npe_problem()
+    assert problem.n_extra == 0
+    exp.dream_sigma.setChecked(True)
+    exp.dream_floor.setChecked(True)
+    problem, *_ = exp._npe_problem()
+    assert problem.names[-2:] == [SIGMA_NAME, FLOOR_NAME]

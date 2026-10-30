@@ -8,14 +8,15 @@ network.npe: "Save network…" of an NPE tab (it holds its fit problem).
 scenarios.json: {"name": {"parameter": value, ...}, ...}, values in the
 fit's own units (A, A^-2, turns) by the fit's parameter names
 (fit.problem.parameter_names, e.g. "Fe.MSLD_rho"); a parameter a scenario
-leaves out keeps its value in the fit's stack.  E.g. a moment at an
+leaves out keeps its value in the fit's stack (a fitted error scale or
+floor: log10_sigma_scale 0, log10_error_floor -2, unless given).  E.g. a moment at an
 interface against one spread through the layer.
 
 For each scenario: synthetic data from the fit problem's model with the
 likelihood's noise (fit.npe.simulator), the round-1 network's posterior at
 those data (--samples), and the posterior mass of each scenario's region:
 the share of the samples nearer to that scenario than to any other in u
-(the normalised parameters).  A row whose diagonal holds nearly all the
+(the normalised fit parameters, the noise ones left out).  A row whose diagonal holds nearly all the
 mass (>= --separated) is told apart from the others.  --dream k checks the
 first k scenarios with DREAM (fit.dream.dream_fit.sample, --n-gen, chains
 started at round-1 samples): the same masses from its posterior.
@@ -34,21 +35,24 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from fit.dream.dream_fit import EXTRA_START                  # noqa: E402
 from fit.npe.simulator import Simulator                       # noqa: E402
 from fit.npe.train import load_npe                            # noqa: E402
-from fit.saved import problem_from_state                      # noqa: E402
 
 
-def scenario_x(problem, values):
-    """Physical parameter vector of a scenario: the fit's current values,
-    with the scenario's."""
-    x = problem.to_x(problem.x0())
-    unknown = set(values) - set(problem.names)
+def scenario_x(pp, values):
+    """Physical parameter vector of a scenario of the PosteriorProblem
+    pp: the fit's current values (EXTRA_START for the noise), with the
+    scenario's."""
+    fit = pp.fit
+    x = np.r_[fit.to_x(fit.x0()),
+              [EXTRA_START[n] for n in pp.names[len(fit.params):]]]
+    unknown = set(values) - set(pp.names)
     if unknown:
         raise ValueError('unknown parameters %s (the fit has %s)'
-                         % (sorted(unknown), problem.names))
+                         % (sorted(unknown), pp.names))
     for n, v in values.items():
-        x[problem.names.index(n)] = float(v)
+        x[pp.names.index(n)] = float(v)
     return x
 
 
@@ -59,13 +63,16 @@ def masses(u, centres):
     return np.bincount(k, minlength=len(centres)) / len(u)
 
 
-def with_data(problem, R):
-    """A copy of problem whose channels hold the flat data R."""
-    p = copy.deepcopy(problem)
+def with_data(pp, R):
+    """A copy of the PosteriorProblem pp whose channels hold the flat
+    data R."""
+    from fit.dream.dream_fit import PosteriorProblem
+    p = copy.deepcopy(pp.fit)
     ends = np.cumsum([len(ch[2]) for ch in p.channels])[:-1]
     p.channels = [(n, idx, r, s) for (n, idx, _, s), r
                   in zip(p.channels, np.split(R, ends))]
-    return p
+    return PosteriorProblem(p, sigma_free=pp.sigma_free,
+                            floor_free=pp.floor_free)
 
 
 def main():
@@ -91,45 +98,47 @@ def main():
         if not o.force:
             sys.exit(msg + ' (--force to run anyway)')
         print('WARNING: ' + msg)
-    problem = problem_from_state(res.meta['problem'])
-    res.check(problem)
+    pp = res.posterior_problem()
+    res.check(pp)
     with open(o.scenarios) as fh:
         scen = json.load(fh)
     names = list(scen)
-    X = np.array([scenario_x(problem, scen[n]) for n in names])
-    C = problem.to_u(X)
-    sim = Simulator(problem, seed=o.seed)
-    R, ok = sim.simulate(C)
+    X = np.array([scenario_x(pp, scen[n]) for n in names])
+    U = pp.to_u(X)
+    k = len(pp.fit.params)
+    C = U[:, :k]                    # the regions: in the fit parameters
+    sim = Simulator(pp, seed=o.seed)
+    R, ok = sim.simulate(U)
     if not ok.all():
         sys.exit('the model fails at %s'
                  % ', '.join(n for n, g in zip(names, ok) if not g))
-    R = sim.add_noise(R)
+    R = sim.add_noise(R, u=U)
     w = max(len(n) for n in names)
     print('posterior mass of each scenario\'s region (rows: the data of '
           'that scenario; round-1 network, %d samples)' % o.samples)
     print('%-*s  %s  separated' % (w, '', '  '.join('%8s' % n[:8]
                                                     for n in names)))
     M = []
-    for k, n in enumerate(names):
-        u = res.sample(o.samples, round=0, x=sim.features(R[k]),
-                       seed=o.seed + k)
-        m = masses(u, C)
+    for i, n in enumerate(names):
+        u = res.sample(o.samples, round=0, x=sim.features(R[i]),
+                       seed=o.seed + i)
+        m = masses(u[:, :k], C)
         M.append(m)
         print('%-*s  %s  %s' % (w, n, '  '.join('%8.3f' % v for v in m),
-                                'yes' if m[k] >= o.separated else 'NO'))
+                                'yes' if m[i] >= o.separated else 'NO'))
     if o.dream:
-        from fit.dream.dream_fit import PosteriorProblem, sample
+        from fit.dream.dream_fit import sample
         print('\nDREAM check (%d generations):' % o.n_gen)
-        for k, n in enumerate(names[:o.dream]):
-            pp = PosteriorProblem(with_data(problem, R[k]))
-            u0 = res.sample(8, round=0, x=sim.features(R[k]),
-                            seed=o.seed + 100 + k)
-            r = sample(pp, n_gen=o.n_gen, x0=pp.to_x(u0), seed=o.seed + k,
+        for i, n in enumerate(names[:o.dream]):
+            q = with_data(pp, R[i])
+            u0 = res.sample(8, round=0, x=sim.features(R[i]),
+                            seed=o.seed + 100 + i)
+            r = sample(q, n_gen=o.n_gen, x0=q.to_x(u0), seed=o.seed + i,
                        n_workers=o.workers, stop_when_converged=False)
-            m = masses(problem.to_u(r.samples(0.5)), C)
+            m = masses(q.to_u(r.samples(0.5))[:, :k], C)
             print('%-*s  %s  (network: %s)'
                   % (w, n, '  '.join('%8.3f' % v for v in m),
-                     ' '.join('%.3f' % v for v in M[k])), flush=True)
+                     ' '.join('%.3f' % v for v in M[i])), flush=True)
 
 
 if __name__ == '__main__':

@@ -200,10 +200,30 @@ def test_noise_is_the_likelihoods():
     assert np.array_equal(sim.sigma, want)
 
 
-def test_free_noise_is_refused():
-    from fit.dream.dream_fit import PosteriorProblem
-    with pytest.raises(ValueError, match='error scale'):
-        Simulator(PosteriorProblem(problem(), sigma_free=True))
+def test_fitted_error_scale_and_floor():
+    """With the error scale and floor fitted, they are the last
+    parameters and each draw's noise is the likelihood's at its values."""
+    from fit.dream.dream_fit import (FLOOR_NAME, SIGMA_NAME,
+                                     PosteriorProblem)
+    fit = problem()
+    pp = PosteriorProblem(fit, sigma_free=True, floor_free=True)
+    sim = Simulator(pp, seed=4)
+    assert sim.d == len(fit.params) + 2 and sim.k == len(fit.params)
+    assert sim.names[-2:] == [SIGMA_NAME, FLOOR_NAME]
+    u = sim.sample_prior(3)
+    R, ok = sim.simulate(u)
+    assert ok.all() and np.array_equal(R[0], flat(fit, u[0, :sim.k]))
+    E = sim.errors(u)
+    for e, row in zip(E, u):
+        assert np.allclose(e, np.concatenate(pp.errors(pp.to_x(row))))
+    rows = np.repeat(u[:1], 4000, axis=0)
+    base = np.tile(R[0], (4000, 1))
+    spread = (sim.add_noise(base, u=rows) - base).std(axis=0)
+    assert np.allclose(spread / E[0], 1, atol=0.06)
+    with pytest.raises(ValueError, match='fitted'):
+        sim.add_noise(base)
+    uk, f = sim.draw(u)
+    assert uk.shape == (3, sim.d) and np.isfinite(f).all()
 
 
 def test_features_are_finite_for_negative_R():

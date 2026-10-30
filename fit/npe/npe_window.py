@@ -105,7 +105,7 @@ class NPEThread(QtCore.QThread):
             res, cal = self.result, None
             if res is None:
                 res = npe_train.run_npe(
-                    fit, coarse=o['coarse'], threshold=o['threshold'],
+                    self.problem, coarse=o['coarse'], threshold=o['threshold'],
                     seed=o['seed'], n_workers=o['n_workers'],
                     rounds=o['rounds'], sims_per_round=o['sims_per_round'],
                     callback=self._callback, cancelled=lambda: self._stop)
@@ -450,7 +450,7 @@ class NPEWindow(QtWidgets.QWidget):
             return
         j = max(self.marg_combo.currentIndex(), 0)
         _, s, _ = self.infos[j]
-        x = self.problem.fit.to_x(self.run.seeds.u)[:, j] * s
+        x = self.problem.to_x(self.run.seeds.u)[:, j] * s
         p.addItem(vbars(x))
         p.setLabel('bottom', axis_label(self.infos[j]))
         for k, c in enumerate(self.run.seeds.clusters):

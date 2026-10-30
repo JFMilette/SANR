@@ -161,3 +161,30 @@ def test_calibration(trained):
     assert cal['round'] == 1 and len(cal['ks_pvals']) == 2
     assert res.meta['calibration'] is cal
     assert isinstance(cal['passed'], bool)
+
+
+def test_fitted_error_scale():
+    """The error scale as an NPE parameter, on data whose stated errors are
+    half the real ones (log10 s = log10 2).  The network itself hardly
+    learns s (it lies in the scatter of the points around the curve, which
+    a few thousand simulations do not teach it): its samples stay close to
+    the prior.  The seeds, chosen by the exact posterior (fit.npe.seed), do
+    have it right: what the network is used for."""
+    from fit.dream.dream_fit import SIGMA_NAME, PosteriorProblem
+    from fit.npe.train import run_npe
+    p = toy()
+    for ch in p.channels:                # state half the noise drawn
+        ch[3][:] /= 2                    # (raw_sigma is the same array)
+    pp = PosteriorProblem(p, sigma_free=True)
+    res = run_npe(pp, coarse=False, rounds=2, sims_per_round=3000, seed=6,
+                  n_workers=4)
+    assert res.names[-1] == SIGMA_NAME and res.meta['noise']['sigma_free']
+    from fit.npe.seed import seed_chains
+    seeds = seed_chains(res, pp, 8, rng=3, n_samples=4000, n_workers=4)
+    s = seeds.x0[:, -1]
+    assert np.all(np.abs(s - np.log10(2)) < 0.1), s
+    res.check(pp)
+    with pytest.raises(ValueError, match='parameters'):
+        res.check(p)                     # without the error scale
+    back = res.posterior_problem()
+    assert back.names == pp.names and back.sigma_free

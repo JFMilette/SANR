@@ -1113,7 +1113,8 @@ class FitPanel:
             '<i>The network only proposes: the seeds it gives start DREAM '
             '("DREAM from seeds" in its tab, or the DREAM start "NPE seeds"),'
             ' which samples the exact posterior.  χ² likelihood with the '
-            'measured dR.</i>' if not missing else self._error(
+            'measured dR; the error scale and floor are fitted as ticked on '
+            'the DREAM page.</i>' if not missing else self._error(
                 'NPE needs %s: pip install -r requirements-npe.txt'
                 % ', '.join(missing)), wordWrap=True))
         row = QtWidgets.QHBoxLayout()
@@ -1147,13 +1148,17 @@ class FitPanel:
 
     def _npe_problem(self):
         """(PosteriorProblem, inputs, qmin, qmax, warnings) of the datasets
-        to fit, for NPE; None, with the reason in the NPE report."""
+        to fit, for NPE, with the DREAM page's error scale and floor (so
+        that its seeds start that DREAM); None, with the reason in the NPE
+        report."""
         built = self._problem(self.npe_report, 'chi2', 'channels')
         if built is None:
             return None
         fit, inputs, qmin, qmax, note = built
         try:
-            problem = PosteriorProblem(fit)
+            problem = PosteriorProblem(
+                fit, sigma_free=self.dream_sigma.isChecked(),
+                floor_free=self.dream_floor.isChecked())
         except ValueError as exc:
             self.npe_report.setText(self._error(exc))
             return None
@@ -2050,7 +2055,8 @@ class FitPanel:
             if seeds is None or seeds[0] != problem.names:
                 self.dream_report.setText(self._error(
                     'Train a network on these parameters first (the NPE '
-                    'method), without the error scale or floor.'))
+                    'method), with the error scale and floor ticked as '
+                    'here.'))
                 return
             options['x0'] = seeds[1]
             options['n_chains'] = len(seeds[1])

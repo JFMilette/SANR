@@ -125,13 +125,11 @@ def seed_chains(npe_result, posterior_problem, n_chains, rng=None,
                 n_workers=1, round=-1, progress=None, cancelled=None):
     """Seeds of n_chains DREAM chains (see the module docstring)."""
     pp = posterior_problem
-    if pp.n_extra:
-        raise ValueError('NPE does not seed a fitted error scale or floor')
     npe_result.check(pp)
     rng = np.random.default_rng(rng)
     u = npe_result.sample(n_samples, round=round,
                           seed=int(rng.integers(2**31)))
-    X = pp.fit.to_x(u)
+    X = pp.to_x(u)
     logp = log_posterior(pp, X, n_workers, progress, cancelled)
     ok = np.isfinite(logp)
     if not ok.any():
@@ -160,7 +158,7 @@ def seed_chains(npe_result, posterior_problem, n_chains, rng=None,
         clusters.append(dict(
             label=int(k), weight=float(w), n=int(len(idx)), chains=int(c),
             best_logp=float(logp[b]), chi2=pp.chi2_per_point(X[b]),
-            best_x=X[b], mean_x=pp.fit.to_x(u[labels == k].mean(axis=0)),
+            best_x=X[b], mean_x=pp.to_x(u[labels == k].mean(axis=0)),
             at_bound=[n for n, v in zip(pp.names, ub)
                       if v < EDGE or v > 1 - EDGE]))
     order = np.argsort([-c['weight'] for c in clusters])

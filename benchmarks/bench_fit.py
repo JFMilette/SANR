@@ -117,7 +117,7 @@ def npe_seeds(pp, seed, chains, npe, workers):
     """(x0, record) of NPE-seeded chains (see the module docstring)."""
     from fit.npe.seed import format_clusters, seed_chains
     from fit.npe.train import run_npe
-    res = run_npe(pp.fit, coarse=not npe['full'], rounds=npe['rounds'],
+    res = run_npe(pp, coarse=not npe['full'], rounds=npe['rounds'],
                   sims_per_round=npe['sims'], seed=seed, n_workers=workers)
     seeds = seed_chains(res, pp, chains or 8, rng=seed,
                         n_samples=npe['samples'], n_workers=workers)
