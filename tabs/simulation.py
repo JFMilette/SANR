@@ -67,7 +67,7 @@ PROFILE_QUANTITIES = [
     ('MSLD ρ', 'MSLD ρ = |M| (10⁻⁶ Å⁻²)', '#4fc08d'),
     ('φ', 'MSLD φ, in plane (deg)', '#e0a458'),
     ('θ', 'MSLD θ, out of plane (deg)', '#e36fa8'),
-    ('NSLD Im', 'NSLD Im, absorption (10⁻⁶ Å⁻²)', '#b392f0'),
+    ('NSLD Im', 'NSLD Im, absorption (10⁻⁶ Å⁻²)', '#e5484d'),
 ]
 RIGHT = (2, 3)                        # PROFILE_QUANTITIES on the angle axis
 # ticked when a profile plot is made (the imaginary NSLD, ~100 times smaller
