@@ -31,7 +31,7 @@ import numpy as np
 from fit.workers import Wrapper, start as start_pool, stop as stop_pool
 
 EDGE = 0.01                       # of the bound width
-CHUNKS_PER_WORKER = 8
+CHUNKS_PER_WORKER = 50            # chunks per process: smooth progress
 
 
 class _LogPost(Wrapper):

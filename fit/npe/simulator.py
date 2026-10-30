@@ -66,7 +66,8 @@ FIDELITY_PERCENTILE = 99.0
 COARSE_CANDIDATES = [(n, g) for n in (None, 2, 3, 4) for g in (None, 4, 2)
                      if (n, g) != (None, None)]
 ROUGHNESS_ATTRS = ('roughness_sigma', 'MSLD_sigma')
-CHUNKS_PER_WORKER = 8             # simulate: chunks per process (progress)
+CHUNKS_PER_WORKER = 50            # simulate: chunks per process (progress;
+                                  # a send costs far less than a simulation)
 
 
 # -- prior -------------------------------------------------------------------
