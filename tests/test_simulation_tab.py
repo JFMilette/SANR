@@ -147,7 +147,7 @@ def test_angle_letters(app):
     labels = {p[0]: p[1] for p in EDITOR_PARAMS}
     assert labels['MSLD_theta'] == 'MSLD φ' and labels['MSLD_phi'] == 'MSLD θ'
     assert PARAM_DISPLAY['MSLD_theta'][0] == 'MSLD φ'
-    assert [q[0] for q in PROFILE_QUANTITIES[2:]] == ['φ', 'θ']
+    assert [q[0] for q in PROFILE_QUANTITIES[2:4]] == ['φ', 'θ']
     assert 'in plane' in PROFILE_QUANTITIES[2][1]
     assert shown_names('Fe.MSLD_theta, Co.MSLD_phi, stack.scale') == \
         'Fe.MSLD φ, Co.MSLD θ, stack.scale'

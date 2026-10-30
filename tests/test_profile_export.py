@@ -30,7 +30,8 @@ from fit.problem import FitProblem                               # noqa: E402
 from test_thickness_spread import data_of, film                  # noqa: E402
 
 CURVES = ['NSLD_x', 'NSLD_y', 'MSLD_rho_x', 'MSLD_rho_y', 'MSLD_phi_deg_x',
-          'MSLD_phi_deg_y', 'MSLD_theta_deg_x', 'MSLD_theta_deg_y', 'layer']
+          'MSLD_phi_deg_y', 'MSLD_theta_deg_x', 'MSLD_theta_deg_y',
+          'NSLD_Im_x', 'NSLD_Im_y', 'layer']
 
 
 def export(plot, tmp_path):
@@ -95,3 +96,67 @@ def test_dream_profile_bands(tmp_path):
     # the band edges have no legend entry
     assert [l.text for _, l in pp.plot.legend.items] == \
         ['NSLD', 'MSLD in plane (ρ cos θ)']
+
+
+def test_imaginary_nsld_tick_and_export(tmp_path):
+    """NSLD Im: its own tick (off at first), drawn smooth and as the
+    sublayers' NSLD_img, read by the cursor, kept in the session, and
+    always in the export (in 10^-6 A^-2, as NSLD)."""
+    from tabs.simulation import PROFILE_QUANTITIES, SLD_SCALE, profile_readout
+    sim = SimulationTab()
+    sim.stack.layers[2].NSLD_img = -2e-8
+    sim.recompute()
+    APP.processEvents()
+    k = [q[0] for q in PROFILE_QUANTITIES].index('NSLD Im')
+    box, curve, bars = sim.prof_boxes[k], sim.prof_curves[k], sim.prof_bars[k]
+    assert not box.isChecked() and not curve.isVisible()
+    box.setChecked(True)
+    assert curve.isVisible() and bars.isVisible()
+    z, y = curve.getData()
+    want = sim.stack.profile(z)[0].imag / SLD_SCALE
+    assert np.allclose(y, want) and y.min() < -0.019
+    slabs = [sim.stack.fronting] + list(sim.stack.sublayers) + \
+        [sim.stack.backing]
+    assert np.allclose(bars.opts['height'],
+                       [s.NSLD_img / SLD_SCALE for s in slabs])
+    # the cursor reads it
+    mid = sim._profile[1][1] + 1.0           # inside layer 2
+    _, rows = profile_readout(sim, mid)
+    assert 'NSLD Im' in [r[0] for r in rows]
+    # exported, its values those drawn
+    head, n, rows = export(sim.prof_plot, tmp_path)
+    j = head.index('NSLD_Im_y')
+    assert np.allclose([float(r[j]) for r in rows], y, atol=1e-6)
+    box.setChecked(False)
+    head, _, _ = export(sim.prof_plot, tmp_path)
+    assert 'NSLD_Im_y' in head                # ticked or not
+    # the session keeps the tick; an older session (4 ticks) leaves it off
+    box.setChecked(True)
+    state = sim.session_state()
+    other = SimulationTab()
+    other.restore_state(state)
+    assert other.prof_boxes[k].isChecked()
+    state['simulation']['display']['profile'] = [True] * 4
+    other = SimulationTab()
+    other.restore_state(state)
+    assert not other.prof_boxes[k].isChecked()
+
+
+def test_fit_tab_profile_has_the_tick():
+    st = film()
+    st.layers[1].NSLD_img = -1e-8
+    st.layers[1].fit['thickness'] = dict(vary=True, min=100, max=140)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        p = FitProblem(st, data_of(film()))
+    win = DEWindow()
+    win.start(p, [dict(name='d', data={}, vectors={},
+                       grids={None: np.linspace(0.01, 0.2, 50)})], 'd', 'χ²')
+    view = win.views[0]
+    names = [b.text() for b in view.prof_boxes]
+    k = names.index('NSLD Im')
+    assert not view.prof_boxes[k].isChecked()
+    view.prof_boxes[k].setChecked(True)
+    z, y = view.prof_curves[k].getData()
+    assert y.min() < -0.0099 and view.prof_curves[k].isVisible()
+    win.close()
