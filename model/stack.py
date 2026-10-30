@@ -212,7 +212,10 @@ evaluating every node.  Against a uniform grid 16x finer, the error is a
 few 0.1 % of R at most, and smaller than that of a uniform grid 4x finer at
 the critical edge (the worst place for interpolation).  A magnetic fronting
 with q_in_fronting False uses a uniform grid of step sigma /
-RES_GRID_STEP_UNIFORM instead (see RES_GRID_STEP_UNIFORM).
+RES_GRID_STEP_UNIFORM instead (see RES_GRID_STEP_UNIFORM).  Stack.res_grid_step,
+None by default, replaces RES_GRID_STEP for that stack alone: a coarser
+grid for a cheap training simulator (fit.npe.simulator FIDELITY); it is
+not saved with the stack.
 A channel that is undefined (NaN) at some nodes is averaged over the others.
 
 POLARISATION -- a measured quantity is a pair (P0, P): incident polarisation
@@ -865,6 +868,10 @@ class MixOwner:
 class Stack:
     """[fronting, L1, ..., LN, backing].  Fronting and backing are
     semi-infinite; their thickness is ignored."""
+
+    # RES_GRID_STEP of this stack's quadrature grid, None: the module's (see
+    # RESOLUTION); never saved
+    res_grid_step = None
 
     def __init__(self, layers, tail: float = 3.0, roughness_scheme='rms',
                  magnetic_smearing=None, interface_order='ordered'):
@@ -2286,7 +2293,8 @@ class Stack:
         if self.fronting_direction() is not None and not self.q_in_fronting:
             grid = _res_grid(Qn, sigma, step=RES_GRID_STEP_UNIFORM)
         else:
-            grid = _res_grid(Qn, sigma, edges_q=self.critical_edges())
+            grid = _res_grid(Qn, sigma, edges_q=self.critical_edges(),
+                             step=self.res_grid_step)
         Rg = ideal(grid)
         R = np.stack([np.interp(Qn, grid, Rg[:, c])
                       for c in range(Rg.shape[1])], -1)
