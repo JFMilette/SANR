@@ -219,6 +219,11 @@ def test_dialog_selection():
     from fit.datasets_panel import tint     # the in-plane angle, shown φ
     assert tint('L.MSLD_theta').color().name() == PROFILE_QUANTITIES[2][2]
     assert tint('L.NSLD_img').color().name() == PROFILE_QUANTITIES[4][2]
+    from tabs.simulation import ROUGHNESS_QUANTITIES
+    assert tint('L.roughness_sigma').color().name() == \
+        ROUGHNESS_QUANTITIES[0][2]
+    assert tint('L.MSLD_sigma').color().name() == ROUGHNESS_QUANTITIES[1][2]
+    assert tint('L.thickness') is None
     assert dlg.list.cellWidget(1, 1).currentText() == 'M2'
     assert dlg.list.cellWidget(0, 1).currentText() == SHOWN
     asked = []

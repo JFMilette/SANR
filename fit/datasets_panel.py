@@ -25,12 +25,14 @@ dataset's model has no such parameter.  A shared parameter takes its
 bounds and starting value from one model, chosen in its "From" box among
 the models of the datasets sharing it (default: the first one's).  A
 parameter's name is tinted with its curve's colour in the SLD profile (NSLD
-Re, MSLD rho, phi, theta, NSLD Im).  A splitter between the two tables.
+Re, MSLD rho, phi, theta, NSLD Im; roughness sigma and magnetic sigma as
+its Roughness axis).  A splitter between the two tables.
 """
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from tabs.simulation import PROFILE_QUANTITIES, shown_names
+from tabs.simulation import (PROFILE_QUANTITIES, ROUGHNESS_QUANTITIES,
+                             shown_names)
 
 # fit.joint MODES, as the combos show them
 MODE_LABELS = [('shared', 'Shared'),
@@ -51,12 +53,16 @@ TICKS = [('untick', 'Untick all',
           'model')]
 # the parameter table's fixed columns
 FIT_COL, NAME_COL, FROM_COL, ALL_COL = range(4)
-# a parameter's name cell tinted with its curve's colour in the SLD profile
-# (PROFILE_QUANTITIES), at this opacity; the others (thickness, roughness,
-# ...) have no curve there and stay plain
-# (in its order; MSLD_theta is the in-plane angle the GUI calls φ)
+# a parameter's name cell tinted with its colour in the SLD profile
+# (PROFILE_QUANTITIES; the roughnesses: ROUGHNESS_QUANTITIES, the right axis
+# in Roughness mode), at this opacity; the others (thickness, scale, ...)
+# have none there and stay plain
+# (in their order; MSLD_theta is the in-plane angle the GUI calls φ)
 PROFILE_ATTRS = ('NSLD_real', 'MSLD_rho', 'MSLD_theta', 'MSLD_phi', 'NSLD_img')
-PARAM_COLOURS = {a: q[2] for a, q in zip(PROFILE_ATTRS, PROFILE_QUANTITIES)}
+ROUGHNESS_ATTRS = ('roughness_sigma', 'MSLD_sigma')
+PARAM_COLOURS = {a: q[2] for a, q in
+                 list(zip(PROFILE_ATTRS, PROFILE_QUANTITIES))
+                 + list(zip(ROUGHNESS_ATTRS, ROUGHNESS_QUANTITIES))}
 TINT_ALPHA = 90
 
 
