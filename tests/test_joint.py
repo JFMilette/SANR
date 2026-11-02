@@ -201,7 +201,7 @@ def test_dialog_selection():
     where its model lacks the parameter; From lists the models sharing
     it."""
     gui()
-    from PyQt6 import QtCore
+    from PyQt6 import QtCore, QtWidgets
     from fit.datasets_panel import SHOWN, DatasetsPanel
     params = ['L.thickness', 'L.MSLD_rho', 'L.NSLD_real']
     present = {'A': set(params[:2]), 'B': set(params), 'C': set(params)}
@@ -216,6 +216,16 @@ def test_dialog_selection():
     assert back[1].color().name() == PROFILE_QUANTITIES[1][2]   # MSLD ρ
     assert back[2].color().name() == PROFILE_QUANTITIES[0][2]   # NSLD Re
     assert dlg.splitter.count() == 2
+    # both columns of the datasets follow the splitter
+    dlg.resize(900, 400)
+    dlg.show()
+    widths = []
+    for left in (200, 400):
+        dlg.splitter.setSizes([left, 900 - left])
+        QtWidgets.QApplication.processEvents()
+        widths.append([dlg.list.columnWidth(k) for k in (0, 1)])
+    assert widths[1][0] > widths[0][0] and widths[1][1] > widths[0][1]
+    dlg.hide()
     from fit.datasets_panel import tint     # the in-plane angle, shown φ
     assert tint('L.MSLD_theta').color().name() == PROFILE_QUANTITIES[2][2]
     assert tint('L.NSLD_img').color().name() == PROFILE_QUANTITIES[4][2]

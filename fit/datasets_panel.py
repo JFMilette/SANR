@@ -160,8 +160,9 @@ class DatasetsPanel(QtWidgets.QWidget):
             QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
         self.list.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        # both columns follow the splitter, sharing the width
         self.list.horizontalHeader().setSectionResizeMode(
-            0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+            QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.list.setToolTip('Tick the datasets fitted together, and pick '
                              'the model each one is fitted with')
         self.list.itemChanged.connect(self._ticked)
