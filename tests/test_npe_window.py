@@ -17,6 +17,7 @@ sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 
 QtWidgets = pytest.importorskip('PyQt6.QtWidgets')
+import pyqtgraph as pg                                         # noqa: E402
 # the tabs first, as the application does (fit.dream.dream_window and
 # tabs import each other)
 from test_fit_panel import QA, app, tab                  # noqa: E402,F401
@@ -97,6 +98,16 @@ def test_npe_page_and_tab(app, monkeypatch):
     assert 'Clusters of 200' in w.report.toPlainText()
     assert exp._npe_seeds[0] == problem.names
     assert exp.dream_start.currentData() == 'npe'
+    # Constraints: a bar per parameter; Network check: the ESS (here the
+    # stand-in's log p - log q is constant: every sample counts)
+    assert w.pages['Constraints'].currentIndex() == 1
+    bars = [i for i in w.width_plot.items if isinstance(i, pg.BarGraphItem)]
+    assert len(bars) == 1 and \
+        len(bars[0].opts['width']) == len(problem.names)
+    assert sum(isinstance(i, pg.ScatterPlotItem)       # the exact: points
+               for i in w.width_plot.items) == 1
+    assert '<b>200</b> of 200' in w.check_note.text()
+    assert len(w.check_plot.listDataItems()) == 3      # 2 clusters, the line
 
     # a cluster to the model
     sent = []

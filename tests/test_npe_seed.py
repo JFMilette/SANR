@@ -14,7 +14,8 @@ sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 
 from fit.dream.dream_fit import posterior_problem, sample   # noqa: E402
-from fit.npe.seed import allocate, format_clusters, seed_chains  # noqa: E402
+from fit.npe.seed import (Seeds, allocate, format_clusters,    # noqa: E402
+                          importance, seed_chains, widths)
 from test_dream_fit import film, free, measure               # noqa: E402
 
 MODES = np.array([[0.25, 0.3], [0.7, 0.75]])
@@ -124,3 +125,24 @@ def test_seeds_state_round_trip():
     assert [c['weight'] for c in back.clusters] == \
         [c['weight'] for c in s.clusters]
     assert np.array_equal(back.clusters[0]['best_x'], s.clusters[0]['best_x'])
+
+
+def test_importance_and_widths():
+    """The effective sample size: all the samples for an exact network
+    (log p - log q constant), one when a sample carries everything.  The
+    widths: 1 for the prior (uniform u), a tenth for a parameter held in a
+    tenth of its bounds; weights move them."""
+    rng = np.random.default_rng(1)
+    u = rng.random((20000, 2))
+    u[:, 1] = 0.4 + 0.1 * u[:, 1]
+    one = np.zeros(len(u))
+    s = Seeds(None, [], u, one, one - 3.0, one)
+    w, ess = importance(s)
+    assert np.allclose(w, 1 / len(u)) and ess == pytest.approx(len(u))
+    s.logp = one.copy()
+    s.logp[7] = 50.0
+    assert importance(s)[1] == pytest.approx(1.0)
+    r = widths(u)
+    assert r == pytest.approx([1.0, 0.1], abs=0.01)
+    w = (u[:, 0] < 0.5).astype(float)    # only the lower half counts
+    assert widths(u, w)[0] == pytest.approx(0.5, abs=0.01)

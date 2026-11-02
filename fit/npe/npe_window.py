@@ -30,6 +30,14 @@ shows them as they were, at once.
              chains, best chi^2/N, parameters at a bound, best values
   Marginals  one parameter at a time: the network's samples (a proposal,
              not the posterior) and each cluster's best value
+  Constraints  per parameter, its 90 % interval over the bounds' (fit.npe.
+             seed widths): the network's samples (bars) and, when the
+             effective sample size is at least RELIABLE_ESS, the exact
+             posterior's (the samples weighted exact / network, points)
+  Network check  each sample's exact log posterior against the network's
+             log density, by cluster, with the line of slope 1 a perfect
+             network gives, and the effective sample size (fit.npe.seed
+             importance)
 
 "Load into model" sends the best state of the cluster chosen beside it to
 the Simulation tab (in a joint fit, as the dataset chosen sees it); "DREAM
@@ -56,6 +64,8 @@ from fit.dream.dream_window import (CHAIN_COLOURS, SESSIONS_DIR, axis_label,
 DIALOG_OPTIONS = QtWidgets.QFileDialog.Option.DontUseNativeDialog
 OK, BAD = '#4ade80', '#f87171'
 LOSS_KEY = '#9aa0a6'              # the Training plot's legend key
+RELIABLE_ESS = 100                # weighted widths shown from this ESS on
+SPREAD = 3                        # Network check: log p / log q spreads
 
 
 class NPERun:
@@ -273,8 +283,37 @@ class NPEWindow(QtWidgets.QWidget):
         row.addStretch(1)
         v.addLayout(row)
         v.addWidget(self.marg, 1)
+        # how much the data narrow each parameter (one bar each, scrolled)
+        self.width_plot = plot_item('90 % interval / the bounds\' 90 %   '
+                                    '(1: the data do not constrain it)')
+        self.width_plot.invertY(True)
+        self.width_plot.setMouseEnabled(x=False, y=False)
+        self.width_view = pg.GraphicsLayoutWidget()
+        self.width_view.addItem(self.width_plot)
+        self.width_note = QtWidgets.QLabel(wordWrap=True)
+        scroll = QtWidgets.QScrollArea(widgetResizable=True)
+        scroll.setWidget(self.width_view)
+        widths_page = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(widths_page)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.addWidget(self.width_note)
+        v.addWidget(scroll, 1)
+        # the network against the exact posterior, sample by sample
+        self.check_plot = plot_item('log q   (the network)',
+                                    'log p   (exact posterior, + a constant)')
+        self.check_plot.addLegend(offset=(10, 10))
+        self.check_view = pg.GraphicsLayoutWidget()
+        self.check_view.addItem(self.check_plot)
+        self.check_note = QtWidgets.QLabel(wordWrap=True)
+        check_page = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(check_page)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.addWidget(self.check_note)
+        v.addWidget(self.check_view, 1)
         self.pages = {}
-        for name, w in (('Clusters', self.table), ('Marginals', marg)):
+        for name, w in (('Clusters', self.table), ('Marginals', marg),
+                        ('Constraints', widths_page),
+                        ('Network check', check_page)):
             page = QtWidgets.QStackedWidget()
             page.addWidget(placeholder('Shown when the seeds are ready.'))
             page.addWidget(w)
@@ -283,6 +322,8 @@ class NPEWindow(QtWidgets.QWidget):
         self.tabs.addTab(self.loss, 'Training')
         self.tabs.addTab(self.pages['Clusters'], 'Clusters')
         self.tabs.addTab(self.pages['Marginals'], 'Marginals')
+        self.tabs.addTab(self.pages['Constraints'], 'Constraints')
+        self.tabs.addTab(self.pages['Network check'], 'Network check')
 
         self.btn_save = QtWidgets.QPushButton('Save network…')
         self.btn_save.clicked.connect(self._save)
@@ -471,6 +512,8 @@ class NPEWindow(QtWidgets.QWidget):
         self.marg_combo.addItems([axis_label(i) for i in self.infos])
         self.marg_combo.blockSignals(False)
         self._draw_marginal()
+        self._draw_widths()
+        self._draw_check()
         for page in self.pages.values():
             page.setCurrentIndex(1)
         self.cluster_box.clear()
@@ -533,6 +576,104 @@ class NPEWindow(QtWidgets.QWidget):
                 c['best_x'][j] * s, angle=90,
                 pen=pg.mkPen(CHAIN_COLOURS[k % len(CHAIN_COLOURS)],
                              width=1.5)))
+
+    def _cluster_index(self):
+        """Each sample's cluster, numbered as the table (by weight)."""
+        seeds = self.run.seeds
+        order = {c['label']: k for k, c in enumerate(seeds.clusters)}
+        return np.array([order.get(int(l), -1) for l in seeds.labels])
+
+    def _draw_widths(self):
+        """Constraints: per parameter, the network samples' 90 % interval
+        over the bounds' (bars) and, when the importance weights are
+        reliable (ESS >= RELIABLE_ESS), the exact posterior's (points)."""
+        from fit.npe.seed import importance, widths
+        p = self.width_plot
+        p.clear()
+        seeds = self.run.seeds
+        w, ess = importance(seeds)
+        r = widths(seeds.u)
+        n = len(r)
+        y = np.arange(n)
+        p.addItem(pg.BarGraphItem(x0=0, y=y, height=0.7, width=r, pen=None,
+                                  brush=pg.mkBrush('#4c8dff')))
+        p.addItem(pg.InfiniteLine(1.0, angle=90, pen=pg.mkPen(
+            LOSS_KEY, width=1, style=QtCore.Qt.PenStyle.DashLine)))
+        weighted = ess >= RELIABLE_ESS
+        if weighted:
+            p.addItem(pg.ScatterPlotItem(
+                x=widths(seeds.u, w), y=y, symbol='o', size=8, pen=None,
+                brush=pg.mkBrush('#f5a623')))
+        left = p.getAxis('left')
+        left.setTicks([[(k, i[0]) for k, i in enumerate(self.infos)]])
+        font = QtGui.QFontMetrics(left.font() if left.style['tickFont']
+                                  is None else left.style['tickFont'])
+        left.setWidth(max(font.horizontalAdvance(i[0])
+                          for i in self.infos) + 20)
+        p.setXRange(0, max(1.05, float(r.max()) * 1.05), padding=0)
+        p.setYRange(-0.6, n - 0.4, padding=0)
+        self.width_view.setMinimumHeight(max(300, 20 * n + 80))
+        self.width_note.setText(
+            '<i>Bars: the network\'s samples.  %s  Short bar: the data '
+            'determine the parameter; near 1: only its bounds hold it '
+            '(two separate clusters also widen it).</i>'
+            % ('Points: the exact posterior (the samples weighted by exact '
+               '/ network).' if weighted else
+               'The exact posterior is not shown: too few effective '
+               'samples (%.0f, see Network check).' % ess))
+
+    def _draw_check(self):
+        """Network check: each sample's exact log posterior against the
+        network's log density, by cluster; a perfect network puts them on
+        a line of slope 1.  The effective sample size above."""
+        from fit.npe.seed import importance
+        p = self.check_plot
+        p.clear()
+        seeds = self.run.seeds
+        lq = np.asarray(seeds.logq, float)
+        lp = np.asarray(seeds.logp, float)
+        k = self._cluster_index()
+        for j in range(len(seeds.clusters)):
+            on = k == j
+            if on.any():
+                p.addItem(pg.ScatterPlotItem(
+                    x=lq[on], y=lp[on], size=4, pen=None,
+                    brush=pg.mkBrush(CHAIN_COLOURS[j % len(CHAIN_COLOURS)]),
+                    name='cluster %d' % (j + 1)))
+        # the window: the bulk of the samples, not their far tails
+        lo = [np.percentile(v, 1) for v in (lq, lp)]
+        hi = [v.max() for v in (lq, lp)]
+        c = float(np.median(lp - lq))
+        a, b = min(lo[0], lo[1] - c), max(hi[0], hi[1] - c)
+        p.addItem(pg.PlotDataItem(
+            [a, b], [a + c, b + c], name='slope 1: a perfect network',
+            pen=pg.mkPen(LOSS_KEY, width=1.5,
+                         style=QtCore.Qt.PenStyle.DashLine)))
+        for side, u, v in (('x', lo[0], hi[0]), ('y', lo[1], hi[1])):
+            m = 0.05 * (v - u) + 1e-9
+            getattr(p, 'set%sRange' % side.upper())(u - m, v + m, padding=0)
+        _, ess = importance(seeds)
+        n = len(lp)
+        # spreads of log p and log q: far apart, the network has the
+        # posterior's place but not its width
+        iqr = lambda v: np.subtract(*np.percentile(v, [75, 25]))
+        sp, sq = iqr(lp), iqr(lq)
+        ratio = sp / sq if sp > 0 and sq > 0 else 1.0
+        width = ''
+        if ratio > SPREAD:
+            width = ('  Here log p spreads over %.2g times the range of '
+                     'log q: the posterior is much sharper than the '
+                     'network, which only shows where it is.' % ratio)
+        elif ratio < 1 / SPREAD:
+            width = ('  Here log q spreads over %.2g times the range of '
+                     'log p: the network is sharper than the posterior '
+                     'and may miss part of it.' % (1 / ratio))
+        self.check_note.setText(
+            '<i>Effective sample size <b>%.0f</b> of %d (%.2g %%): the '
+            'samples that count once weighted by exact / network.  Points '
+            'along the line, a large ESS: the network matches the '
+            'posterior.  A wide cloud, a small ESS: it only roughly does, '
+            'and DREAM does the rest.%s</i>' % (ess, n, 100 * ess / n, width))
 
     def _send(self):
         k = self.cluster_box.currentIndex()

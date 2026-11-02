@@ -19,6 +19,10 @@ Seeds.state() / Seeds.from_state(): plain arrays and lists, kept with the
 network (fit.npe.train NPEResult.save) so that a loaded network shows the
 seeds and clusters it had.
 
+importance(seeds): the samples' weights exact / network and their
+effective sample size, how well the network matches the posterior;
+widths(u, w): how much the data narrow each parameter within its bounds.
+
 Seeds.clusters reports each cluster: weight, samples, chains, best log p
 and chi^2/N, its best state and the parameters within EDGE of a bound
 there: the candidate solutions, useful on their own.  The posterior is
@@ -182,6 +186,36 @@ def seed_chains(npe_result, posterior_problem, n_chains, rng=None,
     order = np.argsort([-c['weight'] for c in clusters])
     clusters = [clusters[i] for i in order]
     return Seeds(np.array(x0), clusters, u, labels, logp, logq)
+
+
+def importance(seeds):
+    """The samples' normalised importance weights p / q (the exact
+    posterior over the network's density) and their effective sample size
+    (sum w)^2 / sum w^2: from 1 (one sample carries everything, the network
+    is far off) to the number of samples (the network is exact)."""
+    logw = np.asarray(seeds.logp, float) - np.asarray(seeds.logq, float)
+    w = np.exp(logw - logw.max())
+    w /= w.sum()
+    return w, 1.0 / np.sum(w ** 2)
+
+
+def widths(u, w=None, level=0.9):
+    """Per parameter: the width of the central `level` interval of the
+    samples u (weights w, uniform if None) over the bounds' (the prior's
+    interval, level): 1 the data do not constrain it, near 0 well
+    determined."""
+    u = np.asarray(u, float)
+    n = len(u)
+    w = np.full(n, 1.0 / n) if w is None else np.asarray(w) / np.sum(w)
+    a = (1 - level) / 2
+    out = []
+    for col in u.T:
+        o = np.argsort(col)
+        c = np.cumsum(w[o])
+        lo, hi = (col[o][min(np.searchsorted(c, q), n - 1)]
+                  for q in (a, 1 - a))
+        out.append((hi - lo) / level)
+    return np.array(out)
 
 
 def format_clusters(seeds):
