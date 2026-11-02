@@ -209,6 +209,16 @@ def test_dialog_selection():
     dlg.load(['A', 'B', 'C'], ['A'], ['M1', 'M2'], {'B': 'M2'}, params,
              present, {params[0]: True, params[1]: True, params[2]: None})
     assert dlg.chosen() == ['A'] and dlg.table.columnCount() == 2
+    # the names tinted with their SLD profile colours; thickness plain
+    from tabs.simulation import PROFILE_QUANTITIES
+    back = [dlg.table.item(r, 1).background() for r in range(3)]
+    assert back[0].style() == QtCore.Qt.BrushStyle.NoBrush
+    assert back[1].color().name() == PROFILE_QUANTITIES[1][2]   # MSLD ρ
+    assert back[2].color().name() == PROFILE_QUANTITIES[0][2]   # NSLD Re
+    assert dlg.splitter.count() == 2
+    from fit.datasets_panel import tint     # the in-plane angle, shown φ
+    assert tint('L.MSLD_theta').color().name() == PROFILE_QUANTITIES[2][2]
+    assert tint('L.NSLD_img').color().name() == PROFILE_QUANTITIES[4][2]
     assert dlg.list.cellWidget(1, 1).currentText() == 'M2'
     assert dlg.list.cellWidget(0, 1).currentText() == SHOWN
     asked = []

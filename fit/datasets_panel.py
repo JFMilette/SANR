@@ -23,12 +23,14 @@ dataset at once ("Own value": a value of its own in each), a dataset's
 column that one only ("All datasets" then reads Mixed); "—" where the
 dataset's model has no such parameter.  A shared parameter takes its
 bounds and starting value from one model, chosen in its "From" box among
-the models of the datasets sharing it (default: the first one's).
+the models of the datasets sharing it (default: the first one's).  A
+parameter's name is tinted with its curve's colour in the SLD profile (NSLD
+Re, MSLD rho, phi, theta, NSLD Im).  A splitter between the two tables.
 """
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from tabs.simulation import shown_names
+from tabs.simulation import PROFILE_QUANTITIES, shown_names
 
 # fit.joint MODES, as the combos show them
 MODE_LABELS = [('shared', 'Shared'),
@@ -49,6 +51,23 @@ TICKS = [('untick', 'Untick all',
           'model')]
 # the parameter table's fixed columns
 FIT_COL, NAME_COL, FROM_COL, ALL_COL = range(4)
+# a parameter's name cell tinted with its curve's colour in the SLD profile
+# (PROFILE_QUANTITIES), at this opacity; the others (thickness, roughness,
+# ...) have no curve there and stay plain
+# (in its order; MSLD_theta is the in-plane angle the GUI calls φ)
+PROFILE_ATTRS = ('NSLD_real', 'MSLD_rho', 'MSLD_theta', 'MSLD_phi', 'NSLD_img')
+PARAM_COLOURS = {a: q[2] for a, q in zip(PROFILE_ATTRS, PROFILE_QUANTITIES)}
+TINT_ALPHA = 90
+
+
+def tint(param):
+    """The name cell's background of a parameter 'layer.attr', or None."""
+    colour = PARAM_COLOURS.get(param.rpartition('.')[2])
+    if colour is None:
+        return None
+    c = QtGui.QColor(colour)
+    c.setAlpha(TINT_ALPHA)
+    return QtGui.QBrush(c)
 
 
 class CentredCheck(QtWidgets.QStyledItemDelegate):
@@ -163,20 +182,29 @@ class DatasetsPanel(QtWidgets.QWidget):
             b.clicked.connect(lambda _, k=key: self.tickRequested.emit(k))
             ticks.addWidget(b)
 
-        left = QtWidgets.QVBoxLayout()
+        # the datasets and the parameters, a splitter between them
+        datasets = QtWidgets.QWidget()
+        left = QtWidgets.QVBoxLayout(datasets)
+        left.setContentsMargins(0, 0, 0, 0)
         left.addWidget(QtWidgets.QLabel('<b>Datasets</b>'))
         left.addWidget(self.list, 1)
-        right = QtWidgets.QVBoxLayout()
+        parameters = QtWidgets.QWidget()
+        right = QtWidgets.QVBoxLayout(parameters)
+        right.setContentsMargins(0, 0, 0, 0)
         right.addWidget(QtWidgets.QLabel('<b>Parameters</b>'))
         right.addWidget(self.table, 1)
         right.addLayout(ticks)
         right.addWidget(self.note)
-        row = QtWidgets.QHBoxLayout()
-        row.addLayout(left, 1)
-        row.addLayout(right, 3)
+        self.splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        self.splitter.addWidget(datasets)
+        self.splitter.addWidget(parameters)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 3)
+        self.splitter.setSizes([250, 750])     # 1 : 3, as the panel grows
         v = QtWidgets.QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
-        v.addLayout(row, 1)
+        v.addWidget(self.splitter, 1)
         v.addWidget(QtWidgets.QLabel(
             '<i>Fit: varied in the fit (bounds, values and priors are each '
             'model\'s, in the Simulation tab).  Shared: one value fitted to '
@@ -316,6 +344,9 @@ class DatasetsPanel(QtWidgets.QWidget):
             t.setItem(r, FIT_COL, it)
             name = QtWidgets.QTableWidgetItem(shown_names(p))
             name.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+            brush = tint(p)
+            if brush is not None:
+                name.setBackground(brush)
             if on is not False:
                 font = name.font()
                 font.setBold(True)
