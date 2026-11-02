@@ -477,3 +477,25 @@ def test_multistart_de_follows_polish_box(app, monkeypatch):
         assert seen[-1]['method'] == 'de'
         assert seen[-1]['de_options']['polish'] is ticked
         exp._ms = None
+
+
+def test_collapsed_sets_stay_collapsed(app):
+    """Ticking a set rebuilds the tree: the sets collapsed by hand stay
+    collapsed, the others expanded."""
+    from PyQt6 import QtCore
+    exp = tab(QA, QB)
+    exp.sets.append(dict(name='e', visible=False,
+                         channels={'+': channel(QA)}))
+    exp.refresh_tree()
+    t = exp.tree
+    names = lambda: {t.topLevelItem(k).text(0): t.topLevelItem(k)
+                     for k in range(t.topLevelItemCount())}
+    t.collapseItem(names()['d'])
+    names()['e'].setCheckState(0, QtCore.Qt.CheckState.Checked)
+    app.processEvents()                   # the rebuild after the tick
+    assert [s for s in exp.sets if s['name'] == 'e'][0]['visible']
+    items = names()
+    assert not items['d'].isExpanded() and items['e'].isExpanded()
+    t.expandItem(items['d'])
+    exp.refresh_tree()
+    assert names()['d'].isExpanded()

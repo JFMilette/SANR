@@ -832,6 +832,9 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         box = QtWidgets.QGroupBox('Experimental data')
         bv = QtWidgets.QVBoxLayout(box)
         self.tree = DataTree()
+        self._collapsed = set()          # id() of the sets collapsed by hand
+        self.tree.itemCollapsed.connect(lambda it: self._set_expanded(it, False))
+        self.tree.itemExpanded.connect(lambda it: self._set_expanded(it, True))
         self.tree.itemChanged.connect(self._on_item_changed)
         self.tree.currentItemChanged.connect(self._update_buttons)
         self.tree.moveRequested.connect(self.move_channel)
@@ -1004,12 +1007,19 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                 top.addChild(it)
                 if select == (i, ch):
                     current = it
-            top.setExpanded(True)
+            top.setExpanded(id(s) not in self._collapsed)
         t.blockSignals(False)
         if current is not None:
             t.setCurrentItem(current)
         self._update_buttons()
         self._refresh_fit_sets()
+
+    def _set_expanded(self, item, expanded):
+        """A set collapsed by hand stays so when the tree is rebuilt."""
+        i, ch = item.data(0, ROLE)
+        if ch is None and i < len(self.sets):
+            (self._collapsed.discard if expanded else self._collapsed.add)(
+                id(self.sets[i]))
 
     def _selected(self):
         it = self.tree.currentItem()
