@@ -105,6 +105,9 @@ datasets together (a joint fit, fit.joint): by differential evolution
 DREAM (fit.dream, followed in fit.dream.dream_window).  The live
 simulation datasets take the norms (and Licorne grid) of the first fitted
 dataset.
+A session opened (or a Licorne session imported) shows every dataset
+collapsed; one expanded or collapsed by hand stays so while the tree is
+rebuilt.
 """
 
 import copy
@@ -1206,6 +1209,9 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         """Rebuild the tree from self.sets; select = (set, channel or None)."""
         self._ensure_dataset_models()
         self._sync_live_sets()
+        if getattr(self, '_collapse_all', False):  # restore_state
+            self._collapse_all = False
+            self._collapsed = {id(s) for s in self.sets}
         t = self.tree
         t.blockSignals(True)
         t.clear()
@@ -1974,6 +1980,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         for w in widgets:
             w.blockSignals(False)
         self._joint = copy.deepcopy(fit.get('joint'))
+        self._collapse_all = True        # a session opens with every set shut
         self.refresh_tree()
         if fit:
             self.fit_set.setCurrentIndex(max(0, self.fit_set.findText(

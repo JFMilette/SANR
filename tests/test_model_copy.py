@@ -162,3 +162,26 @@ def test_copy_general_parameters(qapp):
     assert d['tail'] == 4.0
     assert d['resolution']['tof_dlambda'] == pytest.approx(0.0217)
     assert d['layers'][d['thickness_spread_target']]['name'] == layer
+
+
+def test_session_opens_collapsed(qapp):
+    from tabs import ExperimentalTab, SimulationTab
+    sim = SimulationTab()
+    exp = ExperimentalTab(simulation=sim)
+    exp.sets = [dataset('A'), dataset('B')]
+    exp.refresh_tree()
+    assert exp.tree.topLevelItem(0).isExpanded()   # imported: open
+    state = exp.session_state('.')
+    for s, e in zip(exp.sets, state['sets']):      # by value: no file
+        if not s.get('live'):
+            e['channels'] = {ch: dict(values={k: d[k].tolist() for k in
+                                              ('Q', 'R', 'dR', 'dQ')},
+                                      path=d['path'])
+                             for ch, d in s['channels'].items()}
+    exp.restore_state(state, '.')
+    t = exp.tree
+    assert t.topLevelItemCount() >= 3              # with the live ones
+    assert not any(t.topLevelItem(k).isExpanded()
+                   for k in range(t.topLevelItemCount()))
+    exp.refresh_tree()                             # stays so
+    assert not t.topLevelItem(0).isExpanded()
