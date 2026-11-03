@@ -11,7 +11,9 @@ thicknesses (~100) are on the same footing.
 
 DATA -- a list of measured channels, each a dict
   {'Q', 'R', 'dR', 'P0': vector, 'P': vector or None, 'name' (optional),
-   'norm' (optional, default 1), 'dQ' (optional)}
+   'norm' (optional, default 1), 'dQ' (optional), 'theta' (optional: the
+   angle of each point, which keeps the pairs of a 'sum' / 'asym' target
+   within one stitched angle, see TARGET)}
 with (P0, P) its polarisation pair (see model.stack POLARISATION and
 model.polarisation); 'name' labels it in warnings; 'norm' is a fixed factor
 on that channel's model before the background (Licorne's Norm_factor, see
@@ -71,10 +73,17 @@ always samples the channels):
                order in M, and the scale cancels in it (up to the
                background): for the MSLD.  With the 'log' cost its residual
                is SA_model - SA (SA can be negative: no log).
-The two channels are combined at their common Q points (row by row when
-their fitted points are the same, else matched to 1e-6 Q), only where
-both are fitted; the model is computed as for 'channels' and combined the
-same way.  The dataset's other channels (spin-flip R+-, R-+) are still
+The two channels are combined row by row when their files have as many
+rows (the rows fitted in both: the same measurement point of each spin
+state, whatever small differences of Q the reduction left), else at their
+common Q points: each up point with the nearest down
+point within PAIR_RTOL of Q, of the same angle when both channels have
+a theta column: reductions can put the two spin states of an angle a few
+1e-4 of Q apart, far within the resolution, and where two angles overlap
+the nearest point can be the other angle's), only where both
+are fitted; the model is computed as for 'channels', each channel at its
+own Q, and combined the same way, so a pair a little apart in Q is
+compared with the model at those same two Q.  The dataset's other channels (spin-flip R+-, R-+) are still
 fitted one by one, as with 'channels' (`others`); a dataset without the
 pair cannot be fitted.  Fitting 'sum' and
 'asym' together would hold the same information as the two channels:
@@ -110,6 +119,12 @@ TARGETS = ('channels', 'sum', 'asym')
 # the (up, down) channels a 'sum' or 'asym' target combines, by preference
 TARGET_PAIRS = (('R+', 'R-'), ('R++', 'R--'))
 TARGET_NAMES = {'sum': '(R+ + R−)/2', 'asym': 'the spin asymmetry'}
+# R+ and R- points paired by a 'sum' / 'asym' target when this close
+# (relative to Q; see TARGET)
+PAIR_RTOL = 1e-3
+# ... and only when their angles agree this well (relative), if both
+# channels have a theta column
+SAME_ANGLE = 0.05
 
 
 def parameter_names(stack, params):
@@ -200,6 +215,8 @@ class FitProblem:
         self.norms = []                    # fixed factor of each channel
         self.error_floor = float(error_floor)
         self.raw_sigma = []                # each channel's dR, no floor
+        thetas = []                        # each channel's theta, or None
+        rows = []                          # (fitted rows, number of rows)
         Qs = []
         dQs = []                           # each channel's dQ, NaN if none
         full = []                          # (finite Q, fitted ones among them)
@@ -229,6 +246,11 @@ class FitProblem:
                                       R[ok], sigma))
                 Qs.append(Q[ok])
                 dQs.append(dQ[ok])
+                rows.append((np.flatnonzero(ok), len(Q)))
+                th = e.get('theta')
+                th = None if th is None else np.asarray(th, dtype=float)[ok]
+                thetas.append(th if th is not None and
+                              np.all(np.isfinite(th)) else None)
                 fin = np.isfinite(Q)
                 full.append((Q[fin], np.flatnonzero(ok[fin])))
                 full_dq.append(dQ[fin])
@@ -240,6 +262,7 @@ class FitProblem:
         self.channels = [(n, idx, R, s) for (n, R, s), idx
                          in zip(self.channels, np.split(inv, splits))]
         self.npoints = sum(len(ch[2]) for ch in self.channels)
+        self.thetas, self.rows = thetas, rows
         # 'sum' / 'asym': (up k, down k, their points, value, error or
         # None), and the channels fitted on their own besides
         self.combined = None
@@ -330,20 +353,37 @@ class FitProblem:
                              % (TARGET_NAMES[self.target], ', '.join(names)))
         a, b = (names.index(n) for n in pair)
         qa, qb = self.Q[self.channels[a][1]], self.Q[self.channels[b][1]]
-        if len(qa) == len(qb) and np.array_equal(qa, qb):
-            ia = ib = np.arange(len(qa))
+        (ra, na), (rb, nb) = self.rows[a], self.rows[b]
+        if na == nb:
+            # row by row: the rows fitted in both
+            common = np.intersect1d(ra, rb)
+            ia, ib = np.searchsorted(ra, common), np.searchsorted(rb, common)
+            n = len(qa) + len(qb) - 2 * len(common)
+            if n:
+                warnings.warn('%s and %s: %d point(s) fitted in one channel '
+                              'only are left out' % (pair[0], pair[1], n),
+                              stacklevel=3)
         else:
-            # each up point with the nearest down point, if within 1e-6 Q
-            j = np.abs(qa[:, None] - qb[None, :]).argmin(axis=1)
-            near = np.abs(qb[j] - qa) <= 1e-6 * np.abs(qa)
+            # each up point with the nearest down point within PAIR_RTOL,
+            # of the same angle when both have one (stitched angles are a
+            # factor apart; one angle's spin states a few 1e-4)
+            dist = np.abs(qa[:, None] - qb[None, :])
+            ta, tb = self.thetas[a], self.thetas[b]
+            if ta is not None and tb is not None:
+                dist = np.where(np.isclose(ta[:, None], tb[None, :],
+                                           rtol=SAME_ANGLE, atol=0),
+                                dist, np.inf)
+            j = dist.argmin(axis=1)
+            near = dist[np.arange(len(qa)), j] <= PAIR_RTOL * np.abs(qa)
             ia, ib = np.flatnonzero(near), j[near]
             ib, first = np.unique(ib, return_index=True)
             ia = ia[first]
             n = len(qa) + len(qb) - 2 * len(ia)
             if n:
-                warnings.warn('%s and %s: %d point(s) without a partner at '
-                              'the same Q are left out'
-                              % (pair[0], pair[1], n), stacklevel=3)
+                warnings.warn('%s and %s: %d point(s) without a partner '
+                              'within %g of their Q are left out'
+                              % (pair[0], pair[1], n, PAIR_RTOL),
+                              stacklevel=3)
         Ra, Rb = self.channels[a][2][ia], self.channels[b][2][ib]
         sa, sb = self.channels[a][3], self.channels[b][3]
         T = Ra + Rb

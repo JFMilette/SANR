@@ -203,7 +203,13 @@ def parse_data(lines, start, Q=None, q_shift=0.0, q_mult=1.0, r_mult=1.0):
 
 
 def on_grid(Q, d):
-    """Channel d (R, dR) interpolated onto Q, NaN outside its range."""
+    """Channel d (R, dR) at the points Q of another channel: row by row
+    when it has as many (the same measurement points, whatever small
+    differences of Q the reduction left), else interpolated onto Q, NaN
+    outside its range."""
+    if len(d['Q']) == len(Q):
+        return np.asarray(d['R'], dtype=float), \
+            np.asarray(d['dR'], dtype=float)
     kw = dict(left=np.nan, right=np.nan)
     return (np.interp(Q, d['Q'], d['R'], **kw),
             np.interp(Q, d['Q'], d['dR'], **kw))
@@ -528,8 +534,8 @@ def half_polarized(D, sign):
 
 
 def unpolarized(D):
-    """(Q, (R+ + R-)/2, its error, dQ) on R+'s Q grid (R- taken there, as
-    for the asymmetry), None without both."""
+    """(Q, (R+ + R-)/2, its error, dQ) on R+'s Q grid (R- taken there by
+    on_grid, as for the asymmetry), None without both."""
     up, dn = half_polarized(D, '+'), half_polarized(D, '-')
     if up is None or dn is None:
         return None
@@ -570,7 +576,8 @@ def dataset_series(D, k, line=False, colour=None):
     """Series of REFL_QUANTITIES[k] for one dataset as
     ([(label, colour, Q, y, dy, dQ)], note).  colour(key) is the colour of
     a channel or a half-polarized sign (default line_colours.get), and
-    colour(None) that of an asymmetry (default None = per-dataset).
+    colour(None) that of an asymmetry or (R+ + R-)/2 (default None =
+    per-dataset; (R+ + R-)/2 then takes line_colours' 'unpol').
     A simulated (line) dataset's R+ / R- only show as half-polarized."""
     if colour is None:
         colour = lambda key: key and line_colours.get(key)      # noqa: E731
@@ -584,7 +591,7 @@ def dataset_series(D, k, line=False, colour=None):
         res = unpolarized(D)
         if res is None:
             return [], 'needs R+ and R− (or R++, R+-, R-+, R--)'
-        return [('(R+ + R−)/2', colour('unpol')) + res], ''
+        return [('(R+ + R−)/2', colour(None) or colour('unpol')) + res], ''
     if name == HALF_POLARIZED:
         out = []
         for sign, lab in (('+', 'R+'), ('-', 'R−')):

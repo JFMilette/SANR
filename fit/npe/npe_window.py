@@ -45,7 +45,8 @@ from seeds" samples the posterior with DREAM from the seeds, with the
 DREAM page's settings (the chains: one per seed).  "Save network…" writes
 the network, its seeds and clusters (fit.npe.train NPEResult.save, .npe)
 for "Load network…" in the fit box; "Re-seed" draws new seeds from the
-network with the NPE page's Samples, Seeds and Seed (a new tab).  The network's samples are never a result: only DREAM's are.
+network with the samples beside it (this run's at first) and the NPE
+page's Seeds and Seed (a new tab).  The network's samples are never a result: only DREAM's are.
 Values are shown in the Simulation tab's units.  An NPE tab is not kept in
 sessions.
 """
@@ -173,6 +174,13 @@ def report_text(run):
         out.append('Training simulator: ' + describe_coarse(meta['coarse']))
     elif meta.get('rounds'):
         out.append('Training simulator: full fidelity (coarse training off)')
+    if meta.get('embedding') and meta.get('flow'):
+        (hidden, n_out), flow = meta['embedding'], meta['flow']
+        out.append('Network: embedding %s → %d features, %s flow of %d '
+                   'transforms × %d hidden units'
+                   % (' × '.join(str(h) for h in hidden), n_out,
+                      flow.get('model'), flow.get('num_transforms'),
+                      flow.get('hidden_features')))
     if meta.get('rounds'):
         out.append('')
         out.append('%5s %7s %6s %9s %10s %7s %12s %9s'
@@ -224,7 +232,7 @@ class NPEWindow(QtWidgets.QWidget):
     # state x, dataset whose values are sent, what it is ('cluster 2')
     sendRequested = QtCore.pyqtSignal(object, int, str)
     dreamRequested = QtCore.pyqtSignal()
-    reseedRequested = QtCore.pyqtSignal()
+    reseedRequested = QtCore.pyqtSignal(int)          # samples
 
     def __init__(self, parent=None):
         super().__init__(parent, QtCore.Qt.WindowType.Window)
@@ -341,10 +349,19 @@ class NPEWindow(QtWidgets.QWidget):
         self.btn_dream.clicked.connect(self.dreamRequested)
         self.btn_reseed = QtWidgets.QPushButton('Re-seed')
         self.btn_reseed.setToolTip(
-            'Draw new seeds from this network with the NPE page\'s Samples, '
-            'Seeds and Seed (the exact posterior is computed again), in a '
-            'new tab')
-        self.btn_reseed.clicked.connect(self.reseedRequested)
+            'Draw new seeds from this network with the samples beside it and '
+            'the NPE page\'s Seeds and Seed (the exact posterior is computed '
+            'again), in a new tab')
+        self.btn_reseed.clicked.connect(
+            lambda: self.reseedRequested.emit(self.reseed_samples.value()))
+        self.reseed_samples = QtWidgets.QSpinBox()
+        self.reseed_samples.setRange(500, 1_000_000)
+        self.reseed_samples.setSingleStep(1000)
+        self.reseed_samples.setValue(10000)
+        self.reseed_samples.setToolTip(
+            'Network samples of a re-seed: their exact posterior is computed '
+            '(one model evaluation each); the effective sample size grows '
+            'about in proportion')
         self.part_box = QtWidgets.QComboBox()
         self.part_box.setToolTip('Joint fit: the dataset whose values "Load '
                                  'into model" writes')
@@ -355,6 +372,8 @@ class NPEWindow(QtWidgets.QWidget):
         bottom.addWidget(self.part_label)
         bottom.addWidget(self.part_box)
         bottom.addWidget(self.btn_save)
+        bottom.addWidget(QtWidgets.QLabel('Samples'))
+        bottom.addWidget(self.reseed_samples)
         bottom.addWidget(self.btn_reseed)
         bottom.addSpacing(12)
         bottom.addWidget(self.cluster_box)
@@ -394,7 +413,7 @@ class NPEWindow(QtWidgets.QWidget):
             page.setCurrentIndex(0)
         self.btn_stop.setEnabled(True)
         for b in (self.btn_save, self.btn_send, self.btn_dream,
-                  self.btn_reseed):
+                  self.btn_reseed, self.reseed_samples):
             b.setEnabled(False)
         self.cluster_box.clear()
         self.tabs.setCurrentWidget(self.report)
@@ -520,8 +539,11 @@ class NPEWindow(QtWidgets.QWidget):
         self.cluster_box.addItems(
             ['cluster %d (χ²/N %.4g)' % (k, c['chi2'])
              for k, c in enumerate(run.seeds.clusters, 1)])
+        n = (getattr(run.result, 'seeding', None) or {}).get('n_samples')
+        if n:
+            self.reseed_samples.setValue(int(n))
         for b in (self.btn_save, self.btn_send, self.btn_dream,
-                  self.btn_reseed):
+                  self.btn_reseed, self.reseed_samples):
             b.setEnabled(True)
 
     def fail(self, msg):

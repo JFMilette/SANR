@@ -1164,10 +1164,10 @@ class FitPanel:
             return None
         return problem, inputs, qmin, qmax, note
 
-    def start_npe(self, result=None, label=None):
+    def start_npe(self, result=None, label=None, n_samples=None):
         """Train a network on the fitted datasets (or seed from `result`,
         a loaded fit.npe.train NPEResult) in an NPEThread followed by a
-        new NPE tab."""
+        new NPE tab; n_samples: the seeding's (default the NPE page's)."""
         if self.simulation is None or self.busy() or npe_missing():
             return
         built = self._npe_problem()
@@ -1200,7 +1200,8 @@ class FitPanel:
             problem, result=result, coarse=self.npe_coarse.isChecked(),
             threshold=self.npe_threshold.value(), seed=seed,
             n_workers=self.fit_workers.value(), rounds=rounds,
-            sims_per_round=sims, n_samples=self.npe_samples.value(),
+            sims_per_round=sims,
+            n_samples=n_samples or self.npe_samples.value(),
             n_chains=n, calibrate=self.npe_calibrate.isChecked())
         w = self.npe_window
         self._npe.stage.connect(w.stage)
@@ -1277,14 +1278,15 @@ class FitPanel:
                                      len(result.seeds.x0),
                                      len(result.seeds.clusters)))
 
-    def _reseed_npe(self, w):
-        """Seed DREAM again from the network of NPE tab w (a new tab)."""
+    def _reseed_npe(self, w, n_samples):
+        """Seed DREAM again from the network of NPE tab w with n_samples
+        samples (a new tab)."""
         if self.busy() or w.run is None:
             return
         # a copy: tab w keeps (and saves) its own seeds
         result = copy.copy(w.run.result)
         result.meta = copy.deepcopy(result.meta)
-        self.start_npe(result, 'reseed of %s' % w.tab_name)
+        self.start_npe(result, 'reseed of %s' % w.tab_name, n_samples)
 
     def _make_npe_window(self, names):
         """A new NPE tab (the last one stays, as DREAM's)."""
@@ -1296,7 +1298,8 @@ class FitPanel:
         w.sendRequested.connect(
             lambda x, part, label, w=w: self._send_npe(x, part, w, label))
         w.dreamRequested.connect(lambda w=w: self._npe_dream(w))
-        w.reseedRequested.connect(lambda w=w: self._reseed_npe(w))
+        w.reseedRequested.connect(
+            lambda n, w=w: self._reseed_npe(w, n))
         w.tab_name = self._tab_name('npe', names)
         w.setWindowTitle('Neural posterior estimation (NPE) — '
                          + ' + '.join(names))
@@ -1597,7 +1600,7 @@ class FitPanel:
         vec = {ch: self.channel_vectors(s, ch) for ch in fitted}
         data = [dict(zip(('P0', 'P'), vectors_pair(*vec[ch])), name='R' + ch,
                      Q=d['Q'], R=d['R'], dR=d['dR'], dQ=d.get('dQ'),
-                     norm=d.get('norm', 1.0))
+                     theta=d.get('theta'), norm=d.get('norm', 1.0))
                 for ch, d in fitted.items()]
         grid = None
         res = sim.stack.resolution
@@ -2516,7 +2519,8 @@ class FitPanel:
 
     @staticmethod
     def _error(msg):
-        return '<span style="color:#f87171">%s</span>' % html_escape(str(msg))
+        return '<span style="color:#f87171">%s</span>' % html_escape(
+            str(msg)).replace('\n', '<br>')
 
     def shutdown(self):
         """Stop a running fit; call before the application quits."""

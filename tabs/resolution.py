@@ -9,11 +9,22 @@ curves at other Q).
 FIT -- fit_resolution takes sigma_Q^2 / Q^2 = (dtheta/theta)^2 +
 (dlambda/lambda)^2 (model.stack RESOLUTION), which is linear in the squared
 spreads, and solves it by non-negative least squares over the data points
-for the dtheta^2 of each angle of the 'tof' table (its Q band, as
-model.stack._sigma_tof) and dlambda^2, (dlambda/lambda)^2 = dlambda^2 Q^2 /
-(4 pi sin theta)^2; an angle with no data in its band keeps its dtheta.
-Every point weighs the same in sigma_Q^2 / Q^2.  The dQ column is a standard
-deviation; points with dQ <= 0 or Q <= 0 are left out.
+for the dtheta^2 of each angle of the 'tof' table and dlambda^2 (one for
+all angles), (dlambda/lambda)^2 = dlambda^2 Q^2 / (4 pi sin theta)^2.
+When the data's stitched angles can be told apart (stitched_points: the theta
+column, else where Q falls back in each channel), each point belongs to its
+own angle, the overlaps included, and the i-th angle by Q is the table's
+i-th, its theta that of the data when they have a theta column in radians
+(the median of the angle's points; dlambda / lambda depends on it, so a
+wrong theta skews every spread); the overlap rule then sets each angle's
+Q max, where the model passes
+to the next angle: 'first' the end of the earlier angle's points, 'last' the
+start of the later one's, 'mean' the middle of their overlap.  Otherwise
+(one angle per channel, a file sorted by Q without theta) each point goes to
+the angle of its Q band, as model.stack._sigma_tof, the Q max kept, and an
+angle with no data in its band keeps its dtheta.  Every point weighs the
+same in sigma_Q^2 / Q^2.  The dQ column is a standard deviation; points with
+dQ <= 0 or Q <= 0 are left out.
 """
 
 import copy
@@ -44,15 +55,21 @@ def _tof_band(Q, angles):
     return k
 
 
-def fit_resolution(Q, dQ, res):
+def fit_resolution(Q, dQ, res, angle=None, overlap='mean', thetas=None):
     """Resolution dict res with its spreads fitted to the points (Q, dQ)
-    (see FIT), and the rms relative misfit of sigma_Q.  Raises ValueError
-    when too few points are usable."""
+    (see FIT), and the rms relative misfit of sigma_Q (each point against
+    its own angle's).  angle: each point's stitched angle (0, 1, ... by Q;
+    stitched_points), None for the Q bands of res; overlap: the rule
+    setting the Q max between angles (OVERLAPS); thetas: each angle's
+    theta (rad), replacing the table's.  Raises ValueError when
+    too few points are usable or the angles do not match the table."""
     if res['mode'] == 'data':
         raise ValueError('the resolution is the data dQ: choose fixed θ per '
                          'Q band to fit spreads')
     if res['mode'] != 'tof':
         raise ValueError('unknown resolution mode %r' % (res['mode'],))
+    if overlap not in dict((k, k) for _, k in OVERLAPS):
+        raise ValueError('unknown overlap rule %r' % (overlap,))
     Q, dQ = np.asarray(Q, dtype=float), np.asarray(dQ, dtype=float)
     ok = np.isfinite(Q) & np.isfinite(dQ) & (Q > 0) & (dQ > 0)
     Q, sig = Q[ok], dQ[ok]
@@ -61,10 +78,23 @@ def fit_resolution(Q, dQ, res):
     y = (sig / Q)**2
     new = copy.deepcopy(res)
     angles = new['tof_angles']
+    if thetas is not None:
+        if len(thetas) != len(angles):
+            raise ValueError('the data have %d stitched angles, the angle '
+                             'table %d' % (len(thetas), len(angles)))
+        for a, t in zip(angles, thetas):
+            a['theta'] = float(t)
     theta = np.array([a['theta'] for a in angles], dtype=float)
     if np.any(theta <= 0):
         raise ValueError('TOF angles must be > 0')
-    k = _tof_band(Q, angles)
+    if angle is None:
+        k = _tof_band(Q, angles)
+    else:
+        k = np.asarray(angle, dtype=int)[ok]
+        n = int(k.max()) + 1
+        if n != len(angles):
+            raise ValueError('the data have %d stitched angles, the angle '
+                             'table %d' % (n, len(angles)))
     used = [j for j in range(len(angles)) if np.any(k == j)]
     cols = [(k == j) / theta[j]**2 for j in used]
     cols.append((Q / (4 * np.pi * np.sin(theta[k])))**2)
@@ -72,9 +102,34 @@ def fit_resolution(Q, dQ, res):
     for j, v in zip(used, x[:-1]):
         angles[j]['dtheta'] = float(np.sqrt(v))
     new['tof_dlambda'] = float(np.sqrt(x[-1]))
-    model = RESOLUTION_MODES[new['mode']](Q, new)
+    if angle is not None:
+        for j, edge in enumerate(_overlap_edges(Q, k, len(angles), overlap)):
+            angles[j]['qmax'] = edge
+    dth = np.array([a['dtheta'] for a in angles])
+    model = Q * np.hypot(dth[k] / theta[k], new['tof_dlambda'] * Q /
+                         (4 * np.pi * np.sin(theta[k])))
     misfit = float(np.sqrt(np.mean((model / sig - 1)**2)))
     return new, misfit
+
+
+def _overlap_edges(Q, k, n, overlap):
+    """The Q max of angles 0 .. n-2 (model.stack._sigma_tof: angle j up
+    to it, excluded) from each point's angle k and the overlap rule (see
+    FIT)."""
+    edges = []
+    for j in range(n - 1):
+        end, start = Q[k == j].max(), Q[k == j + 1].min()
+        if overlap == 'first':          # the earlier angle's last point in
+            edge = np.nextafter(end, np.inf)
+        elif overlap == 'last':         # the later angle's first point in
+            edge = np.nextafter(start, -np.inf)
+        else:
+            edge = 0.5 * (end + start)
+        edges.append(float(edge))
+    if np.any(np.diff(edges) <= 0):
+        raise ValueError('the stitched angles\' Q limits do not increase '
+                         'with the overlap rule %r' % overlap)
+    return edges
 
 
 # overlap rule of dq_table: combo label -> key
@@ -106,6 +161,66 @@ def split_angles(Q, dQ, theta=None):
     return list(zip(np.split(Q, cuts), np.split(dQ, cuts)))
 
 
+def _channel_angles(chans):
+    """[[(Q, dQ, theta) of each stitched angle, by its first Q]] of each
+    channel of {channel: (Q, dQ[, theta])}, points with Q > 0 and dQ > 0
+    only; theta the angle's from the theta column, None without one."""
+    out = []
+    for Q, dQ, *theta in chans.values():
+        Q, dQ = np.asarray(Q, dtype=float), np.asarray(dQ, dtype=float)
+        ok = np.isfinite(Q) & np.isfinite(dQ) & (Q > 0) & (dQ > 0)
+        th = np.asarray(theta[0], dtype=float)[ok] if theta and \
+            theta[0] is not None else None
+        segs = []
+        for q, d in split_angles(Q[ok], dQ[ok], th):
+            if q.size:
+                t = None
+                if th is not None:                   # its points' theta
+                    t = th[np.isin(Q[ok], q)]
+                    t = float(np.median(t)) if np.all(np.isfinite(t)) \
+                        else None
+                segs.append((q, d, t))
+        out.append(sorted(segs, key=lambda s: s[0][0]))
+    return out
+
+
+# a theta column is taken for radians when it puts the wavelength
+# lambda = 4 pi sin(theta) / Q of every angle within this range (A)
+WAVELENGTHS = (0.5, 50.0)
+
+
+def stitched_points(chans):
+    """(Q, dQ, angle, thetas) of every channel's points with Q > 0 and
+    dQ > 0: angle the index of each point's stitched angle, 0, 1, ... by Q
+    within its channel (split_angles), None when no channel has more than
+    one; thetas each angle's theta (rad) from the theta column, the median
+    over the channels, None without one or when it is not in radians
+    (WAVELENGTHS).  Raises ValueError when the channels have different
+    numbers of angles."""
+    per = [segs for segs in _channel_angles(chans) if segs]
+    if not per:
+        return np.zeros(0), np.zeros(0), None, None
+    Q = np.concatenate([s[0] for segs in per for s in segs])
+    dQ = np.concatenate([s[1] for segs in per for s in segs])
+    counts = sorted({len(segs) for segs in per})
+    if counts[-1] <= 1:
+        return Q, dQ, None, None
+    if len(counts) > 1:
+        raise ValueError('the channels have different numbers of stitched '
+                         'angles (%s)' % ', '.join(map(str, counts)))
+    angle = np.concatenate([np.full(s[0].size, j) for segs in per
+                            for j, s in enumerate(segs)])
+    thetas = None
+    if all(s[2] is not None for segs in per for s in segs):
+        thetas = [float(np.median([segs[j][2] for segs in per]))
+                  for j in range(counts[0])]
+        lam = [4 * np.pi * np.sin(t) / np.median(Q[angle == j])
+               for j, t in enumerate(thetas)]
+        if not all(WAVELENGTHS[0] <= v <= WAVELENGTHS[1] for v in lam):
+            thetas = None
+    return Q, dQ, angle, thetas
+
+
 def dq_table(chans, overlap='mean'):
     """(Q, sigma_Q) table of a dataset's {channel: (Q, dQ[, theta])} for
     the 'data' mode: each channel is cut into its stitched angles
@@ -118,14 +233,7 @@ def dq_table(chans, overlap='mean'):
     rule cannot apply."""
     if overlap not in dict((k, k) for _, k in OVERLAPS):
         raise ValueError('unknown overlap rule %r' % (overlap,))
-    segs = []
-    for Q, dQ, *theta in chans.values():
-        Q, dQ = np.asarray(Q, dtype=float), np.asarray(dQ, dtype=float)
-        ok = np.isfinite(Q) & np.isfinite(dQ) & (Q > 0) & (dQ > 0)
-        th = np.asarray(theta[0], dtype=float)[ok] if theta and \
-            theta[0] is not None else None
-        Q, dQ = Q[ok], dQ[ok]
-        segs += [(q, d) for q, d in split_angles(Q, dQ, th) if q.size]
+    segs = [s[:2] for segs in _channel_angles(chans) for s in segs]
     if not segs:
         raise ValueError('no point with dQ > 0')
     grid = np.unique(np.concatenate([q for q, _ in segs]))
@@ -175,8 +283,11 @@ class ResolutionDialog(QtWidgets.QDialog):
         bar.addWidget(self.dataset, 1)
         self.btn_fit = QtWidgets.QPushButton('Fit to data dQ')
         self.btn_fit.setToolTip(
-            'Fit Δλ and each angle\'s Δθ to the dQ (an angle with no points '
-            'keeps its Δθ)')
+            'Fit Δλ and each angle\'s Δθ to the dQ, each stitched angle to its '
+            'own points, at the data\'s θ when they have a θ column;\nthe '
+            'overlap rule beside then sets where each angle '
+            'ends (its Q max).\nData whose angles cannot be told apart: each '
+            'point goes to its Q band, an angle with no points keeps its Δθ')
         bar.addWidget(self.btn_fit)
         self.btn_use = QtWidgets.QPushButton('Use data dQ')
         self.btn_use.setToolTip(
@@ -191,7 +302,9 @@ class ResolutionDialog(QtWidgets.QDialog):
             'Where two stitched angles overlap in Q, the dQ the curves use '
             '(the dQ table): the mean of both,\nthe earlier angle\'s (lower '
             'Q) or the later angle\'s.  The fit always uses each point\'s '
-            'own dQ.\nAngles are told apart by the θ column (one value per '
+            'own dQ.\nFit to data dQ: where the fitted angles pass to the '
+            'next (the earlier angle\'s end, the later one\'s start, or the '
+            'middle).\nAngles are told apart by the θ column (one value per '
             'angle), else where Q falls back in file order.')
         bar.addWidget(self.overlap)
         v.addLayout(bar)
@@ -276,17 +389,29 @@ class ResolutionDialog(QtWidgets.QDialog):
         self.redraw()
 
     def fit(self):
-        d = self.data()
+        if not self._sets:
+            return
+        chans = self._sets[self.dataset.currentIndex()][1]
+        overlap = OVERLAPS[self.overlap.currentIndex()][1]
         try:
-            self.fitted, misfit = fit_resolution(d[0], d[1], self.current())
+            Q, dQ, angle, thetas = stitched_points(chans)
+            self.fitted, misfit = fit_resolution(Q, dQ, self.current(),
+                                                 angle, overlap, thetas)
         except ValueError as exc:
             self.fitted = None
             self._message = '<span style="color:%s">Cannot fit: %s</span>' % (
                 style.ERROR, exc)
         else:
-            self._message = 'Fitted: %s — rms misfit of σ_Q %.2g %%%s' % (
-                describe(self.fitted), 100 * misfit, '' if misfit < 0.05 else
-                ' (large: is the angle table right?)')
+            limits = '' if angle is None else ' — each angle on its own%s; ' \
+                'Q max %s Å⁻¹ (%s)' % (
+                    '' if thetas is None else ', θ %s mrad from the data' %
+                    ', '.join('%.4g' % (1e3 * t) for t in thetas),
+                    ', '.join('%.4g' % a['qmax']
+                              for a in self.fitted['tof_angles'][:-1]),
+                    OVERLAPS[self.overlap.currentIndex()][0])
+            self._message = 'Fitted: %s%s — rms misfit of σ_Q %.2g %%%s' % (
+                describe(self.fitted), limits, 100 * misfit,
+                '' if misfit < 0.05 else ' (large: is the angle table right?)')
         self.btn_apply.setEnabled(self.fitted is not None)
         self.redraw()
 
@@ -307,8 +432,10 @@ class ResolutionDialog(QtWidgets.QDialog):
         self.redraw()
 
     def _overlap_changed(self, *_):
-        """A new overlap rule redoes the table in use, if it is this
-        dataset's."""
+        """A new overlap rule redoes the fit shown and the table in use, if
+        it is this dataset's."""
+        if self.fitted is not None:
+            self.fit()
         res = self.sim.stack.resolution
         if self._sets and self.sim.res_mode.currentText() == 'from data dQ' \
                 and res.get('data_set') == self.dataset.currentText():

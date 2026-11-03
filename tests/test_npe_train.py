@@ -204,3 +204,13 @@ def test_every_epoch_is_reported():
         assert [e['epoch'] for e in mine] == list(range(1, len(mine) + 1))
         assert mine[-1]['validation_loss'] == stats['validation_loss']
         assert mine[-1]['patience'] == 20
+
+
+def test_network_grows_with_the_parameters():
+    from fit.npe.train import EMBEDDING, FLOW, network_size
+    assert network_size(5) == (EMBEDDING, FLOW)
+    (hidden, n_out), flow = network_size(39)
+    assert n_out == 96 and n_out >= 2 * 39 and min(hidden) >= 2 * n_out
+    assert flow['hidden_features'] == 128
+    (hidden, n_out), _ = network_size(200)
+    assert n_out >= 400 and min(hidden) >= 2 * n_out

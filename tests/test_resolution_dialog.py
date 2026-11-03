@@ -248,3 +248,86 @@ def test_old_mono_session_loads_as_tof_off():
     r = Stack.from_dict(d).resolution
     assert r['mode'] == 'tof' and not r['enabled']
     assert not {'wavelength', 'dlambda_rel', 'dtheta', 'data_fwhm'} & set(r)
+
+
+def stitched_tof(sort=False):
+    """Two TOF angles overlapping on [0.04, 0.05], R+ and R-, each angle
+    its own dtheta, one dlambda; sorted by Q with a theta column (REF_M)
+    when `sort`, else in file order."""
+    true = res('tof', tof_dlambda=0.015, tof_angles=[
+        {'theta': 0.008, 'dtheta': 2e-4, 'qmax': 0.045},
+        {'theta': 0.02, 'dtheta': 8e-4, 'qmax': None}])
+    Q, dQ, th = [], [], []
+    for j, (lo, hi) in enumerate(((0.01, 0.05), (0.04, 0.1))):
+        q = np.linspace(lo, hi, 40)
+        one = dict(true, tof_angles=[dict(true['tof_angles'][j],
+                                          qmax=None)])
+        Q.append(q)
+        dQ.append(RESOLUTION_MODES['tof'](q, one))
+        th.append(np.full(q.size, true['tof_angles'][j]['theta']))
+    Q, dQ, th = map(np.concatenate, (Q, dQ, th))
+    if sort:
+        i = np.argsort(Q, kind='stable')
+        Q, dQ, th = Q[i], dQ[i], th[i]
+        chans = {'+': (Q, dQ, th), '-': (Q, dQ, th)}
+    else:
+        chans = {'+': (Q, dQ), '-': (Q, dQ)}
+    return true, chans
+
+
+@pytest.mark.parametrize('sort', [False, True])
+def test_each_angle_fitted_on_its_own_points(sort):
+    from tabs.resolution import stitched_points
+    true, chans = stitched_tof(sort)
+    Q, dQ, angle, thetas = stitched_points(chans)
+    assert angle is not None and set(angle) == {0, 1}
+    assert thetas == (None if not sort else pytest.approx([0.008, 0.02]))
+    start = res('tof', tof_dlambda=0.1, tof_angles=[
+        {'theta': 0.008, 'dtheta': 1e-3, 'qmax': 0.03},
+        {'theta': 0.02, 'dtheta': 1e-3, 'qmax': None}])
+    fit, misfit = fit_resolution(Q, dQ, start, angle, 'mean')
+    # the overlap's points belong to their own angle, whatever the band
+    assert misfit < 1e-6
+    assert fit['tof_dlambda'] == pytest.approx(0.015, rel=1e-6)
+    assert [a['dtheta'] for a in fit['tof_angles']] == pytest.approx(
+        [2e-4, 8e-4], rel=1e-6)
+    # the overlap rule sets where angle 1 ends
+    edge = {r: fit_resolution(Q, dQ, start, angle, r)[0]['tof_angles'][0]
+            ['qmax'] for r in ('first', 'last', 'mean')}
+    assert edge['first'] == pytest.approx(0.05)
+    assert edge['last'] == pytest.approx(0.04)
+    assert edge['mean'] == pytest.approx(0.045)
+    # the model then takes the chosen angle in the overlap
+    q = np.array([0.045])
+    for rule, j in (('first', 0), ('last', 1)):
+        r = fit_resolution(Q, dQ, start, angle, rule)[0]
+        one = dict(true, tof_angles=[dict(true['tof_angles'][j], qmax=None)])
+        assert RESOLUTION_MODES['tof'](q, r) == pytest.approx(
+            RESOLUTION_MODES['tof'](q, one), rel=1e-6)
+
+
+def test_angles_must_match_the_table():
+    from tabs.resolution import stitched_points
+    _, chans = stitched_tof()
+    Q, dQ, angle, _ = stitched_points(chans)
+    with pytest.raises(ValueError, match='2 stitched angles'):
+        fit_resolution(Q, dQ, res('tof'), angle)       # a 3-angle table
+
+
+def test_theta_taken_from_the_data():
+    """A table with the wrong angles still fits exactly at the data's θ;
+    a θ column in degrees is not taken."""
+    from tabs.resolution import stitched_points
+    true, chans = stitched_tof(sort=True)
+    Q, dQ, angle, thetas = stitched_points(chans)
+    wrong = res('tof', tof_dlambda=0.1, tof_angles=[
+        {'theta': 0.006, 'dtheta': 1e-3, 'qmax': 0.03},
+        {'theta': 0.010, 'dtheta': 1e-3, 'qmax': None}])
+    _, bad = fit_resolution(Q, dQ, wrong, angle)
+    fit, misfit = fit_resolution(Q, dQ, wrong, angle, thetas=thetas)
+    assert bad > 1e-3 and misfit < 1e-6
+    assert [a['theta'] for a in fit['tof_angles']] == pytest.approx(
+        [0.008, 0.02])
+    assert fit['tof_dlambda'] == pytest.approx(0.015, rel=1e-6)
+    deg = {k: (q, d, np.degrees(t)) for k, (q, d, t) in chans.items()}
+    assert stitched_points(deg)[3] is None

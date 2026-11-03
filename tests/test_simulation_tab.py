@@ -400,6 +400,7 @@ def test_plot_quantities_and_old_sessions(app):
     its error from both, and a session saved with the older list (a
     position) shows the same plot as before."""
     import numpy as np
+    import line_colours
     from tabs.experimental import dataset_series
     from tabs.simulation import (OLD_REFL_QUANTITIES, REFL_QUANTITIES,
                                  quantity_index)
@@ -414,6 +415,11 @@ def test_plot_quantities_and_old_sessions(app):
     (series,), note = dataset_series(D, names.index('Non-polarized'))
     assert note == '' and series[0] == '(R+ + R−)/2'
     assert np.allclose(series[3], 0.3) and np.allclose(series[4], 0.025)
+    assert series[1] == line_colours.get('unpol')          # one dataset
+    # several datasets: each its own colour, as an asymmetry
+    (series,), _ = dataset_series(D, names.index('Non-polarized'),
+                                  colour=lambda key: key or '#123456')
+    assert series[1] == '#123456'
     only_up = {'+': D['+']}
     assert dataset_series(only_up, 2)[0] == []
     sim = SimulationTab()

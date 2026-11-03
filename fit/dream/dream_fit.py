@@ -691,10 +691,12 @@ def draws(result, n=200, discard=0.5, seed=0):
 
 
 def _on_q(Q, Qb, y):
-    """Rows y on the points Qb at the points Q: linear, NaN outside Qb's
-    range (as the Experimental tab); y itself when Qb is Q."""
+    """Rows y on the points Qb at the points Q, as the Experimental tab's
+    on_grid: y itself, row by row, when Qb has as many points as Q (the
+    same measurement points of the other spin state), else linear, NaN
+    outside Qb's range."""
     y = np.atleast_2d(y)
-    if np.array_equal(Q, Qb):
+    if len(Qb) == len(Q):
         return y
     o = np.argsort(Qb)
     return np.array([np.interp(Q, Qb[o], r[o], left=np.nan, right=np.nan)
@@ -720,8 +722,8 @@ def predictive_bands(result, problem, n=200, discard=0.5, seed=0,
     floor of that draw when they are sampled), `replicates` times per draw so its percentiles are
     smooth: where replicated data would fall, about as wide as the error
     bars.  The spin asymmetry (a - b) / (a + b) is given for R+ /
-    R- (or R++ / R--) on a's Q points, b interpolated onto them where
-    the grids differ (NaN outside b's range).  The channels of
+    R- (or R++ / R--) on a's Q points, b row by row when it has as many
+    points, else interpolated onto them (NaN outside b's range).  The channels of
     dataset `part` of a joint fit (fit.joint)."""
     fit = problem.fit
     nfit = len(fit.params)

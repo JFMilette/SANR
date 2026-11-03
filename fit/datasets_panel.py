@@ -37,7 +37,7 @@ from tabs.simulation import (PROFILE_QUANTITIES, ROUGHNESS_QUANTITIES,
 # fit.joint MODES, as the combos show them
 MODE_LABELS = [('shared', 'Shared'),
                ('own', 'Own value'),
-               ('fixed', 'Not fitted')]
+               ('fixed', 'Fixed')]
 MIXED = 'mixed'             # "All datasets" when the datasets differ
 SHOWN = '(shown model)'     # a dataset's Model box: no link
 # the tick buttons: key, label, tool tip
@@ -216,7 +216,7 @@ class DatasetsPanel(QtWidgets.QWidget):
             '<i>Fit: varied in the fit (bounds, values and priors are each '
             'model\'s, in the Simulation tab).  Shared: one value fitted to '
             'every dataset sharing it, from the model chosen in From.  Own '
-            'value: fitted to each dataset alone.  Not fitted: kept at its '
+            'value: fitted to each dataset alone.  Fixed: kept at its '
             'model\'s value.  "All datasets" sets every dataset; a dataset\'s '
             'column changes that one only.</i>', wordWrap=True))
         self.load()

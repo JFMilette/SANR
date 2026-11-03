@@ -13,7 +13,8 @@ NETWORK -- a neural spline flow ('nsf', or any of sbi's density estimators)
 over theta, conditioned on an embedding of the features: an MLP (EMBEDDING:
 hidden widths, output size) on the feature vector, which sbi standardises
 with the means and spreads of the first round's simulations, kept in the
-network.  Training runs on the CPU in float32; the simulator stays float64.
+network.  Both grow with the number of parameters (network_size): an
+embedding output of at least 2 d, a wider flow above WIDE_FLOW.  Training runs on the CPU in float32; the simulator stays float64.
 
 ROUNDS -- round 1 draws from the prior: its network is an amortised estimator
 over the whole prior, kept apart (NPEResult.networks[0]).  Each later round
@@ -75,6 +76,7 @@ from torch.utils.data import default_collate
 
 from sbi.diagnostics import check_sbc, run_sbc
 from sbi.inference import NPE, DirectPosterior
+from sbi.inference.trainers.npe import npe_base
 from sbi.neural_nets import posterior_nn
 
 from fit.npe.simulator import Simulator, UnitPrior
@@ -82,6 +84,10 @@ from fit.npe.simulator import Simulator, UnitPrior
 LOGIT_EPS = 1e-6
 EMBEDDING = ((256, 256), 64)
 FLOW = dict(model='nsf', hidden_features=64, num_transforms=5)
+# with more parameters (network_size): an embedding output of at least
+# 2 d (in steps of 32) and a wider flow above WIDE_FLOW parameters
+WIDE_FLOW = 30
+WIDE_FLOW_FEATURES = 128
 PRIOR_ACCEPT = 2e-3
 ENVELOPE_PRIOR = 0.3
 SUPPORT_SAMPLES = 100_000       # posterior samples for the threshold
@@ -93,6 +99,10 @@ FORMAT = 'sanr-npe-1'
 # them finite), nflows' deprecated call, the SBC batch size
 QUIET = ('Data has extreme outliers', 'torch.triangular_solve',
          'Capping max_sampling_batch_size')
+# sbi's z-scoring check of every round's features only warns (of outliers,
+# QUIET above), but sorts each feature over all simulations: minutes and
+# gigabytes at 1e5 simulations of thousands of points.  Not run.
+npe_base.warn_if_invalid_for_zscoring = lambda x: None
 
 
 def quiet(func):
@@ -186,6 +196,21 @@ def embedding_net(n_in, hidden=EMBEDDING[0], n_out=EMBEDDING[1]):
         w = h
     layers.append(nn.Linear(w, n_out))
     return nn.Sequential(*layers)
+
+
+def network_size(d):
+    """(embedding, flow) for d parameters: EMBEDDING's output up to 32
+    parameters, beyond 2 d rounded up to 32 (the hidden widths at least
+    twice it); FLOW, with WIDE_FLOW_FEATURES hidden units above WIDE_FLOW
+    parameters."""
+    hidden, n_out = EMBEDDING
+    n_out = max(n_out, -(-2 * d // 32) * 32)
+    hidden = tuple(max(h, 2 * n_out) for h in hidden)
+    flow = dict(FLOW)
+    if d > WIDE_FLOW:
+        flow['hidden_features'] = max(flow['hidden_features'],
+                                      WIDE_FLOW_FEATURES)
+    return (hidden, n_out), flow
 
 
 def versions():
@@ -343,11 +368,11 @@ class NPEResult:
         from fit.dream.dream_fit import data_hash
         sim = Simulator(problem)
         if sim.names != list(self.names):
-            raise ValueError('the network was trained for the parameters '
-                             '%s, not %s' % (self.names, sim.names))
+            raise ValueError(_names_differ(list(self.names), sim.names))
         if not (np.array_equal(sim.lo, self.meta['lo']) and
                 np.array_equal(sim.hi, self.meta['hi'])):
-            raise ValueError('the network was trained with other bounds')
+            raise ValueError(_bounds_differ(sim.names, self.meta['lo'],
+                                            self.meta['hi'], sim.lo, sim.hi))
         if data_hash(sim.posterior) != self.meta['data_hash']:
             raise ValueError('the network was trained on other data')
 
@@ -358,6 +383,35 @@ class NPEResult:
         from fit.saved import problem_from_state
         return PosteriorProblem(problem_from_state(self.meta['problem']),
                                 **self.meta.get('noise', {}))
+
+
+def _names_differ(trained, now):
+    """Why the parameters fitted now are not those a network was trained
+    for: only the names that differ, or the first change of order."""
+    missing = [n for n in trained if n not in now]
+    extra = [n for n in now if n not in trained]
+    parts = []
+    if missing:
+        parts.append('not fitted now: %s' % ', '.join(missing))
+    if extra:
+        parts.append('fitted now but not in the network: %s'
+                     % ', '.join(extra))
+    if not parts:
+        i = next(i for i, (a, b) in enumerate(zip(trained, now)) if a != b)
+        parts.append('same parameters in another order (position %d: %s '
+                     'in the network, %s now)' % (i + 1, trained[i], now[i]))
+    return ('the network was trained for %d parameters, %d are fitted now; '
+            '%s' % (len(trained), len(now), '; '.join(parts)))
+
+
+def _bounds_differ(names, lo, hi, lo_now, hi_now):
+    """The parameters whose bounds differ from a network's: the network's
+    bounds (to set back) and the current ones."""
+    rows = ['%s: [%.10g, %.10g] in the network, [%.10g, %.10g] now'
+            % (n, a, b, c, d) for n, a, b, c, d
+            in zip(names, lo, hi, lo_now, hi_now) if (a, b) != (c, d)]
+    return ('the network was trained with other bounds; set these back to '
+            'the network\'s:\n' + '\n'.join(rows))
 
 
 def _plain(obj):
@@ -397,7 +451,7 @@ def _round_stats(inference, t0):
 
 @quiet
 def train(simulator, *, rounds=5, sims_per_round=20_000, truncation=True,
-          quantile=1e-4, seed=None, n_workers=1, embedding=EMBEDDING,
+          quantile=1e-4, seed=None, n_workers=1, embedding=None,
           flow=None, training=None, problem=None, coarse=None,
           callback=None, cancelled=None):
     """NPEResult of sequential NPE on simulator (fit.npe.simulator, maybe
@@ -407,7 +461,8 @@ def train(simulator, *, rounds=5, sims_per_round=20_000, truncation=True,
         names, bounds, data hash, noise options and state are stored;
         coarse: the choose_coarse report.
     embedding: (hidden widths, output size) of the MLP; flow: sbi
-        posterior_nn arguments (default FLOW); training: NPE.train
+        posterior_nn arguments over FLOW (both by default network_size of
+        the number of parameters); training: NPE.train
         arguments (early stopping on the validation loss by default).
     callback(event, info): 'simulate' (done, total), 'train' (round),
         'epoch' after each epoch of a training ({'round', 'epoch',
@@ -428,10 +483,12 @@ def train(simulator, *, rounds=5, sims_per_round=20_000, truncation=True,
                      else simulator.posterior).posterior
     prior = LogitPrior(simulator.prior, int(rng.integers(2**31)))
     x_o = simulator.observed_features()
+    sized_embedding, sized_flow = network_size(simulator.d)
+    embedding = sized_embedding if embedding is None else embedding
+    flow = dict(sized_flow, **(flow or {}))
     builder = posterior_nn(
         z_score_theta='independent', z_score_x='independent',
-        embedding_net=embedding_net(len(x_o), *embedding),
-        **dict(FLOW, **(flow or {})))
+        embedding_net=embedding_net(len(x_o), *embedding), **flow)
     inference = NPE(prior=prior, density_estimator=builder,
                     show_progress_bars=False, tracker=_NoTracker())
     opts = dict(training or {})
@@ -473,7 +530,7 @@ def train(simulator, *, rounds=5, sims_per_round=20_000, truncation=True,
                 git=_git_hash(), versions=versions(), seed=seed,
                 rounds=[], truncation=bool(truncation), quantile=quantile,
                 sims_per_round=sims_per_round, embedding=embedding,
-                flow=dict(FLOW, **(flow or {})),
+                flow=flow,
                 channels=simulator.channel_names, sizes=simulator.sizes,
                 scales=simulator.scales, calibration=None)
     networks = []
