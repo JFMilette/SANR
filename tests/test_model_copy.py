@@ -61,6 +61,12 @@ def test_every_dataset_gets_its_model(qapp):
     n = len(sim.model_names())
     exp.refresh_tree()
     assert len(sim.model_names()) == n              # made once
+    # linked elsewhere (an older session): back on its own model
+    exp.sets[0]['link'] = 'Model 1'
+    exp.refresh_tree()
+    assert exp.sets[0]['link'] == 'A'
+    # the Fit tab offers no other model
+    assert exp.datasets_panel.list.isColumnHidden(1)
 
 
 def test_dataset_model_follows_its_dataset(qapp, monkeypatch):

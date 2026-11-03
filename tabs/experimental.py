@@ -41,8 +41,9 @@ MODELS; 'link', saved in the session).
 DATASET MODELS -- every imported dataset (measured, with data) has a
 model of its own, named after it (_ensure_dataset_models, each time the
 tree is rebuilt: after an import, a session opened, a rename): one it
-lacks is made as a copy of the model it is linked to (else the shown one)
-and the dataset linked to it; the link can then be changed in the Fit tab.
+lacks is made as a copy of the model it is linked to (else the shown one),
+and every such dataset is linked to its own model (the Fit tab no longer
+offers another).
 The Simulation tab does not rename or delete such a model
 (SimulationTab.dataset_model): renaming the dataset renames it (or links
 the dataset to the model already called that), removing the dataset
@@ -1775,7 +1776,10 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self._ensuring = True
         try:
             for s in self.sets:
-                if not self._measured(s) or s['name'] in sim.model_names():
+                if not self._measured(s):
+                    continue
+                if s['name'] in sim.model_names():
+                    s['link'] = s['name']
                     continue
                 base = s.get('link')
                 if base not in sim.model_names():

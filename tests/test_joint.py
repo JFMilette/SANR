@@ -220,15 +220,17 @@ def test_dialog_selection():
     assert back[1].color().name() == PROFILE_QUANTITIES[1][2]   # MSLD ρ
     assert back[2].color().name() == PROFILE_QUANTITIES[0][2]   # NSLD Re
     assert dlg.splitter.count() == 2
-    # both columns of the datasets follow the splitter
+    # the datasets' column follows the splitter; no Model column (each
+    # dataset has its own model, tabs.experimental DATASET MODELS)
+    assert dlg.list.isColumnHidden(1)
     dlg.resize(900, 400)
     dlg.show()
     widths = []
     for left in (200, 400):
         dlg.splitter.setSizes([left, 900 - left])
         QtWidgets.QApplication.processEvents()
-        widths.append([dlg.list.columnWidth(k) for k in (0, 1)])
-    assert widths[1][0] > widths[0][0] and widths[1][1] > widths[0][1]
+        widths.append(dlg.list.columnWidth(0))
+    assert widths[1] > widths[0]
     dlg.hide()
     from fit.datasets_panel import tint     # the in-plane angle, shown φ
     assert tint('L.MSLD_theta').color().name() == PROFILE_QUANTITIES[2][2]

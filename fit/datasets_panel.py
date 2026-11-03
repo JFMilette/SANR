@@ -4,11 +4,13 @@ which datasets are fitted, the model each one is fitted with, what is
 fitted and how.
 
 DATASETS -- a row per dataset that can be fitted: ticked, it is fitted
-(several ticked: together, fit.joint); its Model box links it to a model of
-the Simulation tab's Model box (fit.panel MODELS; "(shown model)": whichever
-the Simulation tab shows).  fit.panel turns two ticked datasets or more into
-the Dataset box's joint entry, one into that dataset.  The last ticked
-dataset cannot be unticked.
+(several ticked: together, fit.joint), with its own model (named after it,
+tabs.experimental DATASET MODELS).  The Model column that linked a dataset
+to another model of the Simulation tab ("(shown model)": whichever it
+shows) is hidden: every dataset has its own (links, link() still report
+it).  fit.panel turns two ticked datasets or more into the Dataset box's
+joint entry, one into that dataset.  The last ticked dataset cannot be
+unticked.
 
 PARAMETERS -- a row per parameter any ticked dataset's model can fit
 (Stack.free_parameters(everything=True), matched by name across the
@@ -165,8 +167,10 @@ class DatasetsPanel(QtWidgets.QWidget):
         # both columns follow the splitter, sharing the width
         self.list.horizontalHeader().setSectionResizeMode(
             QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self.list.setToolTip('Tick the datasets fitted together, and pick '
-                             'the model each one is fitted with')
+        self.list.setToolTip('Tick the datasets fitted together; each is '
+                             'fitted with its own model (named after it)')
+        # DATASETS: each dataset its own model, nothing to pick
+        self.list.setColumnHidden(1, True)
         self.list.itemChanged.connect(self._ticked)
 
         self.table = QtWidgets.QTableWidget(0, 0)
