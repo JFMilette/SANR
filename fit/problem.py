@@ -129,7 +129,7 @@ import warnings
 import numpy as np
 
 from fit.priors import prior_terms
-from model.stack import STITCH_PARAMS, spread_factors
+from model.stack import STITCH_MAX, STITCH_PARAMS, spread_factors
 
 
 COSTS = ('chi2', 'log')
@@ -143,8 +143,9 @@ PAIR_RTOL = 1e-3
 # ... and only when their angles agree this well (relative), if both
 # channels have a theta column
 SAME_ANGLE = 0.05
-# more distinct angles than this: an angle scan, not stitched angles (ANGLES)
-MAX_ANGLES = 12
+# more distinct angles than this: an angle scan, not stitched angles
+# (ANGLES); each of up to this many has its stitch factor
+MAX_ANGLES = STITCH_MAX
 
 
 def angle_groups(thetas):

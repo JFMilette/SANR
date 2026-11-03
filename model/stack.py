@@ -406,11 +406,12 @@ FIT_PARAMS = ('thickness', 'NSLD_real', 'NSLD_img', 'MSLD_rho', 'MSLD_theta',
               'MSLD_phi', 'roughness_sigma', 'MSLD_sigma')
 # Stack attributes a fit may vary, in Stack.fit the same way; their
 # free_parameters() entries have layer index None.
-STACK_FIT_PARAMS = ('scale', 'background', 'q_shift', 'thickness_spread',
-                    'stitch_2', 'stitch_3', 'stitch_4')
-# ANGLE (STITCH) FACTORS: stitch_2 .. stitch_<STITCH_MAX>
-STITCH_MAX = 4
+# ANGLE (STITCH) FACTORS: stitch_2 .. stitch_<STITCH_MAX>, one per angle
+# after the first (fit.problem takes more angles than this for a scan)
+STITCH_MAX = 12
 STITCH_PARAMS = tuple('stitch_%d' % k for k in range(2, STITCH_MAX + 1))
+STACK_FIT_PARAMS = ('scale', 'background', 'q_shift',
+                    'thickness_spread') + STITCH_PARAMS
 # THICKNESS SPREAD: the node choices and the 'auto' rule's limits
 SPREAD_NODE_CHOICES = ('auto', 5, 7, 9, 11, 15, 21)
 SPREAD_DISTS = ('gaussian', 'lognormal')
@@ -437,11 +438,14 @@ DEFAULT_BOUNDS = {
     'background':      (0.0, 1e-5),
     'q_shift':         (-0.002, 0.002),    # A^-1
     'thickness_spread': (0.0, 0.15),       # fraction (Gaussian)
-    'stitch_2':        (0.8, 1.25),        # ANGLE (STITCH) FACTORS
-    'stitch_3':        (0.8, 1.25),
-    'stitch_4':        (0.8, 1.25),
+    **{a: (0.8, 1.25) for a in STITCH_PARAMS},   # ANGLE (STITCH) FACTORS
     'weight':          (0.0, 1.0),         # MIXTURE
 }
+
+
+def stitch_index(attr):
+    """k of the stitch factor 'stitch_k' (the angle it joins)."""
+    return int(attr.split('_')[1])
 
 
 def default_fit(attr):
@@ -933,7 +937,8 @@ class Stack:
         self.thickness_spread_target = 'stack'
         self.thickness_spread_dist = 'gaussian'   # SPREAD_DISTS
         # ANGLE (STITCH) FACTORS
-        self.stitch_2 = self.stitch_3 = self.stitch_4 = 1.0
+        for a in STITCH_PARAMS:
+            setattr(self, a, 1.0)
         self._spread_counts = {}             # spread_count's 'auto' cache
         # incremented whenever self.sublayers is replaced: the key of the
         # thickness-spread nodes' slabs (_spread_sequences)

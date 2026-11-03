@@ -51,7 +51,8 @@ from model.polarisation import (CHANNEL_NAMES, default_vectors, in_plane,
 from model.stack import (DEFAULT_SMEARING, INTERFACE_ORDERS,
                          ROUGHNESS_SCHEMES, SMEARING_MODES, SPREAD_BOUND,
                          SPREAD_NODE_CHOICES, STITCH_PARAMS, Layer, Stack,
-                         cos_turns, default_fit, spread_factors, wrap_turns)
+                         cos_turns, default_fit, spread_factors,
+                         stitch_index, wrap_turns)
 import line_colours
 import plot_export                     # noqa: F401 (the CSV export's layers)
 import style
@@ -818,7 +819,7 @@ PARAM_DISPLAY.update(scale=('Scale', 1.0, ''),
                      q_shift=('Q shift', 1.0, 'Å⁻¹'),
                      thickness_spread=('Thickness spread', 100.0, '%'),
                      weight=('Weight', 1.0, ''),
-                     **{a: ('Stitch %s' % a[-1], 1.0, '')
+                     **{a: ('Stitch %d' % stitch_index(a), 1.0, '')
                         for a in STITCH_PARAMS})
 # the stack rows shown in other units than stored: attr -> factor (shown =
 # factor x stored)
@@ -1639,7 +1640,7 @@ class SimulationTab(QtWidgets.QWidget):
                 'are background + a_k (R − background), a_k = stitch 2 × … × '
                 'stitch k.\nA fit of a QuickNXS export gets a Gaussian '
                 'prior from its header (the stitch\'s error) unless one is '
-                'set here.' % (a[-1], int(a[-1]) - 1))
+                'set here.' % (stitch_index(a), stitch_index(a) - 1))
         # fit settings of the stack's own parameters (Stack.fit):
         # attr -> (value, min, max, Fit check box)
         self.stack_rows = {}
@@ -1828,7 +1829,7 @@ class SimulationTab(QtWidgets.QWidget):
         self._stitch_layouts = {}
         for a in STITCH_PARAMS:
             row = self._stitch_layouts[a] = self._stack_row(a)
-            f.addRow('Stitch %s' % a[-1], row)
+            f.addRow('Stitch %d' % stitch_index(a), row)
         self._form_stack = f
         self.update_stitch_rows()
         # THICKNESS SPREAD and MIXTURE: their own window
@@ -2083,7 +2084,7 @@ class SimulationTab(QtWidgets.QWidget):
         return 0
 
     def _stitch_shown(self, attr):
-        return int(attr[-1]) <= self.angle_count()
+        return stitch_index(attr) <= self.angle_count()
 
     def update_stitch_rows(self):
         """Show the stitch rows of the imported data's angles (2 .. K) and

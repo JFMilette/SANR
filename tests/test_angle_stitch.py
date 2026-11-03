@@ -182,6 +182,26 @@ def test_joint_stitch_factors_own_by_default():
     assert 'stack.stitch_3 [B]' not in jp.names
 
 
+def test_more_angles():
+    """Five angles: a factor each after the first, chained."""
+    q = [np.linspace(0.008 * 2**k, 0.016 * 2**k, 10) for k in range(5)]
+    th = np.concatenate([np.full(10, 0.004 * 2**k) for k in range(5)])
+    Q = np.concatenate(q)
+    st = film()
+    P0, P = vectors_pair(*PAIRS['+'])
+    R = st.reflectivities(Q, [(P0, P)], warn=False)[:, 0]
+    data = [dict(Q=Q, R=R, dR=0.02 * R, P0=P0, P=P, name='R+', theta=th)]
+    ref = FitProblem(st, data).model([120.0])[0]
+    for k in range(2, 6):
+        setattr(st, 'stitch_%d' % k, 1.0 + k / 100)
+    p = FitProblem(st, data)
+    assert p.n_angles == 5
+    a = np.cumprod([1.0, 1.02, 1.03, 1.04, 1.05])
+    lab = np.repeat(np.arange(5), 10)
+    assert p.model([120.0])[0] == pytest.approx(BG + a[lab] * (ref - BG),
+                                                rel=1e-13)
+
+
 # -- T7: saved state ----------------------------------------------------------
 def test_saved_state_keeps_the_angles():
     st = film()
@@ -271,7 +291,7 @@ def test_simulation_rows_follow_the_data(qapp):
     exp.refresh_tree()
     assert exp.angle_count() == 3
     shown = {a: f.isRowVisible(r) for a, r in sim._stitch_layouts.items()}
-    assert shown == {'stitch_2': True, 'stitch_3': True, 'stitch_4': False}
+    assert [a for a, on in shown.items() if on] == ['stitch_2', 'stitch_3']
     sim.recompute()
     names = [a for i, a, *_ in sim.stack.free_parameters(everything=True)
              if i is None]

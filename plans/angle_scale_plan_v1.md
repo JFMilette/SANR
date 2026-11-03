@@ -215,7 +215,7 @@ These were computed outside SANR from the same model curves (angle labels from t
 
 ## 11. As built (branch `angle-stitch-factors`, 2026-11-03)
 
-Answers: Q1 signal only (as planned); Q2, Q3 as planned (0.8–1.25, `STITCH_MAX = 4`); Q4 automatic.
+Answers: Q1 signal only (as planned); Q2 as planned (0.8–1.25); Q4 automatic. Q3: `STITCH_MAX = 12` (JF asked for more than 3 angles), the same as `MAX_ANGLES`, so every set of stitched angles the fit recognises has its factors.
 
 Deviations:
 
