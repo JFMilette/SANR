@@ -574,10 +574,49 @@ def format_summary(result, problem=None, discard=0.5):
                       r['lo95'], r['hi95'], r['rhat'], r['ess']))
     out.append('MAP: log p = %.6g, χ²/N = %.5g'
                % (best['logp'], best['chi2']))
+    if problem is not None:
+        out += stitch_summary(result, problem, discard)
     out.append('acceptance after adaptation = %.3f, %d evaluations'
                % (result.acceptance[result.adapt_until:].mean(),
                   result.n_evals))
     return '\n'.join(out)
+
+
+def stitch_summary(result, problem, discard=0.5):
+    """Lines: per dataset with a stitch factor sampled, the cumulative
+    factor a_k of each of its angles (model.stack ANGLE (STITCH) FACTORS),
+    median and 95 % interval over the samples; [] without any."""
+    from model.stack import STITCH_PARAMS
+    fit = problem.fit
+    names = getattr(fit, 'part_names', None)
+    s = None
+    out = []
+    for k, p in enumerate(parts(fit)):
+        K = 0 if p.angle_theta is None else len(p.angle_theta)
+        attrs = STITCH_PARAMS[:max(K - 1, 0)]
+        idx = {a: j for j, (i, a, *_) in enumerate(p.params)
+               if i is None and a in attrs}
+        if not idx:
+            continue
+        if s is None:
+            s = result.samples(discard)
+        cols = []
+        for a in attrs:
+            if a in idx:
+                cols.append(np.array([part_x(fit, x, k)[idx[a]]
+                                      for x in s]))
+            else:
+                cols.append(np.full(len(s), getattr(p.stack, a)))
+        a_k = np.cumprod(np.column_stack(cols), axis=1)
+        q = np.percentile(a_k, [2.5, 50, 97.5], axis=0)
+        out.append('stitch%s: %s' % (
+            '' if names is None else ' [%s]' % names[k],
+            ', '.join('a%d = %.4g [%.4g, %.4g]' % (j + 2, q[1, j], q[0, j],
+                                                   q[2, j])
+                      for j in range(a_k.shape[1]))))
+    if out:
+        out.insert(0, 'Cumulative angle factors (median [95 %]):')
+    return out
 
 
 def derived(result, func, discard=0.5):

@@ -357,6 +357,28 @@ Fit in this stack (mixture_shared) is shared: before each evaluation
 sync_mixture copies its value into the layer of the same name of every
 model that has one (a layer it lacks is skipped).  An entry whose model is not linked is left out.
 
+ANGLE (STITCH) FACTORS -- a dataset measured at K stitched angles (K >= 2,
+theta_1 < ... < theta_K, told apart by its theta column) has at every point
+of angle k
+
+    R_model = background + a_k (R - background),
+    a_1 = 1,  a_k = stitch_2 stitch_3 ... stitch_k,
+
+R the model without them (scale, norms, resolution, Q shift, spread and
+mixture included).  Stack.stitch_k (k = 2 .. STITCH_MAX, default 1) is the
+factor joining angle k to angle k - 1, chained as the reduction (QuickNXS)
+scales each angle to the previous one, so each one's prior is its own step
+error; angle 1 is the reference, normalised by the scale.  The factor
+multiplies the signal, not the fitted background.  It is shared by every
+channel of the dataset (the reduction scales R+ and R- of an angle
+together).  They exist only where there are data with angles:
+fit.problem applies them (ANGLES there); a simulation is untouched.  Fitted
+like the scale, bounds DEFAULT_BOUNDS; not part of LICORNE_EXACT (Licorne
+has none, and at 1 nothing changes).  free_parameters(everything=True)
+lists a stitch_k only once Stack.fit has an entry for it (the Simulation
+tab writes one per angle of the imported data).
+(plans/angle_scale_plan_v1.md)
+
 SURROUND -- a magnetic fronting/backing is off-diagonal in the film-normal
 basis, so its wavevector is a 2x2 operator (Stack._surround_K), not one
 scalar per spin.
@@ -384,7 +406,11 @@ FIT_PARAMS = ('thickness', 'NSLD_real', 'NSLD_img', 'MSLD_rho', 'MSLD_theta',
               'MSLD_phi', 'roughness_sigma', 'MSLD_sigma')
 # Stack attributes a fit may vary, in Stack.fit the same way; their
 # free_parameters() entries have layer index None.
-STACK_FIT_PARAMS = ('scale', 'background', 'q_shift', 'thickness_spread')
+STACK_FIT_PARAMS = ('scale', 'background', 'q_shift', 'thickness_spread',
+                    'stitch_2', 'stitch_3', 'stitch_4')
+# ANGLE (STITCH) FACTORS: stitch_2 .. stitch_<STITCH_MAX>
+STITCH_MAX = 4
+STITCH_PARAMS = tuple('stitch_%d' % k for k in range(2, STITCH_MAX + 1))
 # THICKNESS SPREAD: the node choices and the 'auto' rule's limits
 SPREAD_NODE_CHOICES = ('auto', 5, 7, 9, 11, 15, 21)
 SPREAD_DISTS = ('gaussian', 'lognormal')
@@ -411,6 +437,9 @@ DEFAULT_BOUNDS = {
     'background':      (0.0, 1e-5),
     'q_shift':         (-0.002, 0.002),    # A^-1
     'thickness_spread': (0.0, 0.15),       # fraction (Gaussian)
+    'stitch_2':        (0.8, 1.25),        # ANGLE (STITCH) FACTORS
+    'stitch_3':        (0.8, 1.25),
+    'stitch_4':        (0.8, 1.25),
     'weight':          (0.0, 1.0),         # MIXTURE
 }
 
@@ -903,6 +932,8 @@ class Stack:
         # 'stack' or an interior layer index (set_spread_target)
         self.thickness_spread_target = 'stack'
         self.thickness_spread_dist = 'gaussian'   # SPREAD_DISTS
+        # ANGLE (STITCH) FACTORS
+        self.stitch_2 = self.stitch_3 = self.stitch_4 = 1.0
         self._spread_counts = {}             # spread_count's 'auto' cache
         # incremented whenever self.sublayers is replaced: the key of the
         # thickness-spread nodes' slabs (_spread_sequences)
@@ -985,6 +1016,7 @@ class Stack:
                 'thickness_spread_nodes': self.thickness_spread_nodes,
                 'thickness_spread_target': self.thickness_spread_target,
                 'thickness_spread_dist': self.thickness_spread_dist,
+                **{a: getattr(self, a) for a in STITCH_PARAMS},
                 'fit': copy.deepcopy(self.fit),
                 'q_in_fronting': self.q_in_fronting,
                 'resolution': copy.deepcopy(self.resolution),
@@ -1016,6 +1048,8 @@ class Stack:
         s.thickness_spread_nodes = d.get('thickness_spread_nodes', 'auto')
         s.set_spread_target(d.get('thickness_spread_target', 'stack'))
         s.thickness_spread_dist = d.get('thickness_spread_dist', 'gaussian')
+        for a in STITCH_PARAMS:
+            setattr(s, a, float(d.get(a, 1.0)))
         if s.thickness_spread_dist not in SPREAD_DISTS:
             raise ValueError('unknown thickness spread distribution %r'
                              % (s.thickness_spread_dist,))
@@ -1329,6 +1363,8 @@ class Stack:
                 out.append((('tie', k), attr, self.tie_value(k),
                             *self.tie_bounds(k)))
         for attr in STACK_FIT_PARAMS:
+            if attr in STITCH_PARAMS and attr not in self.fit:
+                continue                    # no data with angles yet
             e = entry(self.fit, attr)
             if e:
                 out.append((None, attr, getattr(self, attr), e['min'],

@@ -50,8 +50,8 @@ from model.polarisation import (CHANNEL_NAMES, default_vectors, in_plane,
                                 vectors_pair)
 from model.stack import (DEFAULT_SMEARING, INTERFACE_ORDERS,
                          ROUGHNESS_SCHEMES, SMEARING_MODES, SPREAD_BOUND,
-                         SPREAD_NODE_CHOICES, Layer, Stack, cos_turns,
-                         default_fit, spread_factors, wrap_turns)
+                         SPREAD_NODE_CHOICES, STITCH_PARAMS, Layer, Stack,
+                         cos_turns, default_fit, spread_factors, wrap_turns)
 import line_colours
 import plot_export                     # noqa: F401 (the CSV export's layers)
 import style
@@ -817,7 +817,9 @@ PARAM_DISPLAY.update(scale=('Scale', 1.0, ''),
                      background=('Background', 1.0, ''),
                      q_shift=('Q shift', 1.0, 'Å⁻¹'),
                      thickness_spread=('Thickness spread', 100.0, '%'),
-                     weight=('Weight', 1.0, ''))
+                     weight=('Weight', 1.0, ''),
+                     **{a: ('Stitch %s' % a[-1], 1.0, '')
+                        for a in STITCH_PARAMS})
 # the stack rows shown in other units than stored: attr -> factor (shown =
 # factor x stored)
 STACK_ROW_FACTOR = {'thickness_spread': 100.0}
@@ -1625,6 +1627,19 @@ class SimulationTab(QtWidgets.QWidget):
             'spread, the film thickness and Q max (about 2e-3 relative '
             'error or better); a fit freezes it from the spread\'s upper '
             'bound so the cost does not jump.')
+        # ANGLE (STITCH) FACTORS (model.stack): stitch_k joins angle k to
+        # angle k - 1 of a dataset with stitched angles
+        self.stitch_vals = {}
+        for a in STITCH_PARAMS:
+            b = self.stitch_vals[a] = dspin(0.5, 2.0, 4, 0.001)
+            b.setValue(getattr(self.stack, a))
+            b.setToolTip(
+                'Stitch factor joining angle %s to angle %d of a dataset '
+                'measured at several angles (θ column):\nangle k\'s points '
+                'are background + a_k (R − background), a_k = stitch 2 × … × '
+                'stitch k.\nA fit of a QuickNXS export gets a Gaussian '
+                'prior from its header (the stitch\'s error) unless one is '
+                'set here.' % (a[-1], int(a[-1]) - 1))
         # fit settings of the stack's own parameters (Stack.fit):
         # attr -> (value, min, max, Fit check box)
         self.stack_rows = {}
@@ -1633,6 +1648,8 @@ class SimulationTab(QtWidgets.QWidget):
                 ('background', self.background, SciSpinBox),
                 ('q_shift', self.q_shift,
                  lambda: dspin(-0.05, 0.05, 6, 0.0001)),
+                *((a, self.stitch_vals[a], lambda: dspin(0.5, 2.0, 4, 0.001))
+                  for a in STITCH_PARAMS),
                 ('thickness_spread', self.spread,
                  lambda: dspin(0.0, 50.0, 2, 0.1))):
             bmin, bmax = make(), make()
@@ -1807,6 +1824,13 @@ class SimulationTab(QtWidgets.QWidget):
         for attr, label in (('scale', 'Scale'), ('background', 'Background'),
                             ('q_shift', 'Q shift (Å⁻¹)')):
             f.addRow(label, self._stack_row(attr))
+        # one row per angle after the first of the imported data
+        self._stitch_layouts = {}
+        for a in STITCH_PARAMS:
+            row = self._stitch_layouts[a] = self._stack_row(a)
+            f.addRow('Stitch %s' % a[-1], row)
+        self._form_stack = f
+        self.update_stitch_rows()
         # THICKNESS SPREAD and MIXTURE: their own window
         srow = QtWidgets.QHBoxLayout()
         self.spread_summary = QtWidgets.QLabel()
@@ -2052,6 +2076,25 @@ class SimulationTab(QtWidgets.QWidget):
         cb.hide()                       # ticked in the Fit tab
         row.addWidget(self.stack_priors[attr])
         return row
+
+    def angle_count(self):
+        """The most stitched angles of an imported dataset (fit.problem
+        ANGLES), set by the Experimental tab; 0 without one."""
+        return 0
+
+    def _stitch_shown(self, attr):
+        return int(attr[-1]) <= self.angle_count()
+
+    def update_stitch_rows(self):
+        """Show the stitch rows of the imported data's angles (2 .. K) and
+        any the model fits or has away from 1."""
+        f = getattr(self, '_form_stack', None)
+        if f is None:
+            return
+        for a, row in self._stitch_layouts.items():
+            e = self.stack.fit.get(a) or {}
+            f.setRowVisible(row, self._stitch_shown(a) or bool(e.get('vary'))
+                            or getattr(self.stack, a) != 1.0)
 
     def _build_spread_window(self):
         """The Thickness spread and mixture window (non-modal): the spread's
@@ -2519,7 +2562,8 @@ class SimulationTab(QtWidgets.QWidget):
                                self.q_shift.maximum()),
                       thickness_spread=(self.spread.minimum() / 100,
                                         self.spread.maximum() / 100),
-                      weight=(0.0, 1.0))
+                      weight=(0.0, 1.0),
+                      **{a: (0.5, 2.0) for a in STITCH_PARAMS})
         return limits
 
     def _write_bounds(self, stack, params, lo, hi):
@@ -2544,7 +2588,9 @@ class SimulationTab(QtWidgets.QWidget):
         """Show the stack's own parameters (scale, background, Q shift,
         thickness spread and its nodes) and their fit settings."""
         for attr, (val, bmin, bmax, cb) in self.stack_rows.items():
-            e = self.stack.fit_entry(attr)
+            # a stitch factor's entry is made only where its row is shown
+            e = (self.stack.fit.get(attr) or default_fit(attr)) \
+                if attr in STITCH_PARAMS else self.stack.fit_entry(attr)
             k = STACK_ROW_FACTOR.get(attr, 1.0)
             for w in (val, bmin, bmax, cb):
                 w.blockSignals(True)
@@ -2570,6 +2616,7 @@ class SimulationTab(QtWidgets.QWidget):
         c.setCurrentIndex(max(0, c.findData(self.stack.thickness_spread_dist)))
         c.blockSignals(False)
         self._refresh_spread_targets()
+        self.update_stitch_rows()
 
     def _refresh_spread_targets(self):
         """The Spread target box: 'Whole stack', then each interior layer
@@ -2742,7 +2789,12 @@ class SimulationTab(QtWidgets.QWidget):
             except ValueError as exc:       # a note, not a dialog
                 self.spread_error.setText(str(exc))
                 self.spread_error.show()
+            for a, b in self.stitch_vals.items():
+                setattr(self.stack, a, b.value())
             for attr, (_, bmin, bmax, cb) in self.stack_rows.items():
+                if attr in STITCH_PARAMS and attr not in self.stack.fit \
+                        and not self._stitch_shown(attr):
+                    continue                # no data with that angle
                 k = STACK_ROW_FACTOR.get(attr, 1.0)
                 self.stack.fit[attr] = dict(
                     self.stack.fit.get(attr, {}), vary=cb.isChecked(),
@@ -3549,6 +3601,8 @@ class SimulationTab(QtWidgets.QWidget):
         self.stack.thickness_spread_nodes = new.thickness_spread_nodes
         self.stack.thickness_spread_target = new.thickness_spread_target
         self.stack.thickness_spread_dist = new.thickness_spread_dist
+        for a in STITCH_PARAMS:
+            setattr(self.stack, a, getattr(new, a))
         self.stack.fit = new.fit
         self.stack.q_in_fronting = new.q_in_fronting
         self.stack.resolution = new.resolution

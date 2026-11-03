@@ -9,12 +9,15 @@ to it (fit.panel MODELS), so the datasets may vary different parameters
 (Stack.free_parameters(), named as fit.problem.parameter_names).  The
 parameters are matched by name across the datasets; in each dataset that
 has it, each one is
-  'shared'  fitted, one value for every dataset sharing it (the default)
-  'own'     fitted, a value of this dataset alone
+  'shared'  fitted, one value for every dataset sharing it (the default,
+            but for OWN_BY_DEFAULT)
+  'own'     fitted, a value of this dataset alone (the default of the
+            stitch factors, OWN_BY_DEFAULT: one dataset's stitching means
+            nothing in another; 'shared' is allowed, with a warning)
   'fixed'   not fitted in this dataset: it keeps its value in that
             dataset's stack (its model's)
 `modes` {dataset name: {parameter name: mode}} gives those that are not
-'shared'; `fixed` holds the values a 'fixed' parameter takes, one row per
+the default (default_mode); `fixed` holds the values a 'fixed' parameter takes, one row per
 dataset of its own parameters.  The joint parameters are, for each name in
 the order the datasets first give it, the shared one (if any dataset shares
 it), then one per dataset where it is 'own', named 'name [dataset]'; each
@@ -34,11 +37,22 @@ The helpers parts, part_x and part_index take a FitProblem (one dataset) or
 a JointProblem alike.
 """
 
+import warnings
+
 import numpy as np
 
 from fit.problem import FitProblem
+from model.stack import STITCH_PARAMS
 
 MODES = ('shared', 'own', 'fixed')
+# parameters 'own' unless modes say otherwise (model.stack ANGLE (STITCH)
+# FACTORS)
+OWN_BY_DEFAULT = tuple('stack.' + a for a in STITCH_PARAMS)
+
+
+def default_mode(name):
+    """The mode of parameter `name` that `modes` need not give."""
+    return 'own' if name in OWN_BY_DEFAULT else 'shared'
 
 
 class JointProblem:
@@ -77,7 +91,7 @@ class JointProblem:
                                  % (', '.join(map(repr, bad)),
                                     ', '.join(MODES)))
         self.modes = {n: {a: v for a, v in (modes.get(n) or {}).items()
-                          if v != 'shared'} for n in self.part_names}
+                          if v != default_mode(a)} for n in self.part_names}
         self.sources = {a: n for a, n in (sources or {}).items()
                         if n in self.part_names}
         if fixed is None:
@@ -102,8 +116,13 @@ class JointProblem:
         self.index = [[None] * len(p.params) for p in self.parts]
         for name in names:
             has = [k for k, p in enumerate(self.parts) if name in p.names]
-            m = {k: self.modes[self.part_names[k]].get(name, 'shared')
-                 for k in has}
+            m = {k: self.modes[self.part_names[k]].get(
+                name, default_mode(name)) for k in has}
+            if name in OWN_BY_DEFAULT and \
+                    sum(v == 'shared' for v in m.values()) > 1:
+                warnings.warn('%s is shared by several datasets: a stitch '
+                              'factor belongs to one dataset\'s reduction'
+                              % name, stacklevel=2)
             groups = [(name, None, [k for k in has if m[k] == 'shared'])]
             groups += [('%s [%s]' % (name, self.part_names[k]),
                         self.part_names[k], [k])

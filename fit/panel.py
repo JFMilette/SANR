@@ -69,6 +69,7 @@ import numpy as np
 from PyQt6 import QtCore, QtWidgets
 
 from model.polarisation import vectors_pair
+from model.stack import STITCH_PARAMS, default_fit
 from tabs.simulation import SciSpinBox, dspin, shown_names
 from fit.datasets_panel import SHOWN, DatasetsPanel
 from fit.problem import FitProblem, parameter_names
@@ -78,7 +79,8 @@ from fit.de import global_fit
 from fit.dream.dream_fit import (PosteriorProblem, jittered_start, load_run,
                                  prior_tension)
 from fit.dream.dream_window import SESSIONS_DIR, DreamThread, DreamWindow
-from fit.joint import JointProblem, part_index, part_x, parts
+from fit.joint import (JointProblem, default_mode, part_index, part_x,
+                       parts)
 from fit.multistart import merge, run_multistart
 from fit.npe import missing as npe_missing
 from fit.npe.npe_window import NPERun, NPEThread, NPEWindow
@@ -1647,9 +1649,11 @@ class FitPanel:
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter('always')
                     fp = FitProblem(
-                        self._set_stack(s), data, cost, qmin, qmax, grid,
+                        self._header_priors(s, self._set_stack(s)), data,
+                        cost, qmin, qmax, grid,
                         error_floor=self.fit_floor.value() / 100,
-                        target=target)
+                        target=target,
+                        stitch_extra='fix' if joint else 'error')
             except ValueError as exc:
                 report.setText(self._error(
                     '%s: %s' % (s['name'], exc) if joint else exc))
@@ -1686,7 +1690,8 @@ class FitPanel:
                 model = self.simulation.shown_model()
             n = next((n for n, fp in fits if fp.model_name == model and
                       p in fp.names and
-                      (modes.get(n) or {}).get(p, 'shared') == 'shared'),
+                      (modes.get(n) or {}).get(p, default_mode(p)) ==
+                      'shared'),
                      None)
             if n is not None:
                 out[p] = n
@@ -1713,6 +1718,34 @@ class FitPanel:
                                 problem.parts[k0].model_name,
                                 ', '.join(sorted(set(other)))))
         return notes
+
+    @staticmethod
+    def _header_priors(s, st):
+        """st, or a copy of it with the Gaussian priors of dataset s's
+        QuickNXS header (tabs.experimental QUICKNXS) on the scale and the
+        stitch factors of its angles that have none of their own (a prior
+        set or removed by hand stays)."""
+        from tabs.experimental import quicknxs_stitch_priors
+        path = next((d.get('path') for d in s['channels'].values()
+                     if d.get('path')), None)
+        head = quicknxs_stitch_priors(path) if path else None
+        if head is None:
+            return st
+        st = copy.deepcopy(st)
+        taus = [('scale', head['plateau'])] + list(zip(
+            STITCH_PARAMS, head['steps']))
+        said = []
+        for attr, tau in taus:
+            e = st.fit.setdefault(attr, default_fit(attr))
+            if 'prior' in e or not tau > 0:
+                continue
+            e['prior'] = {'kind': 'gauss', 'mu': 1.0, 'tau': float(tau)}
+            if e.get('vary'):
+                said.append('%s ±%.2f %%' % (attr, 100 * tau))
+        if said:
+            warnings.warn('priors from the QuickNXS header: %s'
+                          % ', '.join(said), stacklevel=2)
+        return st
 
     def _set_stack(self, s):
         """The stack dataset s is fitted with: its model's (MODELS), but in

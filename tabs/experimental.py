@@ -47,15 +47,27 @@ and display stay).
 Only points between the Simulation tab's Q min and Q max are plotted, the
 range that is also fitted.
 
+QUICKNXS -- quicknxs_stitch_priors reads a QuickNXS export's header: the
+[Data Runs] table's cumulative scale and scale_err of each run (in the
+order the runs were stitched, angle 1 first) give the relative error of
+angle 1's plateau normalisation and the step error added at each stitch,
+sqrt(e_k^2 - e_(k-1)^2) of the cumulative relative errors (0 when rounding
+makes it negative); the [Global Options] are kept for the dataset's tool
+tip.  A fit of the dataset takes them as Gaussian priors (mean 1) on the
+scale and the stitch factors that have no prior of their own (fit.panel,
+model.stack ANGLE (STITCH) FACTORS).
+
 COLOURS -- a channel is drawn in its line_colours colour and a dataset's
 asymmetry in a colour of SET_COLOURS, unless the dataset has its own:
 "Colour…" in a dataset's context menu sets one for all its channels and its
 asymmetries, on a channel for that channel of that dataset only (kept with
 the dataset, so a live dataset keeps it).  Both are saved in the session.
 
-Asymmetries combine channels measured on different Q grids: every channel is
-linearly interpolated (value and error) onto the Q points of the first
-channel in the formula, over the range they share.  Errors are propagated
+Asymmetries and (R+ + R-)/2 combine channels row by row when they have
+as many points (the same measurement points of each spin state, whatever
+small differences of Q the reduction left); channels measured on other Q
+grids are linearly interpolated (value and error) onto the Q points of the
+first channel in the formula, over the range they share (on_grid).  Errors are propagated
 assuming independent channels.  R+ / R- are used as imported when present,
 otherwise built as R+ = R++ + R+-, R- = R-- + R-+ (a simulated dataset
 always holds R+ / R- themselves, with the background counted once).
@@ -200,6 +212,79 @@ def parse_data(lines, start, Q=None, q_shift=0.0, q_mult=1.0, r_mult=1.0):
     a = a[np.argsort(a[:, 0])]
     return {k: a[:, i] for i, k in enumerate(['Q', 'R', 'dR', 'dQ',
                                               'theta'])}, skipped
+
+
+# QUICKNXS: the [Global Options] shown in a dataset's tool tip
+QUICKNXS_OPTIONS = ('normalize_to_unity', 'total_reflectivity_q_cutoff',
+                    'global_stitching', 'polynomial_stitching')
+
+
+def _header_table(lines, title):
+    """[{column: token}] of the commented table under '# [title]' of a
+    QuickNXS header ([a, b] lists stay one token); [] if there is none."""
+    tok = re.compile(r'\[[^\]]*\]|\S+')
+    try:
+        i = next(k for k, l in enumerate(lines)
+                 if l.strip().lstrip('#').strip() == '[%s]' % title)
+    except StopIteration:
+        return []
+    names, rows = None, []
+    for l in lines[i + 1:]:
+        s = l.strip()
+        if not s.startswith('#'):
+            break
+        s = s.lstrip('#').strip()
+        if not s or s.startswith('['):
+            break
+        if names is None:
+            names = tok.findall(s)
+            continue
+        vals = tok.findall(s)
+        if len(vals) == len(names):
+            rows.append(dict(zip(names, vals)))
+    return rows
+
+
+def quicknxs_stitch_priors(path):
+    """{'scale', 'scale_err' (each run's, as stitched), 'plateau' (angle
+    1's relative error), 'steps' (each later angle's added relative
+    error), 'options' ([Global Options])} of a QuickNXS export (see
+    QUICKNXS), None if it has no such header."""
+    try:
+        with open(path, errors='replace') as f:
+            lines = [l for l in f.read().splitlines() if l.startswith('#')]
+    except OSError:
+        return None
+    runs = _header_table(lines, 'Data Runs')
+    try:
+        scale = np.array([float(r['scale']) for r in runs])
+        err = np.array([float(r['scale_err']) for r in runs])
+    except (KeyError, ValueError):
+        return None
+    if not len(scale) or np.any(scale <= 0):
+        return None
+    rel = err / scale
+    steps = np.sqrt(np.maximum(np.diff(rel**2), 0.0))
+    options = {r['name']: r['value'] for r in _header_table(
+        lines, 'Global Options') if 'name' in r and 'value' in r}
+    return dict(scale=scale.tolist(), scale_err=err.tolist(),
+                plateau=float(rel[0]), steps=steps.tolist(),
+                options=options)
+
+
+_HEADERS = {}                   # (path, mtime) -> quicknxs_stitch_priors
+
+
+def _header_of(path):
+    """quicknxs_stitch_priors of path, read once per version of the file;
+    None without a file or header."""
+    try:
+        key = (path, os.path.getmtime(path))
+    except (OSError, TypeError):
+        return None
+    if key not in _HEADERS:
+        _HEADERS[key] = quicknxs_stitch_priors(path)
+    return _HEADERS[key]
 
 
 def on_grid(Q, d):
@@ -819,6 +904,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         layout.addWidget(splitter)
         if simulation is not None:
             simulation.dq_sets = self.dq_sets
+            simulation.angle_count = self.angle_count
             simulation.reflectanceChanged.connect(self._update_live)
             # a live dataset per model
             simulation.modelsChanged.connect(self._models_changed)
@@ -947,8 +1033,23 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         return box
 
     # -- tree ---------------------------------------------------------------
+    def angle_count(self):
+        """The most stitched angles of a measured dataset (fit.problem
+        ANGLES; the Simulation tab's stitch rows), 0 without any."""
+        from fit.problem import angle_groups
+        n = 0
+        for s in self.sets:
+            if s.get('line') or s.get('live') or not s['channels']:
+                continue
+            tops = angle_groups([d.get('theta') for d in
+                                 s['channels'].values()])
+            n = max(n, 0 if tops is None else len(tops))
+        return n
+
     def refresh_tree(self, select=None):
         """Rebuild the tree from self.sets; select = (set, channel or None)."""
+        if self.simulation is not None:
+            self.simulation.update_stitch_rows()
         self._sync_live_sets()
         t = self.tree
         t.blockSignals(True)
@@ -1010,6 +1111,14 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                 if not d.get('fit', True):
                     it.setForeground(0, QtGui.QColor(style.DISABLED))
                     tip += '\nnot fitted (Licorne ExpFit = 0)'
+                head = _header_of(d.get('path'))
+                if head is not None:
+                    tip += '\nQuickNXS: angle 1 ±%.2f %%, stitch steps %s; ' \
+                        '%s' % (100 * head['plateau'], ', '.join(
+                            '±%.2f %%' % (100 * v) for v in head['steps']),
+                            ', '.join('%s %s' % (k, head['options'][k])
+                                      for k in QUICKNXS_OPTIONS
+                                      if k in head['options']))
                 it.setToolTip(0, tip)
                 top.addChild(it)
                 if select == (i, ch):

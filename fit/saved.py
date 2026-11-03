@@ -76,7 +76,7 @@ def problem_from_state(d):
         return JointProblem([(n, problem_from_state(p)) for n, p in d['parts']],
                             d['modes'], d['fixed'], d.get('sources'))
     data = [dict(e, **{k: _array(e.get(k)) for k in
-                       ('Q', 'R', 'dR', 'dQ', 'P0', 'P')})
+                       ('Q', 'R', 'dR', 'dQ', 'theta', 'P0', 'P')})
             for e in d['data']]
     problem = FitProblem(stack_from_state(d['stack']), data, d['cost'],
                          d['qmin'], d['qmax'], _array(d['grid']),

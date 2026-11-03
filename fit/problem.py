@@ -101,6 +101,24 @@ times slower each evaluation is.  fit.joint gives every dataset the
 largest count.  With a mixture of models (model.stack MIXTURE) there is
 no thickness spread: a stack with both is refused here.
 
+ANGLES -- a dataset whose channels all have a theta column measured at
+several stitched angles gets the stack's stitch factors (model.stack ANGLE
+(STITCH) FACTORS).  Its angles (angle_theta, ascending: the largest theta
+of each) are its distinct
+theta values over every channel's points, those within SAME_ANGLE of each
+other taken as one (one angle's spin states can differ by a few 1e-4;
+stitched angles are a factor apart), 2 to MAX_ANGLES of them (more is an
+angle scan: no angles); angle_of[k] is the angle index of each fitted
+point of channel k, whatever its Q (overlaps and repeated Q keep their own
+angle).  model() multiplies the signal of angle k's points, background +
+a_k (R - background), a_k = stitch_2 ... stitch_k, after the norms,
+resolution and the rest, only when some a_k differs from 1 (so the model
+without them is bitwise the same); the 'sum' and 'asym' targets combine
+the channels after it.  A stitch_k varied beyond the dataset's angles (or
+on a dataset without them) is refused, or with stitch_extra='fix' (a
+joint fit's dataset with fewer angles) unticked at 1 in the fit's copy of
+the stack.  (plans/angle_scale_plan_v1.md)
+
 A FitProblem holds a copy of the stack and plain arrays: it is pickled to
 the worker processes of either method.
 """
@@ -111,7 +129,7 @@ import warnings
 import numpy as np
 
 from fit.priors import prior_terms
-from model.stack import spread_factors
+from model.stack import STITCH_PARAMS, spread_factors
 
 
 COSTS = ('chi2', 'log')
@@ -125,6 +143,42 @@ PAIR_RTOL = 1e-3
 # ... and only when their angles agree this well (relative), if both
 # channels have a theta column
 SAME_ANGLE = 0.05
+# more distinct angles than this: an angle scan, not stitched angles (ANGLES)
+MAX_ANGLES = 12
+
+
+def angle_groups(thetas):
+    """Upper theta of each angle (ascending) of the theta arrays of a
+    dataset's channels (see ANGLES), None without angles: a channel without
+    theta, fewer than 2 or more than MAX_ANGLES of them."""
+    if not thetas or any(t is None for t in thetas):
+        return None
+    vals = np.unique(np.concatenate([np.asarray(t, dtype=float)
+                                     for t in thetas]))
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0 or np.any(vals <= 0):
+        return None
+    tops = [vals[0]]
+    for v in vals[1:]:
+        if v > tops[-1] * (1 + SAME_ANGLE):
+            tops.append(v)
+        else:
+            tops[-1] = v
+    if not 2 <= len(tops) <= MAX_ANGLES:
+        return None
+    return np.array(tops)
+
+
+def _channel_theta(e):
+    """The theta column of data entry e, None if it has none (absent or
+    not finite at every finite Q)."""
+    th = e.get('theta')
+    if th is None:
+        return None
+    th = np.asarray(th, dtype=float)
+    q = np.asarray(e['Q'], dtype=float)
+    th = th[np.isfinite(q)]
+    return th if th.size and np.all(np.isfinite(th)) else None
 
 
 def parameter_names(stack, params):
@@ -159,7 +213,8 @@ class FitProblem:
     normalised free parameters."""
 
     def __init__(self, stack, data, cost='chi2', qmin=-np.inf, qmax=np.inf,
-                 grid=None, error_floor=0.0, target='channels'):
+                 grid=None, error_floor=0.0, target='channels',
+                 stitch_extra='error'):
         if cost not in COSTS:
             raise ValueError('unknown cost %r' % cost)
         if target not in TARGETS:
@@ -175,6 +230,10 @@ class FitProblem:
         # the caller's stack may be edited while the fit runs
         self.stack = copy.deepcopy(stack)
         self.cost = cost
+        # ANGLES: the dataset's angles, from every channel's points
+        tops = angle_groups([_channel_theta(e) for e in data])
+        self.n_angles = 0 if tops is None else len(tops)
+        self._check_stitch(stitch_extra)
         self.params = self.stack.free_parameters()
         self.names = parameter_names(self.stack, self.params)
         if not self.params:
@@ -263,6 +322,10 @@ class FitProblem:
                          in zip(self.channels, np.split(inv, splits))]
         self.npoints = sum(len(ch[2]) for ch in self.channels)
         self.thetas, self.rows = thetas, rows
+        # ANGLES: each angle's (largest) theta, each fitted point's angle
+        self.angle_theta = tops
+        self.angle_of = None if tops is None else \
+            [np.searchsorted(tops, t) for t in thetas]
         # 'sum' / 'asym': (up k, down k, their points, value, error or
         # None), and the channels fitted on their own besides
         self.combined = None
@@ -305,6 +368,36 @@ class FitProblem:
                     'transverse to its magnetisation; that part precesses '
                     'and is averaged out, only the projection on M_f is '
                     'fitted' % ', '.join(lost), stacklevel=2)
+
+    def _check_stitch(self, extra):
+        """A stitch_k varied beyond the dataset's angles: refused, or with
+        extra 'fix' unticked at 1 (see ANGLES)."""
+        for k, attr in enumerate(STITCH_PARAMS, 2):
+            e = self.stack.fit.get(attr)
+            if not (e and e.get('vary')) or k <= self.n_angles:
+                continue
+            if extra == 'fix':
+                e['vary'] = False
+                setattr(self.stack, attr, 1.0)
+                warnings.warn('%s is fixed at 1: the dataset has %s'
+                              % (attr, '%d angles' % self.n_angles
+                                 if self.n_angles else 'no angles (θ)'),
+                              stacklevel=3)
+            elif self.n_angles:
+                raise ValueError('%s is fitted but the data have %d angles'
+                                 % (attr, self.n_angles))
+            else:
+                raise ValueError('%s is fitted but the data have no angles '
+                                 '(no θ column, or one angle)' % attr)
+
+    def angle_factors(self):
+        """a_1 .. a_K of the dataset's angles (a_1 = 1, ANGLES), None
+        without angles."""
+        if self.angle_theta is None:
+            return None
+        s = [getattr(self.stack, a)
+             for a in STITCH_PARAMS[:len(self.angle_theta) - 1]]
+        return np.cumprod([1.0] + s)
 
     def _bound(self, attr, which):
         """The stack parameter attr's fit bound (which: 3 min, 4 max) if it
@@ -509,6 +602,12 @@ class FitProblem:
             for c, (k, idx, q) in enumerate(members):
                 out[k] = R[idx, c] if idx is not None else \
                     _interp(q, Q, R[:, c])
+        # ANGLES: only when a factor differs from 1 (bitwise otherwise)
+        a = self.angle_factors()
+        if a is not None and np.any(a != 1.0):
+            bg = self.stack.background
+            for k in range(len(out)):
+                out[k] = bg + a[self.angle_of[k]] * (out[k] - bg)
         return out
 
     def residuals(self, x):

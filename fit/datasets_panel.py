@@ -31,6 +31,8 @@ its Roughness axis).  A splitter between the two tables.
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+from fit.joint import default_mode
+
 from tabs.simulation import (PROFILE_QUANTITIES, ROUGHNESS_QUANTITIES,
                              shown_names)
 
@@ -295,18 +297,18 @@ class DatasetsPanel(QtWidgets.QWidget):
 
     def selection(self):
         """{'sets': the ticked datasets, 'modes': {dataset: {parameter:
-        mode}} of theirs that are not 'shared', 'sources': {parameter:
-        model} of the shared ones whose From was chosen}."""
+        mode}} of theirs that are not the default (fit.joint
+        default_mode), 'sources': {parameter: model} of the shared ones
+        whose From was chosen}."""
         sets = self.chosen()
+        modes = {n: {a: m for a, m in self.modes[n].items()
+                     if m != default_mode(a)} for n in sets}
         return {'sets': sets,
-                'modes': {n: {a: m for a, m in self.modes[n].items()
-                              if m != 'shared'} for n in sets
-                          if any(m != 'shared'
-                                 for m in self.modes[n].values())},
+                'modes': {n: m for n, m in modes.items() if m},
                 'sources': dict(self.sources)}
 
     def mode(self, dataset, param):
-        return self.modes[dataset].get(param, 'shared')
+        return self.modes[dataset].get(param, default_mode(param))
 
     def _has(self, n, p):
         return p in self.present.get(n, ())
