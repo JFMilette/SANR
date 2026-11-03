@@ -3312,7 +3312,15 @@ class SimulationTab(QtWidgets.QWidget):
 
     # what copy_to_models can copy: key, label, ticked by default
     COPY_WHAT = (('values', 'values', True), ('bounds', 'fit bounds', True),
-                 ('ticks', 'Fit ticks', False), ('priors', 'priors', False))
+                 ('ticks', 'Fit ticks', False), ('priors', 'priors', False),
+                 ('general', 'general parameters', False))
+    # the General parameters page's settings copy_parameters copies with
+    # 'general' (besides the stack's own parameters, STACK_FIT_PARAMS)
+    GENERAL_SETTINGS = ('tail', 'q_in_fronting', 'roughness_scheme',
+                        'interface_order', 'magnetic_smearing',
+                        'step_fallback', 'licorne_renorm', 'licorne_outer',
+                        'resolution', 'thickness_spread_nodes',
+                        'thickness_spread_dist')
 
     def copy_to_models(self):
         """Copy to…: the shown model's parameters into the models picked
@@ -3340,10 +3348,18 @@ class SimulationTab(QtWidgets.QWidget):
             row.addWidget(b)
         row.addStretch(1)
         v.addLayout(row)
+        boxes['general'].setToolTip(
+            'Also the General parameters page: scale, background, Q shift '
+            'and thickness spread (as the boxes beside say),\nwindow tail, '
+            'Q reference, roughness scheme, interfaces, M smearing, the '
+            'Licorne options, the resolution\nand the spread\'s '
+            'distribution, nodes and layer.  Not the Q range (the tab\'s) '
+            'nor the mixture.')
         note = QtWidgets.QLabel(
             'Parameters are matched by name (layer and parameter); one a '
             'model lacks is skipped.  Stitch factors belong to the datasets '
-            'and are not copied.', wordWrap=True)
+            'and are not copied; the general parameters only if ticked.',
+            wordWrap=True)
         note.setProperty('role', 'muted')
         v.addWidget(note)
         bb = QtWidgets.QDialogButtonBox(
@@ -3372,17 +3388,23 @@ class SimulationTab(QtWidgets.QWidget):
         """Write the shown model's parameters into models `targets`,
         matched by name (fit.problem.parameter_names of
         free_parameters(everything=True)): `what` of 'values', 'bounds',
-        'ticks' (Fit), 'priors'.  Ties (whose bounds follow their members)
-        and the stitch factors (the datasets') are left out.  Returns (how
-        many were written into each, {target: names it lacks})."""
+        'ticks' (Fit), 'priors', and 'general': the stack's own parameters
+        (scale, background, Q shift, thickness spread; left out without it)
+        and GENERAL_SETTINGS, the spread's layer matched by name.  Ties
+        (whose bounds follow their members) and the stitch factors (the
+        datasets') are left out.  Returns (how many parameters were written
+        into each, {target: names it lacks})."""
         from fit.problem import parameter_names
         self.recompute()                     # the widgets into the stack
         src = Stack.from_dict(self._shown_model()[0])
 
+        general = 'general' in what
+
         def entries(st):
             every = [e for e in st.free_parameters(everything=True)
                      if not (isinstance(e[0], tuple) and e[0][0] == 'tie')
-                     and e[1] not in STITCH_PARAMS]
+                     and e[1] not in STITCH_PARAMS
+                     and (general or e[0] is not None)]
             return dict(zip(parameter_names(st, every), every))
         source = entries(src)
         missing = {}
@@ -3406,6 +3428,23 @@ class SimulationTab(QtWidgets.QWidget):
                         te['prior'] = copy.deepcopy(se['prior'])
                     else:
                         te.pop('prior', None)
+            if general:
+                for a in self.GENERAL_SETTINGS:
+                    setattr(st, a, copy.deepcopy(getattr(src, a)))
+                # the spread's layers, by name ('stack' as it is)
+                t = src.thickness_spread_target
+                interior = list(enumerate(st.layers))[1:-1]
+                if isinstance(t, (list, tuple)):
+                    names = {src.layers[i].name for i in t}
+                    t = [i for i, l in interior if l.name in names] or None
+                elif t != 'stack':
+                    t = next((i for i, l in interior
+                              if l.name == src.layers[t].name), None)
+                if t is not None:
+                    try:
+                        st.set_spread_target(t)
+                    except ValueError:
+                        pass                     # its own target kept
         for name in targets:
             if name in self.model_names() and name != self.shown_model():
                 self._edit_stored(name, edit)

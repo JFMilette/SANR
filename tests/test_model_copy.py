@@ -131,3 +131,34 @@ def test_copy_parameters_to_models(qapp):
     assert lay['fit']['thickness']['vary']
     assert lay['fit']['thickness']['prior']['mu'] == 88.0
     assert lay['thickness'] == before              # values not asked
+
+
+def test_copy_general_parameters(qapp):
+    """Without 'general', the stack's own parameters and settings stay;
+    with it, they and the General parameters page's settings are copied,
+    the spread's layer by name."""
+    from tabs import SimulationTab
+    sim = SimulationTab()
+    sim.copy_model()                       # 'Model 1 copy', shown
+    sim.scale.setValue(1.07)
+    sim.background.setValue(3e-7)
+    sim.tail.setValue(4.0)
+    sim.stack.resolution['tof_dlambda'] = 0.0217
+    sim.res_tof_dl.setValue(0.0217)
+    sim.recompute()
+    layer = sim.stack.layers[1].name
+    sim.stack.set_spread_target(1)
+    sim._refresh_spread_targets()
+    before = sim.stored_model('Model 1')
+    sim.copy_parameters(['Model 1'])
+    d = sim.stored_model('Model 1')
+    assert (d['scale'], d['background'], d['tail']) == \
+        (before['scale'], before['background'], before['tail'])
+    assert d['resolution'] == before['resolution']
+    sim.copy_parameters(['Model 1'], {'values', 'bounds', 'general'})
+    d = sim.stored_model('Model 1')
+    assert d['scale'] == pytest.approx(1.07)
+    assert d['background'] == pytest.approx(3e-7)
+    assert d['tail'] == 4.0
+    assert d['resolution']['tof_dlambda'] == pytest.approx(0.0217)
+    assert d['layers'][d['thickness_spread_target']]['name'] == layer
