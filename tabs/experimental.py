@@ -62,7 +62,7 @@ STITCH FACTORS -- a measured dataset with stitched angles (fit.problem
 ANGLES) has its own stitch factors (model.stack ANGLE (STITCH) FACTORS):
 s['stitch'] = {'stitch_k': {'value', 'min', 'max'}} for k = 2 .. its number
 of angles (dataset_stitch: 1 and DEFAULT_BOUNDS where unset), saved with
-it in the session.  A "Stitch" line under its channels shows them, each
+it in the session.  A "Stitch factors" line under its channels shows them, each
 angle's theta and its QuickNXS prior; double-clicking it or "Stitch
 factors…" in the dataset's menu edits them (StitchDialog).  Fit is ticked
 in the Fit tab (the parameter stack.stitch_k); a fit takes the dataset's
@@ -974,7 +974,7 @@ class StitchDialog(QtWidgets.QDialog):
         v = QtWidgets.QVBoxLayout(self)
         note = QtWidgets.QLabel(
             'Angle k is fitted as background + a_k (R − background), '
-            'a_k = stitch 2 × … × stitch k: a correction of the '
+            'a_k = stitch factor 2 × … × stitch factor k: a correction of the '
             'reduction\'s stitching (1: as reduced).  Tick Fit in the Fit '
             'tab.', wordWrap=True)
         note.setProperty('role', 'muted')
@@ -997,7 +997,7 @@ class StitchDialog(QtWidgets.QDialog):
         self.boxes = {}
         for r, (a, e) in enumerate(st.items(), 1):
             k = r + 1
-            text(r, 0, 'stitch %d' % k)
+            text(r, 0, 'stitch factor %d' % k)
             text(r, 1, '%.4g' % (1e3 * tops[k - 1]))
             boxes = []
             for c, key in ((2, 'value'), (3, 'min'), (4, 'max')):
@@ -1036,7 +1036,7 @@ class StitchDialog(QtWidgets.QDialog):
                not e['min'] < e['max']]
         if bad:
             self.error.setText('Min < Max, and the value between them: %s'
-                               % ', '.join(a.replace('_', ' ') for a in bad))
+                               % ', '.join(a.replace('_', ' factor ') for a in bad))
             return
         self.accept()
 
@@ -1124,7 +1124,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self.show_line = QtWidgets.QCheckBox('line')
         self.show_line.setToolTip('Join the data points of each channel '
                                   'with a line, in file order')
-        self.show_corrected = QtWidgets.QCheckBox('stitch-corrected')
+        self.show_corrected = QtWidgets.QCheckBox('stitch-factor corrected')
         self.show_corrected.setToolTip(
             'Draw each measured angle divided by its stitch factor in the '
             'model the dataset is linked to:\nbackground + (R − background) '
@@ -1274,7 +1274,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                     tip += '\nnot fitted (Licorne ExpFit = 0)'
                 head = _header_of(d.get('path'))
                 if head is not None:
-                    tip += '\nQuickNXS: angle 1 ±%.2f %%, stitch steps %s; ' \
+                    tip += '\nQuickNXS: angle 1 ±%.2f %%, stitch factors %s; ' \
                         '%s' % (100 * head['plateau'], ', '.join(
                             '±%.2f %%' % (100 * v) for v in head['steps']),
                             ', '.join('%s %s' % (k, head['options'][k])
@@ -1303,7 +1303,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         if tops is None:
             return None
         st = dataset_stitch(s)
-        it = QtWidgets.QTreeWidgetItem(['Stitch  %s' % ', '.join(
+        it = QtWidgets.QTreeWidgetItem(['Stitch factors  %s' % ', '.join(
             '%.4g' % e['value'] for e in st.values())])
         it.setData(0, ROLE, (i, STITCH_KEY))
         it.setFlags(it.flags() & ~(QtCore.Qt.ItemFlag.ItemIsDragEnabled
@@ -1313,7 +1313,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         it.setFont(0, font)
         head = self._header(s)
         tip = ['Stitch factors of %s (angle k: background + a_k (R − '
-               'background), a_k = stitch 2 × … × stitch k); Fit is '
+               'background), a_k = stitch factor 2 × … × k); Fit is '
                'ticked in the Fit tab.  Double-click to edit.' % s['name']]
         tip.append('angle 1: θ %.4g mrad%s (the scale)' % (
             1e3 * tops[0], '' if head is None else
@@ -1322,7 +1322,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
             prior = ''
             if head is not None and k - 2 < len(head['steps']):
                 prior = ', prior ±%.2f %%' % (100 * head['steps'][k - 2])
-            tip.append('stitch %d: %.5g in [%.4g, %.4g], θ %.4g mrad%s'
+            tip.append('stitch factor %d: %.5g in [%.4g, %.4g], θ %.4g mrad%s'
                        % (k, e['value'], e['min'], e['max'],
                           1e3 * tops[k - 1], prior))
         it.setToolTip(0, '\n'.join(tip))

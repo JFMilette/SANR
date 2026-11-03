@@ -315,8 +315,8 @@ def test_dataset_stitch_line_and_editor(qapp, monkeypatch):
             it = top.child(j)
             if it.data(0, 0x0100)[1] == STITCH_KEY:
                 lines[top.text(0)] = it.text(0)
-    assert lines == {'A': 'Stitch  1, 1', 'B': 'Stitch  1, 1',
-                     'C': 'Stitch  1'}
+    assert lines == {'A': 'Stitch factors  1, 1', 'B': 'Stitch factors  1, 1',
+                     'C': 'Stitch factors  1'}
     assert list(dataset_stitch(exp.sets[2])) == ['stitch_2']
     # the editor: values and bounds, kept in the dataset and the session
     dlg = StitchDialog(exp.sets[0])

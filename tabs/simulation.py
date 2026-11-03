@@ -810,9 +810,12 @@ ANGLE_LETTERS = {'MSLD_theta': 'MSLD φ', 'MSLD_phi': 'MSLD θ'}
 
 def shown_names(text):
     """text with the attribute names MSLD_theta / MSLD_phi written as the
-    GUI shows them (ANGLE_LETTERS), e.g. 'Fe.MSLD_theta' -> 'Fe.MSLD φ'."""
-    return re.sub(r'MSLD_(theta|phi)\b',
+    GUI shows them (ANGLE_LETTERS), e.g. 'Fe.MSLD_theta' -> 'Fe.MSLD φ',
+    and stitch_k as 'stitch factor k' (model.stack ANGLE (STITCH)
+    FACTORS)."""
+    text = re.sub(r'MSLD_(theta|phi)\b',
                   lambda m: ANGLE_LETTERS[m.group(0)], str(text))
+    return re.sub(r'\bstitch_(\d+)\b', r'stitch factor \1', text)
 
 
 PARAM_DISPLAY = {attr: (label.split(' (')[0], scale,
@@ -824,7 +827,7 @@ PARAM_DISPLAY.update(scale=('Scale', 1.0, ''),
                      q_shift=('Q shift', 1.0, 'Å⁻¹'),
                      thickness_spread=('Thickness spread', 100.0, '%'),
                      weight=('Weight', 1.0, ''),
-                     **{a: ('Stitch %d' % stitch_index(a), 1.0, '')
+                     **{a: ('Stitch factor %d' % stitch_index(a), 1.0, '')
                         for a in STITCH_PARAMS})
 # the stack rows shown in other units than stored: attr -> factor (shown =
 # factor x stored)

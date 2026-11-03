@@ -609,7 +609,7 @@ def stitch_summary(result, problem, discard=0.5):
                 cols.append(np.full(len(s), getattr(p.stack, a)))
         a_k = np.cumprod(np.column_stack(cols), axis=1)
         q = np.percentile(a_k, [2.5, 50, 97.5], axis=0)
-        out.append('stitch%s: %s' % (
+        out.append('stitch factors%s: %s' % (
             '' if names is None else ' [%s]' % names[k],
             ', '.join('a%d = %.4g [%.4g, %.4g]' % (j + 2, q[1, j], q[0, j],
                                                    q[2, j])
