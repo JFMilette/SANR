@@ -292,6 +292,9 @@ def test_simulation_rows_follow_the_data(qapp):
     assert exp.angle_count() == 3
     shown = {a: f.isRowVisible(r) for a, r in sim._stitch_layouts.items()}
     assert [a for a, on in shown.items() if on] == ['stitch_2', 'stitch_3']
+    # its bounds shown, but Fit is ticked in the Fit tab only
+    assert not sim.stack_rows['stitch_2'][1].isHidden()
+    assert all(sim.stack_rows[a][3].isHidden() for a in sim.stack_rows)
     sim.recompute()
     names = [a for i, a, *_ in sim.stack.free_parameters(everything=True)
              if i is None]

@@ -2096,6 +2096,9 @@ class SimulationTab(QtWidgets.QWidget):
             e = self.stack.fit.get(a) or {}
             f.setRowVisible(row, self._stitch_shown(a) or bool(e.get('vary'))
                             or getattr(self.stack, a) != 1.0)
+            # setRowVisible shows every widget of the row: Fit is ticked in
+            # the Fit tab, as for the other stack rows
+            self.stack_rows[a][3].hide()
 
     def _build_spread_window(self):
         """The Thickness spread and mixture window (non-modal): the spread's
