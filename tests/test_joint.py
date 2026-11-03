@@ -177,6 +177,10 @@ def gui():
         sim.stack.layers[1].fit_entry(a)['vary'] = True
     sim.recompute()
     exp = ExperimentalTab(simulation=sim)
+    # these tests are about links, ticks and sends between the models
+    # there are: no model made per dataset (tabs.experimental DATASET
+    # MODELS, tested in test_model_copy)
+    exp._ensure_dataset_models = lambda: None
     Q = np.linspace(0.01, 0.1, 40)
     one = np.ones_like(Q)
     exp.sets = [dict(name=n, visible=True, channels={

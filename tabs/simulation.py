@@ -23,8 +23,9 @@ takes no layer (empty_stack) with the shown model's other settings,
 Copy the whole model.  Copy to… writes the shown model's parameter values
 and fit bounds (Fit ticks and priors if asked) into the models picked,
 matched by name, leaving the rest of them as it is (copy_parameters).
-An imported dataset gets a model of its own (tabs.experimental).  A
-session file is the shown model as before, the
+Every imported dataset has a model of its own, named after it
+(tabs.experimental DATASET MODELS; dataset_model): it cannot be renamed or
+deleted here, only by renaming or removing its dataset.  A session file is the shown model as before, the
 others under 'simulation' -> 'models'; switching is off while a fit runs.
 
 The thickness spread and the mixture of models (model.stack MIXTURE) have
@@ -3145,10 +3146,28 @@ class SimulationTab(QtWidgets.QWidget):
         b.addItems([m['name'] for m in self._models])
         b.setCurrentIndex(self._model_index)
         b.blockSignals(False)
-        for key in ('delete', 'copy_to'):
-            self.model_btns[key].setEnabled(
-                len(self._models) > 1 and not self._locked)
+        self._update_model_buttons()
         self.modelsChanged.emit()
+
+    def dataset_model(self, name):
+        """Whether model `name` is an imported dataset's own (renamed and
+        removed with it); set by the Experimental tab."""
+        return False
+
+    def _update_model_buttons(self):
+        """Delete and Copy to… with another model; Rename and Delete not
+        on a dataset's own model."""
+        own = self.dataset_model(self.shown_model())
+        many = len(self._models) > 1 and not self._locked
+        self.model_btns['copy_to'].setEnabled(many)
+        self.model_btns['delete'].setEnabled(many and not own)
+        self.model_btns['rename'].setEnabled(not self._locked and not own)
+        tip = 'The model of the dataset %s: renamed and removed with it, in ' \
+            'the Experimental tab' % self.shown_model()
+        self.model_btns['rename'].setToolTip(
+            tip if own else 'Rename this model')
+        self.model_btns['delete'].setToolTip(
+            tip if own else 'Delete this model')
 
     def model_names(self):
         return [m['name'] for m in self._models]
@@ -3393,7 +3412,7 @@ class SimulationTab(QtWidgets.QWidget):
         return len(source), missing
 
     def rename_model(self):
-        if self._locked:
+        if self._locked or self.dataset_model(self.shown_model()):
             return
         m = self._models[self._model_index]
         name, ok = QtWidgets.QInputDialog.getText(
@@ -3401,15 +3420,24 @@ class SimulationTab(QtWidgets.QWidget):
         name = name.strip()
         if not ok or not name or name == m['name']:
             return
-        old, m['name'] = m['name'], self._unique_name(name)
+        self.rename_model_to(m['name'], name)
+
+    def rename_model_to(self, old, name):
+        """Model `old` renamed `name` (made unique), the mixtures and the
+        links following; returns the new name."""
+        m = next(m for m in self._models if m['name'] == old)
+        m['name'] = self._unique_name(name)
         self._rename_in_mixtures(old, m['name'])
         self.modelRenamed.emit(old, m['name'])
         self._refresh_models()
         self._refresh_mixture_table()
+        return m['name']
 
     def delete_model(self):
-        """Delete the shown model (after asking) and show its neighbour."""
-        if self._locked or len(self._models) < 2:
+        """Delete the shown model (after asking) and show its neighbour;
+        not a dataset's own model."""
+        if self._locked or len(self._models) < 2 or \
+                self.dataset_model(self.shown_model()):
             return
         name = self._models[self._model_index]['name']
         if QtWidgets.QMessageBox.question(

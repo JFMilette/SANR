@@ -357,8 +357,10 @@ def test_fit_takes_and_returns_each_datasets_factors(qapp):
         panel.table.item(panel.params.index(p), 0).setCheckState(
             QtCore.Qt.CheckState.Checked)
     qapp.processEvents()
-    assert sim.stack.fit['stitch_2']['vary']
-    assert sim.stored_model('Model 1')['fit']['stitch_3']['vary']
+    # each dataset on its own model (tabs.experimental DATASET MODELS)
+    assert [s['link'] for s in exp.sets[:3]] == ['A', 'B', 'C']
+    assert sim.stored_model('A')['fit']['stitch_2']['vary']
+    assert sim.stored_model('B')['fit']['stitch_3']['vary']
     got = exp._problem(QtWidgets.QLabel(), 'chi2')
     assert got is not None
     problem = got[0]

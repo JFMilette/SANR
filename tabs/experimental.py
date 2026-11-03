@@ -36,10 +36,17 @@ computes them (model_grid).  Starting a fit gives every live dataset the
 fitted channels' pairs (those of the first dataset fitted with its model),
 so what is drawn against the data is exactly what is fitted.  A measured
 dataset is linked to the model it is fitted with in the Fit tab (fit.panel
-MODELS; 'link', saved in the session).  Importing a file into a new
-dataset makes a model named after it, a copy of the shown model, and
-links the dataset to it (an existing model of that name is linked
-instead).  It is recomputed whenever the
+MODELS; 'link', saved in the session).
+
+DATASET MODELS -- every imported dataset (measured, with data) has a
+model of its own, named after it (_ensure_dataset_models, each time the
+tree is rebuilt: after an import, a session opened, a rename): one it
+lacks is made as a copy of the model it is linked to (else the shown one)
+and the dataset linked to it; the link can then be changed in the Fit tab.
+The Simulation tab does not rename or delete such a model
+(SimulationTab.dataset_model): renaming the dataset renames it (or links
+the dataset to the model already called that), removing the dataset
+removes it.  It is recomputed whenever the
 simulation changes, drawn as lines without error bars, and can be frozen
 into a static copy from its context menu; the frozen copy is still drawn as
 lines and keeps the model it was computed from (Stack.to_dict, saved in the
@@ -1055,6 +1062,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         layout.addWidget(splitter)
         if simulation is not None:
             simulation.dq_sets = self.dq_sets
+            simulation.dataset_model = self.is_dataset_model
             simulation.reflectanceChanged.connect(self._update_live)
             # a live dataset per model
             simulation.modelsChanged.connect(self._models_changed)
@@ -1195,6 +1203,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
     # -- tree ---------------------------------------------------------------
     def refresh_tree(self, select=None):
         """Rebuild the tree from self.sets; select = (set, channel or None)."""
+        self._ensure_dataset_models()
         self._sync_live_sets()
         t = self.tree
         t.blockSignals(True)
@@ -1358,10 +1367,13 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         s = self.sets[i]
         s['visible'] = item.checkState(0) == QtCore.Qt.CheckState.Checked
         name = item.text(0).strip()
-        if name:
-            if name != s['name']:
-                self._rename_fit_set(s['name'], name)
-            s['name'] = name
+        if name and name != s['name'] and self._set_index(name) is not None:
+            name = s['name']                 # another dataset's name: kept
+        if name and name != s['name']:
+            old = s['name']
+            self._rename_fit_set(old, name)
+            s['name'] = name             # before its model (a tree rebuild)
+            self._rename_dataset_model(s, old)
         # rebuild outside the itemChanged handler
         QtCore.QTimer.singleShot(0, lambda: self.refresh_tree((i, None)))
         self.redraw()
@@ -1586,9 +1598,24 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                 if not s['channels'] and sim.last_R is not None:
                     s['channels'] = self._live_channels(s)
 
+    def _rename_dataset_model(self, s, old):
+        """Dataset s, called `old` until now: its model follows, or it is
+        linked to the model already called its new name (DATASET
+        MODELS)."""
+        sim = self.simulation
+        if sim is None or not self._measured(s):
+            return
+        if s['name'] in sim.model_names():
+            s['link'] = s['name']
+        elif old in sim.model_names():
+            sim.rename_model_to(old, s['name'])
+
     def _models_changed(self):
         """A model added, removed, renamed, shown or written into: the live
         datasets follow."""
+        if getattr(self, '_ensuring', False):
+            return                       # the tree is being rebuilt
+        self.simulation._update_model_buttons()
         if self.simulation.last_R is not None:
             self._update_live()           # the tree and the plot too
         else:
@@ -1721,7 +1748,6 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
             return
         if i is None:
             i = self.new_set(name, refresh=False)
-            self._model_for_import(i)
         self.sets[i]['channels'][ch] = dict(dlg.data, path=path,
                                             q_path=dlg.q_path,
                                             start=dlg.start.value() - 1,
@@ -1733,17 +1759,36 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self.refresh_tree((i, ch))
         self.redraw()
 
-    def _model_for_import(self, i):
-        """Dataset i, just made by an import, linked to the model named
-        after it (see MODELS): made as a copy of the shown model when there
-        is none, not shown."""
+    @staticmethod
+    def _measured(s):
+        """Whether dataset s holds imported data (DATASET MODELS)."""
+        return bool(s['channels']) and not (s.get('live') or s.get('line'))
+
+    def _ensure_dataset_models(self):
+        """A model named after every imported dataset that lacks one: a
+        copy of the model it is linked to (else the shown one), the
+        dataset then linked to it (DATASET MODELS)."""
         sim = self.simulation
-        if sim is None:
+        # copying the shown model recomputes it, which rebuilds the tree
+        if sim is None or getattr(self, '_ensuring', False):
             return
-        name = self.sets[i]['name']
-        if name not in sim.model_names():
-            name = sim.add_model(name, sim.model_dict(sim.shown_model()))
-        self.sets[i]['link'] = name
+        self._ensuring = True
+        try:
+            for s in self.sets:
+                if not self._measured(s) or s['name'] in sim.model_names():
+                    continue
+                base = s.get('link')
+                if base not in sim.model_names():
+                    base = sim.shown_model()
+                s['link'] = sim.add_model(s['name'], sim.model_dict(base))
+        finally:
+            self._ensuring = False
+
+    def is_dataset_model(self, name):
+        """Whether model `name` is the own model of an imported dataset
+        (SimulationTab.dataset_model)."""
+        return any(self._measured(s) and s['name'] == name
+                   for s in self.sets)
 
     def _confirm_replace(self, i, ch):
         s = self.sets[i]
@@ -1784,13 +1829,20 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
             self.refresh_tree((i, None))
         else:
             s = self.sets[i]
+            sim = self.simulation
+            own = sim is not None and self.is_dataset_model(s['name']) and \
+                s['name'] in sim.model_names()
             if s['channels'] and QtWidgets.QMessageBox.question(
                     self, 'Experimental data',
-                    'Remove %s and its %d channel(s)?'
-                    % (s['name'], len(s['channels']))) != \
+                    'Remove %s and its %d channel(s)?%s'
+                    % (s['name'], len(s['channels']),
+                       '\nIts model %s is removed too.' % s['name']
+                       if own else '')) != \
                     QtWidgets.QMessageBox.StandardButton.Yes:
                 return
             del self.sets[i]
+            if own:
+                sim.remove_model(s['name'])
             self.refresh_tree((min(i, len(self.sets) - 1), None))
         self.redraw()
 
