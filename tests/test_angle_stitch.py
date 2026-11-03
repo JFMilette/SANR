@@ -272,33 +272,114 @@ def test_dream_summary_gives_the_cumulative_factors():
     assert 'a2 = 1 [0.981' in lines[1] and 'a3 = 1 [0.981' in lines[1]
 
 
-# -- U1: Simulation tab rows -------------------------------------------------------
+# -- U1: each dataset's own factors, in the Experimental tab -------------------
 @pytest.fixture(scope='module')
 def qapp():
     QtWidgets = pytest.importorskip('PyQt6.QtWidgets')
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
-def test_simulation_rows_follow_the_data(qapp):
+def stitch_tabs(qapp):
+    """Simulation and Experimental tabs: datasets A, B (3 angles) and C (2
+    angles), A on Model 1, B and C on a copy of it."""
+    from fit.panel import JOINT
     from tabs import ExperimentalTab, SimulationTab
     sim = SimulationTab()
     exp = ExperimentalTab(simulation=sim)
-    f = sim._form_stack
-    assert not any(f.isRowVisible(r) for r in sim._stitch_layouts.values())
-    chans = {e['name'][1:]: dict(e, dQ=0 * e['Q'], path='x.dat')
-             for e in three_angles()}
-    exp.sets = [dict(name='meas', visible=True, channels=chans)]
+    sim.copy_model()                        # 'Model 1 copy', shown
+
+    def chans(n, path):
+        return {e['name'][1:]: dict(e, dQ=0 * e['Q'], path=path)
+                for e in three_angles(n=n)}
+    exp.sets = [dict(name='A', visible=True, link='Model 1',
+                     channels=chans((30, 30, 30), 'x.dat')),
+                dict(name='B', visible=True, link='Model 1 copy',
+                     channels=chans((30, 30, 30), 'x.dat')),
+                dict(name='C', visible=True, link='Model 1 copy',
+                     channels=chans((30, 30, 0), 'y.dat'))]
     exp.refresh_tree()
-    assert exp.angle_count() == 3
-    shown = {a: f.isRowVisible(r) for a, r in sim._stitch_layouts.items()}
-    assert [a for a, on in shown.items() if on] == ['stitch_2', 'stitch_3']
-    # its bounds shown, but Fit is ticked in the Fit tab only
-    assert not sim.stack_rows['stitch_2'][1].isHidden()
-    assert all(sim.stack_rows[a][3].isHidden() for a in sim.stack_rows)
-    sim.recompute()
-    names = [a for i, a, *_ in sim.stack.free_parameters(everything=True)
-             if i is None]
-    assert 'stitch_3' in names and 'stitch_4' not in names
+    exp._joint = dict(sets=['A', 'B', 'C'], modes={})
+    exp._refresh_fit_sets()
+    exp.fit_set.setCurrentIndex(exp.fit_set.findData(JOINT))
+    return sim, exp
+
+
+def test_dataset_stitch_line_and_editor(qapp, monkeypatch):
+    from tabs.experimental import STITCH_KEY, StitchDialog, dataset_stitch
+    sim, exp = stitch_tabs(qapp)
+    # a Stitch line under each dataset with angles, its factors in it
+    lines = {}
+    for k in range(exp.tree.topLevelItemCount()):
+        top = exp.tree.topLevelItem(k)
+        for j in range(top.childCount()):
+            it = top.child(j)
+            if it.data(0, 0x0100)[1] == STITCH_KEY:
+                lines[top.text(0)] = it.text(0)
+    assert lines == {'A': 'Stitch  1, 1', 'B': 'Stitch  1, 1',
+                     'C': 'Stitch  1'}
+    assert list(dataset_stitch(exp.sets[2])) == ['stitch_2']
+    # the editor: values and bounds, kept in the dataset and the session
+    dlg = StitchDialog(exp.sets[0])
+    dlg.boxes['stitch_2'][0].setValue(1.04)
+    dlg.boxes['stitch_3'][1].setValue(0.9)
+    assert dlg.values()['stitch_2']['value'] == pytest.approx(1.04)
+    monkeypatch.setattr(StitchDialog, 'exec', lambda self: True)
+    monkeypatch.setattr(StitchDialog, 'values',
+                        lambda self: dict(stitch_2=dict(value=1.04, min=0.8,
+                                                        max=1.25),
+                                          stitch_3=dict(value=0.97, min=0.9,
+                                                        max=1.1)))
+    exp.edit_stitch(0)
+    assert exp.sets[0]['stitch']['stitch_3']['min'] == 0.9
+    state = exp.session_state(str(HERE))
+    assert state['sets'][0]['stitch']['stitch_2']['value'] == 1.04
+    assert 'Model 1' in sim.model_names()
+    # the Simulation tab has no stitch rows any more
+    assert not any(a.startswith('stitch') for a in sim.stack_rows)
+
+
+def test_fit_takes_and_returns_each_datasets_factors(qapp):
+    """Each dataset's stitch factors listed in the Fit tab by its own
+    angles, ticked in every linked model; the fit starts from each
+    dataset's values and bounds; a result sent goes back to the datasets,
+    Revert restores them."""
+    from PyQt6 import QtCore, QtWidgets
+    sim, exp = stitch_tabs(qapp)
+    exp.sets[0]['stitch'] = dict(stitch_2=dict(value=1.04, min=0.9,
+                                               max=1.1))
+    present = exp._datasets_state()[6]
+    stitch = {n: [p for p in present[n] if 'stitch' in p] for n in 'ABC'}
+    assert stitch == {'A': ['stack.stitch_2', 'stack.stitch_3'],
+                      'B': ['stack.stitch_2', 'stack.stitch_3'],
+                      'C': ['stack.stitch_2']}
+    panel = exp.datasets_panel
+    for p in ('stack.stitch_2', 'stack.stitch_3'):
+        panel.table.item(panel.params.index(p), 0).setCheckState(
+            QtCore.Qt.CheckState.Checked)
+    qapp.processEvents()
+    assert sim.stack.fit['stitch_2']['vary']
+    assert sim.stored_model('Model 1')['fit']['stitch_3']['vary']
+    got = exp._problem(QtWidgets.QLabel(), 'chi2')
+    assert got is not None
+    problem = got[0]
+    names = [n for n in problem.names if 'stitch' in n]
+    assert names == ['stack.stitch_2 [A]', 'stack.stitch_2 [B]',
+                     'stack.stitch_2 [C]', 'stack.stitch_3 [A]',
+                     'stack.stitch_3 [B]']
+    j = problem.names.index('stack.stitch_2 [A]')
+    assert problem.params[j][2:] == (1.04, 0.9, 1.1)    # A's own
+    # a result goes back to each dataset; Revert restores them
+    exp._set_fit_start(problem)
+    x = [p[2] for p in problem.params]
+    x[j] = 0.95
+    x[problem.names.index('stack.stitch_3 [B]')] = 1.02
+    exp._send_values(problem, x, 0, exp, 'Send')
+    assert exp.sets[0]['stitch']['stitch_2']['value'] == 0.95
+    assert exp.sets[1]['stitch']['stitch_3']['value'] == 1.02
+    assert set(exp.sets[2]['stitch']) == {'stitch_2'}
+    exp.revert_fit()
+    assert exp.sets[0]['stitch']['stitch_2']['value'] == 1.04
+    assert 'stitch' not in exp.sets[1]
 
 
 # -- P1, T9: the QuickNXS header (private) ---------------------------------------
@@ -351,14 +432,14 @@ def test_header_priors_per_dataset():
                            prior={'kind': 'gauss', 'mu': 1.0, 'tau': 0.1})
     st.fit['stitch_2'] = dict(S.default_fit('stitch_2'), vary=True)
     with pytest.warns(UserWarning, match='QuickNXS header: stitch_2'):
-        got = FitPanel._header_priors(s, st)
+        got = FitPanel._dataset_stack(s, st)
     assert got.fit['stitch_2']['prior']['tau'] == pytest.approx(0.0206,
                                                                 abs=1e-4)
     assert got.fit['stitch_3']['prior']['tau'] == pytest.approx(0.0528,
                                                                 abs=1e-4)
     assert got.fit['scale']['prior']['tau'] == 0.1     # its own kept
     assert 'prior' not in st.fit['stitch_2']           # a copy
-    assert FitPanel._header_priors({'channels': {}}, st) is st
+    assert FitPanel._dataset_stack({'channels': {}}, st) is st
 
 
 # -- T8: regression on the stored DREAM best state (private) --------------------
@@ -410,3 +491,48 @@ def test_regression_good_starting_point():
         total[0] += c0
         total[1] += c1
     assert total == pytest.approx([4157.132, 3828.445], abs=0.01)
+
+
+# -- U3: data corrected by the factors ----------------------------------------
+def test_stitch_corrected_data(qapp):
+    """Each angle's signal divided by its factor, so that the data of a
+    model with factors match the model without them; a dataset without
+    angles, or factors at 1, is drawn as it is."""
+    from tabs import ExperimentalTab, SimulationTab
+    from tabs.experimental import stitch_corrected
+    st = film()
+    st.stitch_2, st.stitch_3 = 1.05, 0.9
+    data = three_angles()
+    p = FitProblem(st, data)
+    measured = {e['name'][1:]: dict(e, R=m, dR=0.02 * m)
+                for e, m in zip(data, p.model([120.0]))}
+    ref = FitProblem(film(), data).model([120.0])
+    values = dict(stitch_2=1.05, stitch_3=0.9)
+    got = stitch_corrected(measured, values, BG)
+    f = np.array([1.0, 1.05, 1.05 * 0.9])[angle_of_points(data)]
+    for (ch, d), r in zip(got.items(), ref):
+        assert d['R'] == pytest.approx(r, rel=1e-12)
+        assert d['dR'] == pytest.approx(measured[ch]['dR'] / f, rel=1e-12)
+    assert stitch_corrected(measured, {}, BG) is measured
+    plain = {e['name'][1:]: e for e in three_angles(theta=False)}
+    assert stitch_corrected(plain, values, BG) is plain
+    # the tab: drawn corrected with the dataset's own factors, kept in
+    # the session
+    sim = SimulationTab()
+    exp = ExperimentalTab(simulation=sim)
+    chans = {ch: dict(d, dQ=0 * d['Q'], path='x.dat')
+             for ch, d in measured.items()}
+    exp.sets = [dict(name='meas', visible=True, channels=chans,
+                     stitch=dict(stitch_2=dict(value=1.05, min=0.8,
+                                               max=1.25)))]
+    exp.refresh_tree()
+    exp.show_corrected.setChecked(True)
+    y = [item.yData for item, _ in exp._items]       # not log10
+    Q = chans['+']['Q']
+    keep = (Q >= sim.qmin.value()) & (Q <= sim.qmax.value())
+    lab = angle_of_points(data)[keep]
+    raw = chans['+']['R'][keep]
+    bg = sim.stack.background                      # the linked model's
+    assert any(np.allclose(v[lab == 1], bg + (raw[lab == 1] - bg) / 1.05,
+                           rtol=1e-12) for v in y if len(v) == len(raw))
+    assert exp.session_state(str(HERE))['display']['corrected'] is True

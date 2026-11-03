@@ -47,6 +47,21 @@ and display stay).
 Only points between the Simulation tab's Q min and Q max are plotted, the
 range that is also fitted.
 
+STITCH FACTORS -- a measured dataset with stitched angles (fit.problem
+ANGLES) has its own stitch factors (model.stack ANGLE (STITCH) FACTORS):
+s['stitch'] = {'stitch_k': {'value', 'min', 'max'}} for k = 2 .. its number
+of angles (dataset_stitch: 1 and DEFAULT_BOUNDS where unset), saved with
+it in the session.  A "Stitch" line under its channels shows them, each
+angle's theta and its QuickNXS prior; double-clicking it or "Stitch
+factors…" in the dataset's menu edits them (StitchDialog).  Fit is ticked
+in the Fit tab (the parameter stack.stitch_k); a fit takes the dataset's
+values and bounds (fit.panel), and a result sent writes them back here.
+With "stitch-corrected" ticked the dataset is drawn with each angle's
+signal divided by its factor: bg + (R - bg) / a_k, dR / a_k (bg the
+background of the model it is linked to), to compare with the model's
+curves, which have no angles.  A display aid only (stitch_corrected): the
+fit always takes the data as measured.
+
 QUICKNXS -- quicknxs_stitch_priors reads a QuickNXS export's header: the
 [Data Runs] table's cumulative scale and scale_err of each run (in the
 order the runs were stitched, angle 1 first) give the relative error of
@@ -270,6 +285,54 @@ def quicknxs_stitch_priors(path):
     return dict(scale=scale.tolist(), scale_err=err.tolist(),
                 plateau=float(rel[0]), steps=steps.tolist(),
                 options=options)
+
+
+def dataset_angles(s):
+    """The largest theta of each stitched angle of dataset s (fit.problem
+    ANGLES), None for a simulated dataset or one without them."""
+    from fit.problem import angle_groups
+    if s.get('line') or s.get('live') or not s['channels']:
+        return None
+    return angle_groups([d.get('theta') for d in s['channels'].values()])
+
+
+def dataset_stitch(s):
+    """{stitch_k: {'value', 'min', 'max'}} of dataset s's angles 2 .. K
+    (see STITCH FACTORS): its own, else 1 within DEFAULT_BOUNDS; {} without
+    angles."""
+    from model.stack import STITCH_PARAMS, default_fit
+    tops = dataset_angles(s)
+    if tops is None:
+        return {}
+    own = s.get('stitch') or {}
+    out = {}
+    for a in STITCH_PARAMS[:len(tops) - 1]:
+        e = default_fit(a)
+        out[a] = dict(value=1.0, min=e['min'], max=e['max'])
+        out[a].update(own.get(a, {}))
+    return out
+
+
+def stitch_corrected(chans, values, bg):
+    """Channels {channel: dict} with each angle's signal divided by its
+    stitch factor, values {stitch_k: value} (see STITCH FACTORS), bg the
+    background; chans itself when they have no angles or every factor
+    is 1."""
+    from fit.problem import angle_groups
+    from model.stack import STITCH_PARAMS
+    tops = angle_groups([d.get('theta') for d in chans.values()])
+    if tops is None:
+        return chans
+    a = np.cumprod([1.0] + [values.get(p, 1.0)
+                            for p in STITCH_PARAMS[:len(tops) - 1]])
+    if np.all(a == 1.0):
+        return chans
+    out = {}
+    for ch, d in chans.items():
+        f = a[np.searchsorted(tops, np.asarray(d['theta'], dtype=float))]
+        out[ch] = dict(d, R=bg + (np.asarray(d['R'], dtype=float) - bg) / f,
+                       dR=np.asarray(d['dR'], dtype=float) / f)
+    return out
 
 
 _HEADERS = {}                   # (path, mtime) -> quicknxs_stitch_priors
@@ -778,6 +841,7 @@ class PairDialog(QtWidgets.QDialog):
 
 # ------------------------------------------------------- data tree ----
 ROLE = QtCore.Qt.ItemDataRole.UserRole          # (set index, channel or None)
+STITCH_KEY = 'stitch'           # the ROLE 'channel' of a dataset's Stitch line
 GLYPH_ROLE = ROLE + 1                           # a dataset's own colour
 SYMBOLS = ['o', 's', 't', 'd', 'star', 't1', 'p', 'h', '+', 'x']
 # marker shown beside each dataset name in the tree
@@ -839,7 +903,8 @@ class DataTree(QtWidgets.QTreeWidget):
         dst = self.itemAt(ev.position().toPoint())
         ev.setDropAction(QtCore.Qt.DropAction.IgnoreAction)
         ev.accept()                          # never let Qt move items itself
-        if src is None or dst is None or src.data(0, ROLE)[1] is None:
+        if src is None or dst is None or \
+                src.data(0, ROLE)[1] in (None, STITCH_KEY):
             return
         s, ch = src.data(0, ROLE)
         d = dst.data(0, ROLE)[0]
@@ -879,6 +944,89 @@ def read_channel(ref, q_ref, start, base, q_shift=0.0, q_mult=1.0,
                 q_mult=q_mult, r_mult=r_mult)
 
 
+# ------------------------------------------------------ stitch dialog ----
+class StitchDialog(QtWidgets.QDialog):
+    """The stitch factors of a dataset (see STITCH FACTORS): a row per
+    angle after the first, its theta, value, bounds and the QuickNXS
+    prior a fit gives it."""
+
+    COLUMNS = ('Angle', 'θ (mrad)', 'Value', 'Min', 'Max', 'Prior')
+
+    def __init__(self, s, head=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Stitch factors — %s' % s['name'])
+        tops = dataset_angles(s)
+        st = dataset_stitch(s)
+        v = QtWidgets.QVBoxLayout(self)
+        note = QtWidgets.QLabel(
+            'Angle k is fitted as background + a_k (R − background), '
+            'a_k = stitch 2 × … × stitch k: a correction of the '
+            'reduction\'s stitching (1: as reduced).  Tick Fit in the Fit '
+            'tab.', wordWrap=True)
+        note.setProperty('role', 'muted')
+        v.addWidget(note)
+        t = self.table = QtWidgets.QTableWidget(len(st) + 1,
+                                                len(self.COLUMNS))
+        t.setHorizontalHeaderLabels(self.COLUMNS)
+        t.verticalHeader().hide()
+        t.horizontalHeader().setStretchLastSection(True)
+        steps = head['steps'] if head else []
+
+        def text(r, c, value):
+            it = QtWidgets.QTableWidgetItem(value)
+            it.setFlags(it.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+            t.setItem(r, c, it)
+        text(0, 0, '1 (scale)')
+        text(0, 1, '%.4g' % (1e3 * tops[0]))
+        text(0, 5, '±%.2f %% (scale)' % (100 * head['plateau'])
+             if head else '')
+        self.boxes = {}
+        for r, (a, e) in enumerate(st.items(), 1):
+            k = r + 1
+            text(r, 0, 'stitch %d' % k)
+            text(r, 1, '%.4g' % (1e3 * tops[k - 1]))
+            boxes = []
+            for c, key in ((2, 'value'), (3, 'min'), (4, 'max')):
+                b = QtWidgets.QDoubleSpinBox()
+                b.setDecimals(4)
+                b.setRange(0.5, 2.0)
+                b.setSingleStep(0.001)
+                b.setValue(e[key])
+                t.setCellWidget(r, c, b)
+                boxes.append(b)
+            self.boxes[a] = boxes
+            text(r, 5, '±%.2f %%' % (100 * steps[k - 2])
+                 if k - 2 < len(steps) else '')
+        t.resizeColumnsToContents()
+        v.addWidget(t)
+        self.error = QtWidgets.QLabel()
+        self.error.setStyleSheet('color: %s' % style.ERROR)
+        v.addWidget(self.error)
+        bb = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self._accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+        self.resize(560, 140 + 32 * len(st))
+
+    def values(self):
+        """{stitch_k: {'value', 'min', 'max'}} as edited."""
+        return {a: dict(zip(('value', 'min', 'max'),
+                            (b.value() for b in boxes)))
+                for a, boxes in self.boxes.items()}
+
+    def _accept(self):
+        bad = [a for a, e in self.values().items()
+               if not e['min'] <= e['value'] <= e['max'] or
+               not e['min'] < e['max']]
+        if bad:
+            self.error.setText('Min < Max, and the value between them: %s'
+                               % ', '.join(a.replace('_', ' ') for a in bad))
+            return
+        self.accept()
+
+
 # ------------------------------------------------- experimental tab ----
 class ExperimentalTab(FitPanel, QtWidgets.QWidget):
 
@@ -904,7 +1052,6 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         layout.addWidget(splitter)
         if simulation is not None:
             simulation.dq_sets = self.dq_sets
-            simulation.angle_count = self.angle_count
             simulation.reflectanceChanged.connect(self._update_live)
             # a live dataset per model
             simulation.modelsChanged.connect(self._models_changed)
@@ -929,6 +1076,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self.tree.itemCollapsed.connect(lambda it: self._set_expanded(it, False))
         self.tree.itemExpanded.connect(lambda it: self._set_expanded(it, True))
         self.tree.itemChanged.connect(self._on_item_changed)
+        self.tree.itemDoubleClicked.connect(self._item_double_clicked)
         self.tree.currentItemChanged.connect(self._update_buttons)
         self.tree.moveRequested.connect(self.move_channel)
         self.tree.setContextMenuPolicy(
@@ -961,6 +1109,13 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self.show_line = QtWidgets.QCheckBox('line')
         self.show_line.setToolTip('Join the data points of each channel '
                                   'with a line, in file order')
+        self.show_corrected = QtWidgets.QCheckBox('stitch-corrected')
+        self.show_corrected.setToolTip(
+            'Draw each measured angle divided by its stitch factor in the '
+            'model the dataset is linked to:\nbackground + (R − background) '
+            '/ a_k, so the data can be compared with the model curves, '
+            'which have no angles.\nDisplay only: a fit always uses the '
+            'data as measured.')
         # one row, to leave the height to the datasets
         opts = QtWidgets.QHBoxLayout()
         opts.addWidget(QtWidgets.QLabel('Scale'))
@@ -970,10 +1125,12 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         opts.addWidget(self.show_points)
         opts.addWidget(self.show_line)
         opts.addWidget(self.show_err)
+        opts.addWidget(self.show_corrected)
         opts.addStretch(1)
         f.addRow(opts)
         self.r_scale.currentIndexChanged.connect(self.redraw)
-        for w in (self.show_err, self.show_points, self.show_line):
+        for w in (self.show_err, self.show_points, self.show_line,
+                  self.show_corrected):
             w.toggled.connect(self.redraw)
         v.addWidget(box, 1)
         v.addWidget(disp)
@@ -1033,23 +1190,8 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         return box
 
     # -- tree ---------------------------------------------------------------
-    def angle_count(self):
-        """The most stitched angles of a measured dataset (fit.problem
-        ANGLES; the Simulation tab's stitch rows), 0 without any."""
-        from fit.problem import angle_groups
-        n = 0
-        for s in self.sets:
-            if s.get('line') or s.get('live') or not s['channels']:
-                continue
-            tops = angle_groups([d.get('theta') for d in
-                                 s['channels'].values()])
-            n = max(n, 0 if tops is None else len(tops))
-        return n
-
     def refresh_tree(self, select=None):
         """Rebuild the tree from self.sets; select = (set, channel or None)."""
-        if self.simulation is not None:
-            self.simulation.update_stitch_rows()
         self._sync_live_sets()
         t = self.tree
         t.blockSignals(True)
@@ -1123,12 +1265,72 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                 top.addChild(it)
                 if select == (i, ch):
                     current = it
+            it = self._stitch_item(i, s)
+            if it is not None:
+                top.addChild(it)
+                if select == (i, STITCH_KEY):
+                    current = it
             top.setExpanded(id(s) not in self._collapsed)
         t.blockSignals(False)
         if current is not None:
             t.setCurrentItem(current)
         self._update_buttons()
         self._refresh_fit_sets()
+
+    def _stitch_item(self, i, s):
+        """The Stitch line of dataset s (index i): its factors, each
+        angle's theta and QuickNXS prior; None without angles."""
+        tops = dataset_angles(s)
+        if tops is None:
+            return None
+        st = dataset_stitch(s)
+        it = QtWidgets.QTreeWidgetItem(['Stitch  %s' % ', '.join(
+            '%.4g' % e['value'] for e in st.values())])
+        it.setData(0, ROLE, (i, STITCH_KEY))
+        it.setFlags(it.flags() & ~(QtCore.Qt.ItemFlag.ItemIsDragEnabled
+                                   | QtCore.Qt.ItemFlag.ItemIsDropEnabled))
+        font = it.font(0)
+        font.setItalic(True)
+        it.setFont(0, font)
+        head = self._header(s)
+        tip = ['Stitch factors of %s (angle k: background + a_k (R − '
+               'background), a_k = stitch 2 × … × stitch k); Fit is '
+               'ticked in the Fit tab.  Double-click to edit.' % s['name']]
+        tip.append('angle 1: θ %.4g mrad%s (the scale)' % (
+            1e3 * tops[0], '' if head is None else
+            ', prior ±%.2f %%' % (100 * head['plateau'])))
+        for k, (a, e) in enumerate(st.items(), 2):
+            prior = ''
+            if head is not None and k - 2 < len(head['steps']):
+                prior = ', prior ±%.2f %%' % (100 * head['steps'][k - 2])
+            tip.append('stitch %d: %.5g in [%.4g, %.4g], θ %.4g mrad%s'
+                       % (k, e['value'], e['min'], e['max'],
+                          1e3 * tops[k - 1], prior))
+        it.setToolTip(0, '\n'.join(tip))
+        return it
+
+    @staticmethod
+    def _header(s):
+        """quicknxs_stitch_priors of dataset s's first file, or None."""
+        return next((h for h in (_header_of(d.get('path'))
+                                 for d in s['channels'].values())
+                     if h is not None), None)
+
+    def edit_stitch(self, i):
+        """The stitch factors of dataset i (StitchDialog)."""
+        s = self.sets[i]
+        if dataset_angles(s) is None:
+            return
+        dlg = StitchDialog(s, self._header(s), self)
+        if dlg.exec():
+            s['stitch'] = dlg.values()
+            self.refresh_tree((i, STITCH_KEY))
+            self.redraw()
+
+    def _item_double_clicked(self, item, _col):
+        i, ch = item.data(0, ROLE)
+        if ch == STITCH_KEY:
+            self.edit_stitch(i)
 
     def _set_expanded(self, item, expanded):
         """A set collapsed by hand stays so when the tree is rebuilt."""
@@ -1169,6 +1371,10 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         menu = QtWidgets.QMenu(self)
         live = self.sets[i].get('live', False)
         s = self.sets[i]
+        if ch == STITCH_KEY:
+            menu.addAction('Stitch factors…', lambda: self.edit_stitch(i))
+            menu.exec(self.tree.viewport().mapToGlobal(pos))
+            return
         if ch is None:
             menu.addAction('Rename', lambda: self.tree.editItem(it, 0))
             menu.addAction('Colour…', lambda: self.pick_colour(i))
@@ -1183,6 +1389,9 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                 act = menu.addAction('Send model to Simulation',
                                      lambda: self.send_model(i))
                 act.setEnabled(not self.busy())
+            if dataset_angles(s) is not None:
+                menu.addAction('Stitch factors…',
+                               lambda: self.edit_stitch(i))
             if not live:
                 menu.addAction('Import into this dataset…',
                                lambda: self.import_data(self.sets[i]['name']))
@@ -1552,7 +1761,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         if sel is None:
             return
         i, ch = sel
-        if self.sets[i].get('live'):
+        if self.sets[i].get('live') or ch == STITCH_KEY:
             return                       # its model would restore it
         if ch is not None:
             del self.sets[i]['channels'][ch]
@@ -1581,7 +1790,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                      live=bool(s.get('live')), line=bool(s.get('line')))
             if s.get('link'):                   # MODELS
                 e['link'] = s['link']
-            for k in ('colour', 'channel_colours'):
+            for k in ('colour', 'channel_colours', 'stitch'):
                 if s.get(k):
                     e[k] = s[k]
             if s.get('live'):
@@ -1617,7 +1826,8 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                          scale=self.r_scale.currentData(),
                          errors=self.show_err.isChecked(),
                          points=self.show_points.isChecked(),
-                         line=self.show_line.isChecked()),
+                         line=self.show_line.isChecked(),
+                         corrected=self.show_corrected.isChecked()),
             fit=dict(dataset=self.fit_set.currentText(), joint=self._joint,
                      cost=self.fit_cost.currentIndex(),
                      target=self.fit_target.currentData(),
@@ -1642,7 +1852,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self.sets = []
         for e in state.get('sets', []):
             s = dict(name=e['name'], visible=e['visible'], channels={})
-            for k in ('colour', 'channel_colours', 'link'):
+            for k in ('colour', 'channel_colours', 'link', 'stitch'):
                 if e.get(k):
                     s[k] = copy.deepcopy(e[k])
             if e.get('live'):
@@ -1680,7 +1890,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
 
         disp, fit = state.get('display', {}), state.get('fit', {})
         widgets = (self.quantity, self.r_scale, self.show_err,
-                   self.show_points, self.show_line)
+                   self.show_points, self.show_line, self.show_corrected)
         for w in widgets:
             w.blockSignals(True)
         self.quantity.setCurrentIndex(quantity_index(disp))
@@ -1688,6 +1898,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self.show_err.setChecked(disp.get('errors', True))
         self.show_points.setChecked(disp.get('points', True))
         self.show_line.setChecked(disp.get('line', False))
+        self.show_corrected.setChecked(disp.get('corrected', False))
         for w in widgets:
             w.blockSignals(False)
         self._joint = copy.deepcopy(fit.get('joint'))
@@ -1758,9 +1969,18 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                  if s['visible'] and s['channels']]
         prefix = len(shown) > 1
         notes = []
+        corrected = self.show_corrected.isChecked() and \
+            self.simulation is not None
         for i, s in shown:
+            chans = s['channels']
+            if corrected and not (s.get('line') or s.get('live')):
+                st = self.simulation.model_stack(self._link(s))
+                chans = stitch_corrected(
+                    chans, {a: e['value'] for a, e
+                            in dataset_stitch(s).items()},
+                    0.0 if st is None else st.background)
             series, note = dataset_series(
-                s['channels'], k, s.get('line', False),
+                chans, k, s.get('line', False),
                 lambda key, i=i: self.series_colour(i, key))
             if note:
                 notes.append('%s: %s' % (s['name'], note))

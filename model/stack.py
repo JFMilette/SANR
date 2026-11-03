@@ -375,8 +375,8 @@ together).  They exist only where there are data with angles:
 fit.problem applies them (ANGLES there); a simulation is untouched.  Fitted
 like the scale, bounds DEFAULT_BOUNDS; not part of LICORNE_EXACT (Licorne
 has none, and at 1 nothing changes).  free_parameters(everything=True)
-lists a stitch_k only once Stack.fit has an entry for it (the Simulation
-tab writes one per angle of the imported data).
+lists every stitch_k: which ones a dataset can fit depends on its angles,
+not on the model (fit.panel keeps those of each dataset's angles).
 (plans/angle_scale_plan_v1.md)
 
 SURROUND -- a magnetic fronting/backing is off-diagonal in the film-normal
@@ -1368,8 +1368,6 @@ class Stack:
                 out.append((('tie', k), attr, self.tie_value(k),
                             *self.tie_bounds(k)))
         for attr in STACK_FIT_PARAMS:
-            if attr in STITCH_PARAMS and attr not in self.fit:
-                continue                    # no data with angles yet
             e = entry(self.fit, attr)
             if e:
                 out.append((None, attr, getattr(self, attr), e['min'],

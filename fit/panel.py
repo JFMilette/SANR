@@ -69,7 +69,7 @@ import numpy as np
 from PyQt6 import QtCore, QtWidgets
 
 from model.polarisation import vectors_pair
-from model.stack import STITCH_PARAMS, default_fit
+from model.stack import STITCH_PARAMS, default_fit, stitch_index
 from tabs.simulation import SciSpinBox, dspin, shown_names
 from fit.datasets_panel import SHOWN, DatasetsPanel
 from fit.problem import FitProblem, parameter_names
@@ -124,6 +124,9 @@ TAB_METHODS = {'de': 'DE', 'lbfgs': 'L-BFGS-B', 'lsq': 'LSQ',
                'multistart': 'Multistart',
                'dream': 'DREAM', 'npe': 'NPE'}
 TAB_NAME_MAX = 18
+# parameter name of each stitch factor -> the angle it joins (the Fit tab
+# lists a dataset's up to its number of angles)
+STITCH_NAMES = {'stack.' + a: stitch_index(a) for a in STITCH_PARAMS}
 
 
 class MultistartThread(QtCore.QThread):
@@ -1442,6 +1445,14 @@ class FitPanel:
         m = s.get('link')
         return m if m in sim.model_names() else sim.shown_model()
 
+    @staticmethod
+    def _angle_count(s):
+        """How many stitched angles dataset s has (fit.problem ANGLES),
+        0 without them."""
+        from fit.problem import angle_groups
+        tops = angle_groups([d.get('theta') for d in s['channels'].values()])
+        return 0 if tops is None else len(tops)
+
     def _model_params(self, model):
         """(every parameter name `model` can fit, {name: ticked Fit}), its
         stored dict's kept until that dict is replaced."""
@@ -1473,6 +1484,10 @@ class FitPanel:
                      if s['name'] in names and s.get('link') in models}
             for s in self._fit_sets():
                 got, on = self._model_params(self._link(s))
+                # the stitch factors of this dataset's angles only
+                k = self._angle_count(s)
+                got = [n for n in got if n not in STITCH_NAMES
+                       or STITCH_NAMES[n] <= k]
                 present[s['name']] = got
                 params += [n for n in got if n not in params]
                 for n in got:
@@ -1649,7 +1664,7 @@ class FitPanel:
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter('always')
                     fp = FitProblem(
-                        self._header_priors(s, self._set_stack(s)), data,
+                        self._dataset_stack(s, self._set_stack(s)), data,
                         cost, qmin, qmax, grid,
                         error_floor=self.fit_floor.value() / 100,
                         target=target,
@@ -1720,18 +1735,26 @@ class FitPanel:
         return notes
 
     @staticmethod
-    def _header_priors(s, st):
-        """st, or a copy of it with the Gaussian priors of dataset s's
-        QuickNXS header (tabs.experimental QUICKNXS) on the scale and the
+    def _dataset_stack(s, st):
+        """st, or a copy of it with dataset s's own stitch factors (values
+        and bounds, tabs.experimental STITCH FACTORS) and the Gaussian
+        priors of its QuickNXS header (QUICKNXS) on the scale and the
         stitch factors of its angles that have none of their own (a prior
         set or removed by hand stays)."""
-        from tabs.experimental import quicknxs_stitch_priors
+        from tabs.experimental import dataset_stitch, quicknxs_stitch_priors
+        own = dataset_stitch(s)
         path = next((d.get('path') for d in s['channels'].values()
                      if d.get('path')), None)
         head = quicknxs_stitch_priors(path) if path else None
-        if head is None:
+        if head is None and not own:
             return st
         st = copy.deepcopy(st)
+        for attr, v in own.items():
+            setattr(st, attr, float(v['value']))
+            e = st.fit.setdefault(attr, default_fit(attr))
+            e['min'], e['max'] = float(v['min']), float(v['max'])
+        if head is None:
+            return st
         taus = [('scale', head['plateau'])] + list(zip(
             STITCH_PARAMS, head['steps']))
         said = []
@@ -1814,7 +1837,9 @@ class FitPanel:
             k = self._set_index(sub.dataset_name) if sub.dataset_name \
                 else None
             out.append((m, rows, sub.dataset_name,
-                        None if k is None else self.sets[k].get('link')))
+                        None if k is None else self.sets[k].get('link'),
+                        None if k is None else
+                        copy.deepcopy(self.sets[k].get('stitch'))))
         return out
 
     def _send_values(self, problem, x, part, parent, title, bounds=None):
@@ -1855,6 +1880,7 @@ class FitPanel:
                 else None
             if i is not None:
                 self.sets[i]['link'] = m
+                self._send_stitch(self.sets[i], fitted, x, bounds)
             sent.append(m)
         if len(sent) == 1 and sent[0] != sim.shown_model():
             sim.switch_model(sim.model_names().index(sent[0]))
@@ -1866,6 +1892,27 @@ class FitPanel:
                 'parameter):\n\n' + '\n'.join(missing))
         self._made = made
         return sent
+
+    @staticmethod
+    def _send_stitch(s, fitted, x, bounds=None):
+        """The stitch factors among `fitted` [(name, index in x)] into
+        dataset s (tabs.experimental STITCH FACTORS): their values x, or
+        with bounds=(lo, hi) their bounds."""
+        from tabs.experimental import dataset_stitch
+        own = dataset_stitch(s)
+        for n, j in fitted:
+            a = n[len('stack.'):] if n in STITCH_NAMES else None
+            if a not in own:
+                continue
+            if bounds is None:
+                own[a]['value'] = float(x[j])
+            else:
+                own[a]['min'], own[a]['max'] = (float(bounds[0][j]),
+                                                float(bounds[1][j]))
+                own[a]['value'] = min(max(own[a]['value'], own[a]['min']),
+                                      own[a]['max'])
+        if own:
+            s['stitch'] = own
 
     def _to_models(self, models):
         """'model A' or 'models A, B (B new)' for a report."""
@@ -2485,7 +2532,7 @@ class FitPanel:
         if self._fit_start is None or self.busy():
             return
         sim = self.simulation
-        for m, rows, dataset, link in self._fit_start:
+        for m, rows, dataset, link, stitch in self._fit_start:
             if rows is None:
                 sim.remove_model(m)
             elif m in sim.model_names():
@@ -2499,6 +2546,10 @@ class FitPanel:
                     self.sets[i].pop('link', None)
                 else:
                     self.sets[i]['link'] = link
+                if stitch is None:
+                    self.sets[i].pop('stitch', None)
+                else:
+                    self.sets[i]['stitch'] = stitch
         self._fit_out.setText('Parameters and bounds restored to their '
                               'values before the fit.')
         self.btn_revert.setEnabled(False)
