@@ -536,3 +536,4 @@ def test_stitch_corrected_data(qapp):
     assert any(np.allclose(v[lab == 1], bg + (raw[lab == 1] - bg) / 1.05,
                            rtol=1e-12) for v in y if len(v) == len(raw))
     assert exp.session_state(str(HERE))['display']['corrected'] is True
+

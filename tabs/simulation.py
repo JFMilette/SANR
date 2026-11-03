@@ -20,7 +20,11 @@ shown one as it is and loads the other (restore_state, models=False), so
 each keeps its layers, general parameters, resolution, fit settings and
 selected layer; the polarisation, Q range and display are the tab's.  New
 takes no layer (empty_stack) with the shown model's other settings,
-Copy the whole model.  A session file is the shown model as before, the
+Copy the whole model.  Copy to… writes the shown model's parameter values
+and fit bounds (Fit ticks and priors if asked) into the models picked,
+matched by name, leaving the rest of them as it is (copy_parameters).
+An imported dataset gets a model of its own (tabs.experimental).  A
+session file is the shown model as before, the
 others under 'simulation' -> 'models'; switching is off while a fit runs.
 
 The thickness spread and the mixture of models (model.stack MIXTURE) have
@@ -1915,6 +1919,11 @@ class SimulationTab(QtWidgets.QWidget):
                  'substrate), this model\'s other settings', self.new_model),
                 ('copy', 'Copy', 'New model: a copy of this one',
                  self.copy_model),
+                ('copy_to', 'Copy to…', 'Copy this model\'s parameter '
+                 'values and fit bounds (and, if asked, Fit ticks and '
+                 'priors) into other models,\nmatched by name (layer and '
+                 'parameter); the other models keep everything else',
+                 self.copy_to_models),
                 ('rename', 'Rename…', 'Rename this model', self.rename_model),
                 ('delete', 'Delete', 'Delete this model', self.delete_model)):
             b = self.model_btns[key] = QtWidgets.QPushButton(label)
@@ -3136,8 +3145,9 @@ class SimulationTab(QtWidgets.QWidget):
         b.addItems([m['name'] for m in self._models])
         b.setCurrentIndex(self._model_index)
         b.blockSignals(False)
-        self.model_btns['delete'].setEnabled(
-            len(self._models) > 1 and not self._locked)
+        for key in ('delete', 'copy_to'):
+            self.model_btns[key].setEnabled(
+                len(self._models) > 1 and not self._locked)
         self.modelsChanged.emit()
 
     def model_names(self):
@@ -3280,6 +3290,107 @@ class SimulationTab(QtWidgets.QWidget):
         d, sim = self._shown_model()
         self._add_model(self._models[self._model_index]['name'] + ' copy', d,
                         sim['selected_layer'])
+
+    # what copy_to_models can copy: key, label, ticked by default
+    COPY_WHAT = (('values', 'values', True), ('bounds', 'fit bounds', True),
+                 ('ticks', 'Fit ticks', False), ('priors', 'priors', False))
+
+    def copy_to_models(self):
+        """Copy to…: the shown model's parameters into the models picked
+        (copy_parameters)."""
+        others = [n for n in self.model_names() if n != self.shown_model()]
+        if self._locked or not others:
+            return
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle('Copy %s to…' % self.shown_model())
+        v = QtWidgets.QVBoxLayout(dlg)
+        v.addWidget(QtWidgets.QLabel('Models to write into:'))
+        lst = QtWidgets.QListWidget()
+        for n in others:
+            it = QtWidgets.QListWidgetItem(n)
+            it.setFlags(it.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(QtCore.Qt.CheckState.Unchecked)
+            lst.addItem(it)
+        v.addWidget(lst)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel('Copy:'))
+        boxes = {}
+        for key, label, on in self.COPY_WHAT:
+            b = boxes[key] = QtWidgets.QCheckBox(label)
+            b.setChecked(on)
+            row.addWidget(b)
+        row.addStretch(1)
+        v.addLayout(row)
+        note = QtWidgets.QLabel(
+            'Parameters are matched by name (layer and parameter); one a '
+            'model lacks is skipped.  Stitch factors belong to the datasets '
+            'and are not copied.', wordWrap=True)
+        note.setProperty('role', 'muted')
+        v.addWidget(note)
+        bb = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        v.addWidget(bb)
+        if not dlg.exec():
+            return
+        targets = [lst.item(k).text() for k in range(lst.count())
+                   if lst.item(k).checkState() == QtCore.Qt.CheckState.Checked]
+        what = {k for k, b in boxes.items() if b.isChecked()}
+        if not targets or not what:
+            return
+        n, missing = self.copy_parameters(targets, what)
+        text = 'Copied %d parameter(s) of %s into %s.' % (
+            n, self.shown_model(), ', '.join(targets))
+        if any(missing.values()):
+            text += '\n\nNot in the model (skipped):\n' + '\n'.join(
+                '%s: %s' % (m, ', '.join(shown_names(x) for x in names))
+                for m, names in missing.items() if names)
+        QtWidgets.QMessageBox.information(self, 'Copy to', text)
+
+    def copy_parameters(self, targets, what=('values', 'bounds')):
+        """Write the shown model's parameters into models `targets`,
+        matched by name (fit.problem.parameter_names of
+        free_parameters(everything=True)): `what` of 'values', 'bounds',
+        'ticks' (Fit), 'priors'.  Ties (whose bounds follow their members)
+        and the stitch factors (the datasets') are left out.  Returns (how
+        many were written into each, {target: names it lacks})."""
+        from fit.problem import parameter_names
+        self.recompute()                     # the widgets into the stack
+        src = Stack.from_dict(self._shown_model()[0])
+
+        def entries(st):
+            every = [e for e in st.free_parameters(everything=True)
+                     if not (isinstance(e[0], tuple) and e[0][0] == 'tie')
+                     and e[1] not in STITCH_PARAMS]
+            return dict(zip(parameter_names(st, every), every))
+        source = entries(src)
+        missing = {}
+
+        def edit(st):
+            have = entries(st)
+            missing[name] = [n for n in source if n not in have]
+            for n, (i, attr, *_) in source.items():
+                if n not in have:
+                    continue
+                so, to = src.owner(i), st.owner(have[n][0])
+                se, te = so.fit_entry(attr), to.fit_entry(attr)
+                if 'values' in what:
+                    setattr(to, attr, getattr(so, attr))
+                if 'bounds' in what:
+                    te['min'], te['max'] = se['min'], se['max']
+                if 'ticks' in what:
+                    te['vary'] = bool(se.get('vary'))
+                if 'priors' in what:
+                    if se.get('prior') is not None:
+                        te['prior'] = copy.deepcopy(se['prior'])
+                    else:
+                        te.pop('prior', None)
+        for name in targets:
+            if name in self.model_names() and name != self.shown_model():
+                self._edit_stored(name, edit)
+        return len(source), missing
 
     def rename_model(self):
         if self._locked:

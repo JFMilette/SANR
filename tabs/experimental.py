@@ -36,7 +36,10 @@ computes them (model_grid).  Starting a fit gives every live dataset the
 fitted channels' pairs (those of the first dataset fitted with its model),
 so what is drawn against the data is exactly what is fitted.  A measured
 dataset is linked to the model it is fitted with in the Fit tab (fit.panel
-MODELS; 'link', saved in the session).  It is recomputed whenever the
+MODELS; 'link', saved in the session).  Importing a file into a new
+dataset makes a model named after it, a copy of the shown model, and
+links the dataset to it (an existing model of that name is linked
+instead).  It is recomputed whenever the
 simulation changes, drawn as lines without error bars, and can be frozen
 into a static copy from its context menu; the frozen copy is still drawn as
 lines and keeps the model it was computed from (Stack.to_dict, saved in the
@@ -1718,6 +1721,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
             return
         if i is None:
             i = self.new_set(name, refresh=False)
+            self._model_for_import(i)
         self.sets[i]['channels'][ch] = dict(dlg.data, path=path,
                                             q_path=dlg.q_path,
                                             start=dlg.start.value() - 1,
@@ -1728,6 +1732,18 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
             self.last_q_path = dlg.q_path
         self.refresh_tree((i, ch))
         self.redraw()
+
+    def _model_for_import(self, i):
+        """Dataset i, just made by an import, linked to the model named
+        after it (see MODELS): made as a copy of the shown model when there
+        is none, not shown."""
+        sim = self.simulation
+        if sim is None:
+            return
+        name = self.sets[i]['name']
+        if name not in sim.model_names():
+            name = sim.add_model(name, sim.model_dict(sim.shown_model()))
+        self.sets[i]['link'] = name
 
     def _confirm_replace(self, i, ch):
         s = self.sets[i]
