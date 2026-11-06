@@ -65,12 +65,12 @@ jobs:
       - name: Build (macOS)
         if: runner.os == 'macOS'
         run: python make_mac_installer.py --strict
+      # one path, so the artifact holds the installer itself at its top
+      # (several paths keep their folders from their common one, build/)
       - uses: actions/upload-artifact@v4
         with:
           name: SANR-${{ matrix.name }}
-          path: |
-            build/windows/installer/*.exe
-            build/macos/installer/*.dmg
+          path: build/${{ runner.os == 'macOS' && 'macos' || 'windows' }}/installer/*
           if-no-files-found: error
 
   release:
@@ -85,6 +85,16 @@ jobs:
         with:
           path: installers
           merge-multiple: true
+      # every installer, wherever it landed; none is an error, not a release
+      # without assets
+      - name: The installers
+        shell: bash
+        run: |
+          find installers -type f
+          n=$(find installers -type f \( -name '*.exe' -o -name '*.dmg' \) | wc -l)
+          test "$n" -eq 3 || { echo "expected 3 installers, found $n"; exit 1; }
+          mkdir -p assets
+          find installers -type f \( -name '*.exe' -o -name '*.dmg' \) -exec mv {} assets/ \;
       - name: Draft release
         uses: softprops/action-gh-release@v2
         with:
@@ -92,4 +102,5 @@ jobs:
           name: SANR ${{ github.ref_name }}
           body_path: installer/release-notes.md
           generate_release_notes: true
-          files: installers/*
+          files: assets/*
+          fail_on_unmatched_files: true
