@@ -35,7 +35,7 @@ class LayerCSVExporter(CSVExporter):
             self.data.append([list(layer_at(z))])
         sep = ',' if self.params['separator'] == 'comma' else '\t'
         columns = [column for dataset in self.data for column in dataset]
-        with open(fileName, 'w', newline='') as f:
+        with open(fileName, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f, delimiter=sep, quoting=csv.QUOTE_MINIMAL)
             writer.writerow(self.header)
             for row in itertools.zip_longest(*columns, fillvalue=''):

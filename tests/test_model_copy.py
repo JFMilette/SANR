@@ -160,8 +160,11 @@ def test_copy_general_parameters(qapp):
     assert d['scale'] == pytest.approx(1.07)
     assert d['background'] == pytest.approx(3e-7)
     assert d['tail'] == 4.0
-    assert d['resolution']['tof_dlambda'] == pytest.approx(0.0217)
+    assert d['resolution'] == before['resolution']   # its own box
     assert d['layers'][d['thickness_spread_target']]['name'] == layer
+    sim.copy_parameters(['Model 1'], {'resolution'})
+    d = sim.stored_model('Model 1')
+    assert d['resolution']['tof_dlambda'] == pytest.approx(0.0217)
 
 
 def test_session_opens_collapsed(qapp):
@@ -185,3 +188,32 @@ def test_session_opens_collapsed(qapp):
                    for k in range(t.topLevelItemCount()))
     exp.refresh_tree()                             # stays so
     assert not t.topLevelItem(0).isExpanded()
+
+
+def test_copy_layers(qapp):
+    """'layers' replaces the target's layers (and ties) by copies of the
+    shown model's; its general parameters stay unless asked."""
+    import copy
+    from tabs import SimulationTab
+    sim = SimulationTab()
+    sim.copy_model()                       # 'Model 1 copy', shown
+    st = sim.stack
+    extra = copy.deepcopy(st.layers[1])
+    extra.name = 'extra'
+    extra.thickness = 12.5
+    st.layers.insert(2, extra)
+    st.layers[1].fit_entry('thickness').update(vary=True)
+    sim.scale.setValue(1.07)
+    sim.refresh_list(select=1)
+    sim.recompute()
+    before = sim.stored_model('Model 1')
+    sim.copy_parameters(['Model 1'], {'values'})
+    assert len(sim.stored_model('Model 1')['layers']) == \
+        len(before['layers'])                     # not asked
+    sim.copy_parameters(['Model 1'], {'layers'})
+    d = sim.stored_model('Model 1')
+    assert [l['name'] for l in d['layers']] == [l.name for l in st.layers]
+    lay = next(l for l in d['layers'] if l['name'] == 'extra')
+    assert lay['thickness'] == 12.5
+    assert d['layers'][1]['fit']['thickness']['vary']
+    assert d['scale'] == before['scale']          # general not asked

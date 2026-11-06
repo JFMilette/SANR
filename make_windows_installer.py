@@ -1,12 +1,15 @@
 """
-Build SANR-<version>-setup.exe, a Windows installer of SANR.  Run on
-Windows (PyInstaller cannot build a Windows program elsewhere):
+Build SANR-<version>-<x64|arm64>-setup.exe, a Windows installer of SANR
+for the architecture of the Python running it (an ARM64 Python builds an
+ARM64 SANR, which installs only on ARM64 Windows).  Run on Windows
+(PyInstaller cannot build a Windows program elsewhere):
 
     pip install -r requirements.txt pyinstaller
     python make_windows_installer.py [--version 1.2] [--strict]
 
-Also needs Inno Setup 6 (https://jrsoftware.org/isinfo.php; its ISCC.exe on
-the PATH or in its default folder) and, for the compiled transfer-matrix
+Also needs Inno Setup 6 (https://jrsoftware.org/isinfo.php, or winget
+install JRSoftware.InnoSetup; its ISCC.exe on the PATH or in its default
+folder, for every user or the user's own) and, for the compiled transfer-matrix
 kernel, the Microsoft C++ Build Tools.  Without them the kernel is left
 out and SANR uses its numpy product (same results, ~2-4x slower fits);
 --strict stops instead (the GitHub workflow uses it).
@@ -27,6 +30,7 @@ last git tag (v1.2 -> 1.2) or the date.
 import argparse
 import datetime
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -40,7 +44,14 @@ EXCLUDE = ('matplotlib', 'tkinter', 'pytest', 'Cython', 'IPython',
            'PyQt5', 'PySide6', 'PySide2', 'torch', 'tensorboard',
            'tensorflow', 'pandas', 'jupyter_rfb', 'notebook')
 ISCC = (r'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
-        r'C:\Program Files\Inno Setup 6\ISCC.exe')
+        r'C:\Program Files\Inno Setup 6\ISCC.exe',
+        # installed for the user only (e.g. winget --scope user)
+        os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Programs',
+                     'Inno Setup 6', 'ISCC.exe'))
+# Inno Setup's architecture of the program PyInstaller builds, that of the
+# Python running this script: an ARM64 build installs only on ARM64 Windows
+INNO_ARCH = {'arm64': 'arm64', 'amd64': 'x64compatible',
+             'x86_64': 'x64compatible'}
 
 
 def run(cmd, **kw):
@@ -75,26 +86,28 @@ def make_ico(path):
         path, sizes=[(s, s) for s in (16, 24, 32, 48, 64, 128, 256)])
 
 
-def freeze(ico):
+def freeze(ico, out=OUT, extra=()):
+    """PyInstaller's one-folder SANR in out/dist (on macOS also
+    out/dist/SANR.app); returns out/dist."""
     cmd = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean',
            '--windowed', '--name', 'SANR', '--icon', ico,
            '--add-data', os.pathsep.join([os.path.join(ROOT, 'icons'),
                                           'icons']),
-           '--distpath', os.path.join(OUT, 'dist'),
-           '--workpath', os.path.join(OUT, 'work'),
-           '--specpath', OUT]
+           '--distpath', os.path.join(out, 'dist'),
+           '--workpath', os.path.join(out, 'work'),
+           '--specpath', out, *extra]
     for m in EXCLUDE:
         cmd += ['--exclude-module', m]
     if run(cmd + [os.path.join(ROOT, 'main.py')]).returncode:
         sys.exit('PyInstaller failed')
-    return os.path.join(OUT, 'dist', 'SANR')
+    return os.path.join(out, 'dist')
 
 
-def self_test(folder, strict):
-    report = os.path.join(OUT, 'self-test.txt')
+def self_test(exe, strict, out=OUT):
+    """SANR --self-test (selftest.py) of the built program `exe`."""
+    report = os.path.join(out, 'self-test.txt')
     if os.path.exists(report):
         os.remove(report)
-    exe = os.path.join(folder, 'SANR.exe' if os.name == 'nt' else 'SANR')
     env = dict(os.environ, QT_QPA_PLATFORM='offscreen')
     code = run([exe, '--self-test', report], env=env, timeout=300).returncode
     text = open(report, encoding='utf-8').read() \
@@ -112,13 +125,19 @@ def installer(folder, ver, ico):
     if iscc is None:
         sys.exit('Inno Setup 6 (ISCC.exe) not found: install it from '
                  'https://jrsoftware.org/isinfo.php')
+    machine = platform.machine().lower()
+    arch = INNO_ARCH.get(machine)
+    if arch is None:
+        sys.exit('no installer for a %s Python' % machine)
     out = os.path.join(OUT, 'installer')
+    name = 'SANR-%s-%s-setup' % (ver, 'arm64' if arch == 'arm64' else 'x64')
     r = run([iscc, '/DAppVersion=' + ver, '/DSourceDir=' + folder,
-             '/DOutputDir=' + out, '/DIconFile=' + ico,
+             '/DOutputDir=' + out, '/DIconFile=' + ico, '/DArch=' + arch,
+             '/DOutputName=' + name,
              os.path.join(ROOT, 'installer', 'sanr.iss')])
     if r.returncode:
         sys.exit('Inno Setup failed')
-    return os.path.join(out, 'SANR-%s-setup.exe' % ver)
+    return os.path.join(out, name + '.exe')
 
 
 def main():
@@ -136,8 +155,9 @@ def main():
     build_kernel(a.strict)
     ico = os.path.join(OUT, 'SANR.ico')
     make_ico(ico)
-    folder = freeze(ico)
-    self_test(folder, a.strict)
+    folder = os.path.join(freeze(ico), 'SANR')
+    self_test(os.path.join(folder, 'SANR.exe' if os.name == 'nt' else 'SANR'),
+              a.strict)
     if a.no_installer:
         print('SANR built in', folder)
         return

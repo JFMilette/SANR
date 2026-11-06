@@ -1,5 +1,5 @@
 ; Inno Setup 6 script of the SANR installer: packs the PyInstaller folder
-; that make_windows_installer.py builds (it passes the four defines below).
+; that make_windows_installer.py builds (it passes the defines below).
 
 #ifndef AppVersion
   #define AppVersion "0.0"
@@ -12,6 +12,14 @@
 #endif
 #ifndef IconFile
   #define IconFile "..\build\windows\SANR.ico"
+#endif
+; the architecture SANR was built for: x64compatible, or arm64 for a build
+; by an ARM64 Python (it runs only on ARM64 Windows)
+#ifndef Arch
+  #define Arch "x64compatible"
+#endif
+#ifndef OutputName
+  #define OutputName "SANR-" + AppVersion + "-setup"
 #endif
 
 [Setup]
@@ -27,10 +35,10 @@ DisableProgramGroupPage=yes
 ; installs for the user without administrator rights, or for everyone
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed={#Arch}
+ArchitecturesInstallIn64BitMode={#Arch}
 OutputDir={#OutputDir}
-OutputBaseFilename=SANR-{#AppVersion}-setup
+OutputBaseFilename={#OutputName}
 SetupIconFile={#IconFile}
 UninstallDisplayIcon={app}\SANR.exe
 Compression=lzma2/max

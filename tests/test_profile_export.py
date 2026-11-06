@@ -42,7 +42,7 @@ def export(plot, tmp_path):
     assert cls == [plot_export.LayerCSVExporter]       # in place of it
     out = tmp_path / 'profile.csv'
     cls[0](plot).export(str(out))
-    lines = out.read_text().splitlines()
+    lines = out.read_text(encoding='utf-8').splitlines()
     rows = [l.split(',') for l in lines[1:]]
     return lines[0].split(','), len(rows), rows
 

@@ -144,7 +144,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not path:
             return
         try:
-            with open(path) as f:
+            with open(path, encoding='utf-8') as f:
                 d = json.load(f)
             missing = self._restore(d, os.path.dirname(path))
         except Exception as exc:
@@ -298,7 +298,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 os.path.dirname(os.path.abspath(path)))
             d['fit_tabs'], running = self.experimental.fit_tabs_state()
             text = json.dumps(d, indent=2, default=_plain)
-            with open(path, 'w') as f:
+            with open(path, 'w', encoding='utf-8') as f:
                 f.write(text)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(
@@ -381,8 +381,25 @@ def set_macos_app_name(name):
         pass
 
 
+def set_windows_app_id(app_id):
+    """Group SANR's windows under its own task-bar entry, with its icon:
+    Windows takes the task-bar icon from the process's AppUserModelID,
+    which for `python main.py` is python.exe's (the Python icon, whatever
+    setWindowIcon says).  Set before any window exists; does nothing
+    elsewhere and never stops the app from starting."""
+    if sys.platform != 'win32':
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            ctypes.c_wchar_p(app_id))
+    except Exception:                   # cosmetic only
+        pass
+
+
 def main():
     set_macos_app_name('SANR')          # before the QApplication
+    set_windows_app_id('uOttawa.SANR')
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName('SANR')
     # every window's icon, and the Dock / task-bar icon

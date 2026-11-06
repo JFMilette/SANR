@@ -4,6 +4,16 @@
 # setuptools down from requirements.txt's 84 to 81, which still builds the
 # compiled transfer product).  fit.npe.train is written against sbi 0.27.0;
 # torch on the CPU.
+#
+# Windows on ARM64: no torch for Python 3.14, no torch 2.12.1, no
+# scikit-learn 1.7.2 and no grpcio (tensorboard's, unused by sbi) at all.
+# Use Python 3.13 ARM64 for the project's .venv:
+#   py -3.13-arm64 -m venv .venv
+#   .venv\Scripts\python -m pip install -r requirements.txt
+#   .venv\Scripts\python -m pip install torch==2.12.0 --index-url https://download.pytorch.org/whl/cpu
+#   .venv\Scripts\python -m pip install --no-deps sbi==0.27.0 tensorboard absl-py markdown protobuf tensorboard-data-server werkzeug joblib cloudpickle nflows "scikit-learn>=1.8" narwhals threadpoolctl skorch tabulate tqdm "zuko>=1.2.0"
+#   .venv\Scripts\python setup.py build_ext --inplace
+# (pip check then reports only tensorboard's missing grpcio)
 torch==2.12.1
 sbi==0.27.0
 scikit-learn==1.7.2

@@ -57,20 +57,90 @@ def kernel(q, sigma, mode=3):
         raise ValueError('resolution sigma must be finite and >= 0')
     if N < (4 if mode == 3 else 2):
         return sparse.identity(N, format='csr')
-    rows, cols, vals = [], [], []
+    key = (q.tobytes(), dq.tobytes(), mode)
+    W = _CACHE.pop(key, None)
+    if W is None:
+        W = _build(q, dq, mode)
+    _CACHE[key] = W                          # the most recent last
+    total = sum(w.nnz for w in _CACHE.values())
+    while total > CACHE_NNZ and len(_CACHE) > 1:
+        total -= _CACHE.pop(next(iter(_CACHE))).nnz
+    return W
+
+
+# kernels already built, shared by every stack (a model switch or a live
+# curve builds new Stack objects, whose own caches start empty): (q, sigma,
+# mode) -> W, least recently used first, at most CACHE_NNZ stored weights
+# in all (about 12 bytes each) beside the newest
+_CACHE = {}
+CACHE_NNZ = 12_000_000
+
+
+def _build(q, dq, mode):
+    N = len(q)
+    rows, cols, vals = [], [], []        # scalars
+    blocks = []                          # (row, cols array, weights array)
 
     def add(i, j, w):
         rows.append(i)
         cols.append(j)
         vals.append(w)
 
+    def add_many(i, js, ws):
+        if len(js):
+            blocks.append((i, js, ws))
+
     if mode == 1:
         _mode1(q, dq, add)
     elif mode == 2:
-        _mode2(q, dq, add)
+        _mode2(q, dq, add, add_many)
     else:
-        _mode3(q, dq, add)
-    return sparse.csr_matrix((vals, (rows, cols)), shape=(N, N))
+        _mode3(q, dq, add, add_many)
+    r = [np.asarray(rows, dtype=np.int64)]
+    c = [np.asarray(cols, dtype=np.int64)]
+    v = [np.asarray(vals, dtype=float)]
+    for i, js, ws in blocks:
+        r.append(np.full(len(js), i, dtype=np.int64))
+        c.append(np.asarray(js, dtype=np.int64))
+        v.append(ws)
+    return sparse.csr_matrix(
+        (np.concatenate(v), (np.concatenate(r), np.concatenate(c))),
+        shape=(N, N))
+
+
+def _side(i, q, js, dls, ts, ss, sp, to_end, end, d_end, add_many):
+    """One side of row i, as the loops of _mode2 / _mode3 walk it: the
+    neighbours js (walked outward from i, at least one) while
+    |q_j - q_i| <= ts, each with its spacing dls; if js run `to_end` (the
+    last neighbour the loop takes before its tail) and every one is
+    within, the constant tail past the end point `end` (spacing d_end)
+    goes on from the last of them.  The same operations as the loops, only
+    on arrays: qq is |q_i - q_j|, the tail's qq a running sum
+    (np.add.accumulate adds in order, as qq += dl does), the weights
+    exp(-qq^2 / ss) * dl / sp."""
+    if not len(js):
+        return
+    qq = np.abs(q[i] - q[js])
+    keep = np.logical_and.accumulate(qq <= ts)
+    k = int(keep.sum())
+    if k:
+        add_many(i, js[:k], np.exp(-qq[:k] * qq[:k] / ss) * dls[:k] / sp)
+    if k < len(js) or not to_end:
+        return
+    last = qq[-1]
+    m = int((ts - last) / d_end) + 2
+    tail = np.add.accumulate(np.concatenate(([last], np.full(m, d_end))))[1:]
+    tail = tail[np.logical_and.accumulate(tail <= ts)]
+    if len(tail):
+        add_many(i, np.full(len(tail), end),
+                 np.exp(-tail * tail / ss) * d_end / sp)
+
+
+def _window(q, i, ts):
+    """Indices lo, hi bracketing every j with |q_j - q_i| <= ts (with room
+    to spare: _side decides each one exactly)."""
+    return (int(np.searchsorted(q, q[i] - 2 * ts - 1e-300, 'left')),
+            int(np.searchsorted(q, q[i] + 2 * ts + 1e-300, 'right')))
 
 
 def _mode1(q, dq, add):
@@ -114,40 +184,25 @@ def _tail(i, j, qq, dl, ts, ss, sp, add):
         qq += dl
 
 
-def _mode2(q, dq, add):
+def _mode2(q, dq, add, add_many):
     N = len(q)
+    # the spacing to the neighbour on the side of q_i: below i, j's gap
+    # up (q_j+1 - q_j); above it, j's gap down (q_j - q_j-1)
+    gap = np.abs(np.diff(q))
+    up = np.append(gap, 0.0)
+    down = np.insert(gap, 0, 0.0)
+    d0, dn = abs(q[1] - q[0]), abs(q[N - 1] - q[N - 2])
     for i in range(1, N - 1):
         dqc = abs(q[i + 1] - q[i - 1]) / 2
         if _skip(i, dqc, dq, add):
             continue
         sp, ss, ts = dq[i] * _SQRT2PI, 2 * dq[i]**2, 3 * dq[i]
         add(i, i, dqc / sp)
-        k, qq, j = 1, abs(q[i] - q[i - 1]), i - 1
-        dl = qq
-        while qq <= ts:
-            add(i, j, np.exp(-qq * qq / ss) * dl / sp)
-            k += 1
-            if i - k < 0:
-                dl = abs(q[1] - q[0])
-                qq += dl
-                j = 0
-            else:
-                qq = abs(q[i] - q[i - k])
-                dl = abs(q[i - k + 1] - q[i - k])
-                j = i - k
-        k, qq, j = 1, abs(q[i + 1] - q[i]), i + 1
-        dl = qq
-        while qq <= ts:
-            add(i, j, np.exp(-qq * qq / ss) * dl / sp)
-            k += 1
-            if i + k > N - 1:
-                dl = abs(q[N - 1] - q[N - 2])
-                qq += dl
-                j = N - 1
-            else:
-                qq = abs(q[i + k] - q[i])
-                dl = abs(q[i + k] - q[i + k - 1])
-                j = i + k
+        lo, hi = _window(q, i, ts)
+        js = np.arange(i - 1, lo - 1, -1)                # i-1 down to lo
+        _side(i, q, js, up[js], ts, ss, sp, lo == 0, 0, d0, add_many)
+        js = np.arange(i + 1, min(hi, N))                # i+1 up
+        _side(i, q, js, down[js], ts, ss, sp, hi >= N, N - 1, dn, add_many)
     # first point
     dqc = abs(q[1] - q[0])
     if not _skip(0, dqc, dq, add):
@@ -180,43 +235,26 @@ def _mode2(q, dq, add):
         _tail(n, n, dl, dl, ts, ss, sp, add)
 
 
-def _mode3(q, dq, add):
+def _mode3(q, dq, add, add_many):
     N = len(q)
     n = N - 1
+    # each point's own centre spacing, half the distance between its two
+    # neighbours (1 .. n-1; the ends unused)
+    mid = np.zeros(N)
+    mid[1:-1] = np.abs(q[2:] - q[:-2]) / 2
+    d0, dn = abs(q[1] - q[0]), abs(q[n] - q[n - 1])
     for i in range(2, N - 2):
         dqc = abs(q[i + 1] - q[i - 1]) / 2
         if _skip(i, dqc, dq, add):
             continue
         sp, ss, ts = dq[i] * _SQRT2PI, 2 * dq[i]**2, 3 * dq[i]
         add(i, i, dqc / sp)
-        k, qq, j = 1, abs(q[i] - q[i - 1]), i - 1
-        dl = abs(q[i] - q[i - 2]) / 2
-        while qq <= ts:
-            add(i, j, np.exp(-qq * qq / ss) * dl / sp)
-            k += 1
-            ik = i - k
-            if ik < 1:
-                dl = abs(q[1] - q[0])
-                qq += dl
-                j = 0
-            else:
-                qq = abs(q[i] - q[ik])
-                dl = abs(q[ik + 1] - q[ik - 1]) / 2
-                j = ik
-        k, qq, j = 1, abs(q[i + 1] - q[i]), i + 1
-        dl = abs(q[i + 2] - q[i]) / 2
-        while qq <= ts:
-            add(i, j, np.exp(-qq * qq / ss) * dl / sp)
-            k += 1
-            ik = i + k
-            if ik > n - 1:
-                dl = abs(q[n] - q[n - 1])
-                qq += dl
-                j = n
-            else:
-                qq = abs(q[ik] - q[i])
-                dl = abs(q[ik + 1] - q[ik - 1]) / 2
-                j = ik
+        lo, hi = _window(q, i, ts)
+        lo = max(lo, 1)
+        js = np.arange(i - 1, lo - 1, -1)                # i-1 down to 1
+        _side(i, q, js, mid[js], ts, ss, sp, lo == 1, 0, d0, add_many)
+        js = np.arange(i + 1, min(hi, n))                # i+1 up to n-1
+        _side(i, q, js, mid[js], ts, ss, sp, hi >= n, n, dn, add_many)
     # first point
     dqc = abs(q[1] - q[0])
     if not _skip(0, dqc, dq, add):

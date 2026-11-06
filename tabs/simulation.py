@@ -21,8 +21,10 @@ each keeps its layers, general parameters, resolution, fit settings and
 selected layer; the polarisation, Q range and display are the tab's.  New
 takes no layer (empty_stack) with the shown model's other settings,
 Copy the whole model.  Copy to… writes the shown model's parameter values
-and fit bounds (Fit ticks and priors if asked) into the models picked,
-matched by name, leaving the rest of them as it is (copy_parameters).
+and fit bounds (Fit ticks, priors, general parameters if asked) into the
+models picked, matched by name, leaving the rest of them as it is; or, if
+asked, replaces their layers by copies of the shown model's
+(copy_parameters).
 Every imported dataset has a model of its own, named after it
 (tabs.experimental DATASET MODELS; dataset_model): it cannot be renamed or
 deleted here, only by renaming or removing its dataset.  A session file is the shown model as before, the
@@ -1924,9 +1926,10 @@ class SimulationTab(QtWidgets.QWidget):
                 ('copy', 'Copy', 'New model: a copy of this one',
                  self.copy_model),
                 ('copy_to', 'Copy to…', 'Copy this model\'s parameter '
-                 'values and fit bounds (and, if asked, Fit ticks and '
-                 'priors) into other models,\nmatched by name (layer and '
-                 'parameter); the other models keep everything else',
+                 'values and fit bounds (and, if asked, Fit ticks, '
+                 'priors, general parameters or the layers themselves) into '
+                 'other models,\nmatched by name (layer and parameter); the '
+                 'other models keep everything else',
                  self.copy_to_models),
                 ('rename', 'Rename…', 'Rename this model', self.rename_model),
                 ('delete', 'Delete', 'Delete this model', self.delete_model)):
@@ -3316,13 +3319,16 @@ class SimulationTab(QtWidgets.QWidget):
     # what copy_to_models can copy: key, label, ticked by default
     COPY_WHAT = (('values', 'values', True), ('bounds', 'fit bounds', True),
                  ('ticks', 'Fit ticks', False), ('priors', 'priors', False),
-                 ('general', 'general parameters', False))
+                 ('general', 'general parameters', False),
+                 ('resolution', 'resolution', False),
+                 ('layers', 'layers', False))
     # the General parameters page's settings copy_parameters copies with
-    # 'general' (besides the stack's own parameters, STACK_FIT_PARAMS)
+    # 'general' (besides the stack's own parameters, STACK_FIT_PARAMS); the
+    # resolution has its own box ('resolution')
     GENERAL_SETTINGS = ('tail', 'q_in_fronting', 'roughness_scheme',
                         'interface_order', 'magnetic_smearing',
                         'step_fallback', 'licorne_renorm', 'licorne_outer',
-                        'resolution', 'thickness_spread_nodes',
+                        'thickness_spread_nodes',
                         'thickness_spread_dist')
 
     def copy_to_models(self):
@@ -3355,13 +3361,24 @@ class SimulationTab(QtWidgets.QWidget):
             'Also the General parameters page: scale, background, Q shift '
             'and thickness spread (as the boxes beside say),\nwindow tail, '
             'Q reference, roughness scheme, interfaces, M smearing, the '
-            'Licorne options, the resolution\nand the spread\'s '
-            'distribution, nodes and layer.  Not the Q range (the tab\'s) '
-            'nor the mixture.')
+            'Licorne options\nand the spread\'s distribution, nodes and '
+            'layer.  Not the resolution (its own box), the Q range (the '
+            'tab\'s) nor the mixture.')
+        boxes['resolution'].setToolTip(
+            'Also the resolution settings (on / off, mode and its '
+            'parameters), whatever the general parameters box says.')
+        boxes['layers'].setToolTip(
+            'Replace each model\'s layers (and their ties) by a copy of '
+            'this model\'s: every layer with its values, bounds, Fit ticks '
+            'and priors.\nThe stack\'s own parameters and settings follow '
+            'the other boxes.')
         note = QtWidgets.QLabel(
             'Parameters are matched by name (layer and parameter); one a '
             'model lacks is skipped.  Stitch factors belong to the datasets '
-            'and are not copied; the general parameters only if ticked.',
+            'and are not copied; the general parameters and the resolution '
+            'only if ticked.  '
+            'With layers ticked, each model\'s layers are replaced by a copy '
+            'of these.',
             wordWrap=True)
         note.setProperty('role', 'muted')
         v.addWidget(note)
@@ -3379,7 +3396,8 @@ class SimulationTab(QtWidgets.QWidget):
         if not targets or not what:
             return
         n, missing = self.copy_parameters(targets, what)
-        text = 'Copied %d parameter(s) of %s into %s.' % (
+        text = 'Copied %s%d parameter(s) of %s into %s.' % (
+            'the layers and ' if 'layers' in what else '',
             n, self.shown_model(), ', '.join(targets))
         if any(missing.values()):
             text += '\n\nNot in the model (skipped):\n' + '\n'.join(
@@ -3393,7 +3411,11 @@ class SimulationTab(QtWidgets.QWidget):
         free_parameters(everything=True)): `what` of 'values', 'bounds',
         'ticks' (Fit), 'priors', and 'general': the stack's own parameters
         (scale, background, Q shift, thickness spread; left out without it)
-        and GENERAL_SETTINGS, the spread's layer matched by name.  Ties
+        and GENERAL_SETTINGS, the spread's layer matched by name;
+        'resolution': the resolution settings; 'layers':
+        the target's layers and ties replaced by copies of the shown
+        model's first (its spread's layers then matched by name, else the
+        whole stack).  Ties
         (whose bounds follow their members) and the stitch factors (the
         datasets') are left out.  Returns (how many parameters were written
         into each, {target: names it lacks})."""
@@ -3413,6 +3435,20 @@ class SimulationTab(QtWidgets.QWidget):
         missing = {}
 
         def edit(st):
+            if 'layers' in what:
+                old = st.layers
+                t = st.thickness_spread_target
+                st.layers = copy.deepcopy(src.layers)
+                st.ties = copy.deepcopy(src.ties)
+                interior = list(enumerate(st.layers))[1:-1]
+                if isinstance(t, (list, tuple)):
+                    names = {old[i].name for i in t if i < len(old)}
+                    t = [i for i, l in interior if l.name in names] or 'stack'
+                elif t != 'stack':
+                    t = next((i for i, l in interior
+                              if t < len(old) and l.name == old[t].name),
+                             'stack')
+                st.set_spread_target(t)
             have = entries(st)
             missing[name] = [n for n in source if n not in have]
             for n, (i, attr, *_) in source.items():
@@ -3431,6 +3467,8 @@ class SimulationTab(QtWidgets.QWidget):
                         te['prior'] = copy.deepcopy(se['prior'])
                     else:
                         te.pop('prior', None)
+            if 'resolution' in what:
+                st.resolution = copy.deepcopy(src.resolution)
             if general:
                 for a in self.GENERAL_SETTINGS:
                     setattr(st, a, copy.deepcopy(getattr(src, a)))
@@ -3451,6 +3489,10 @@ class SimulationTab(QtWidgets.QWidget):
         for name in targets:
             if name in self.model_names() and name != self.shown_model():
                 self._edit_stored(name, edit)
+                if 'layers' in what:                 # its selection in range
+                    m = next(m for m in self._models if m['name'] == name)
+                    m['selected_layer'] = min(m.get('selected_layer', 1),
+                                              len(src.layers) - 1)
         return len(source), missing
 
     def rename_model(self):

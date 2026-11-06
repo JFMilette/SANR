@@ -34,21 +34,34 @@ python make_app.py             # macOS: build SANR.app (Dock name and icon), the
 python -m pytest tests         # the tests (pip install pytest first)
 ```
 
-## Windows installer
+## Installers
 
-`SANR-<version>-setup.exe` installs SANR as a Windows program (Start menu,
-optional desktop icon, uninstaller, no administrator rights needed).  It is
-built on Windows, so GitHub builds it: **Actions → Windows installer → Run
-workflow** (or push a tag `v1.0`, which also makes a draft release); the
-installer is the run's artifact `SANR-windows-installer`.  On a Windows PC
-with Python 3.12, Inno Setup 6 and the Microsoft C++ Build Tools:
+Three installers, each built on its own platform:
+
+| File | For | Built by |
+|---|---|---|
+| `SANR-<version>-x64-setup.exe` | Windows on Intel / AMD | `make_windows_installer.py` |
+| `SANR-<version>-arm64-setup.exe` | Windows on ARM | `make_windows_installer.py` (ARM64 Python) |
+| `SANR-<version>-macos-arm64.dmg` | Macs with Apple silicon | `make_mac_installer.py` |
+
+The Windows installers put SANR in the Start menu (optional desktop icon,
+uninstaller, no administrator rights needed); the disk image holds
+`SANR.app` to drag to Applications (not signed by an Apple developer: the
+first time, System Settings → Privacy & Security → Open Anyway).
+
+GitHub builds all three: **Actions → Installers → Run workflow** (each is
+an artifact of the run), or push a tag `v1.0`, which also attaches them to
+a draft release whose text is `installer/release-notes.md`.  By hand, on
+Windows (with Inno Setup 6 and the Microsoft C++ Build Tools) or macOS
+(with the Xcode command-line tools):
 
 ```bat
 pip install -r requirements.txt pyinstaller
-python make_windows_installer.py
+python make_windows_installer.py      (Windows)
+python make_mac_installer.py          (macOS)
 ```
 
-The installed program keeps its sessions in `Documents\SANR`.
+The installed program keeps its sessions in `Documents/SANR`.
 
 ## Layout
 
@@ -84,6 +97,6 @@ The installed program keeps its sessions in `Documents\SANR`.
 | **`scripts/plot_stack.py`** | Stand-alone matplotlib plot of a stack's profile and reflectivity |
 | `scripts/make_rms_reference.py` | Writes `tests/data/rms_additive_reference.npz` |
 | `make_app.py` | Builds `SANR.app` (macOS launcher with the app's name and icon; machine-specific, not in git) |
-| `make_windows_installer.py`, `installer/sanr.iss`, `.github/workflows/windows-installer.yml` | The Windows installer: PyInstaller, then Inno Setup, on GitHub's Windows machines |
+| `make_windows_installer.py`, `make_mac_installer.py`, `installer/`, `.github/workflows/windows-installer.yml` | The installers: PyInstaller, then Inno Setup (Windows x64 and ARM64) or a disk image (macOS), on GitHub's machines; `installer/release-notes.md` is a release's text |
 | `selftest.py` | `SANR --self-test <file>`: checks a built program (kernel, a reflectivity, the worker pool) |
 | `sessions/` | Sessions and saved DREAM chains (File → Open session); `session_Cr2Te3*.json` are the examples in git, the rest stay local |
