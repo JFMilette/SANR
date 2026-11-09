@@ -2024,7 +2024,8 @@ class FitPanel:
         views = [dict(name=s['name'],
                       data=self._fitted_points(s, qmin, qmax, problem.cost),
                       vectors=dict(self.sim_vectors(), **vec),
-                      grids=model_grid(sim.stack, Q, s['channels'], grid))
+                      grids=model_grid(sim.stack, Q, s['channels'], grid),
+                      qrange=[qmin, qmax])
                  for s, vec, data, grid in inputs]
         title = ' + '.join(s['name'] for s, *_ in inputs)
         self.fit_window.start(

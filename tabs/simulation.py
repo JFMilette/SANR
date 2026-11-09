@@ -795,8 +795,9 @@ class LayerLabels:
 # attr, label, lo, hi, decimals, step, suffix, display = stored * scale
 EDITOR_PARAMS = [
     ('thickness', 'Thickness (Å)', 0.0, 1e5, 4, 1.0, '', 1.0),
-    ('NSLD_real', 'NSLD Re', -100, 100, 6, 0.1, '', 1 / SLD_SCALE),
-    ('NSLD_img', 'NSLD Im', -100, 100, 7, 0.001, '', 1 / SLD_SCALE),
+    # +-1000e-6 A^-2: X-ray SLDs of heavy elements (Pt, Ir, Os ~140-160)
+    ('NSLD_real', 'NSLD Re', -1000, 1000, 6, 0.1, '', 1 / SLD_SCALE),
+    ('NSLD_img', 'NSLD Im', -1000, 1000, 7, 0.001, '', 1 / SLD_SCALE),
     ('MSLD_rho', 'MSLD ρ', -100, 100, 6, 0.1, '', 1 / SLD_SCALE),
     ('MSLD_theta', 'MSLD φ', -360, 360, 4, 5.0, ' °', 360.0),
     ('MSLD_phi', 'MSLD θ', -90, 90, 4, 5.0, ' °', 360.0),

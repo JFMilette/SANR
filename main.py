@@ -26,7 +26,8 @@ stay until their × closes them (FitPanel.close_page), not while they run.
 Built as a program (make_windows_installer.py, PyInstaller), the session
 dialogs open in Documents/SANR, created when needed, as the program's own
 folder is not writable; `SANR --self-test <file>` checks the build
-(selftest.py).
+(selftest.py).  Once a session is opened or saved, both dialogs open in
+its folder for the rest of the run (MainWindow.session_dir).
 
 File -> Import Licorne session reads a saved Licorne session folder
 (model.licorne_io.load_licorne_session) into the same form: its rexp<k>.dat
@@ -77,6 +78,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('SANR')
+        # where the session dialogs open: SESSIONS_DIR until a session is
+        # opened or saved, then that session's folder (this run only)
+        self.session_dir = SESSIONS_DIR
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.setDocumentMode(True)
         self.setCentralWidget(self.tabs)
@@ -139,10 +143,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 'Stop the running fit or sampling first.')
             return
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, 'Open session', SESSIONS_DIR, MODEL_FILTER,
+            self, 'Open session', self.session_dir, MODEL_FILTER,
             options=DIALOG_OPTIONS)
         if not path:
             return
+        self.session_dir = os.path.dirname(os.path.abspath(path))
         try:
             with open(path, encoding='utf-8') as f:
                 d = json.load(f)
@@ -278,11 +283,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def save_session(self):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, 'Save session', os.path.join(SESSIONS_DIR, 'session.json'),
-            MODEL_FILTER,
+            self, 'Save session',
+            os.path.join(self.session_dir, 'session.json'), MODEL_FILTER,
             options=DIALOG_OPTIONS)
         if not path:
             return
+        self.session_dir = os.path.dirname(os.path.abspath(path))
         # a name typed without .json gets it (the dialog only asked about
         # overwriting the name as typed)
         if not path.lower().endswith('.json'):

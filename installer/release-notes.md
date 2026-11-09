@@ -1,12 +1,10 @@
-## What's new in 0.4
+## What's new in 0.4.1
 
-- **A model per dataset.** Every imported dataset gets its own model, renamed and removed with it; each dataset is fitted with its own model.
-- **Copy to…** writes the shown model's values, fit bounds, Fit ticks, priors, general parameters, resolution or whole layer stack into other models.
-- **Stitch factors** for up to 12 angles, fitted per dataset and edited in the Experimental tab; the resolution can be fitted per stitched angle.
-- **Faster Licorne resolution:** opening a session, switching models and changing the resolution are up to 10× faster on large datasets (same results).
-- **Fit tab:** a splitter between the datasets and the parameters; parameter names tinted with their SLD-profile colours.
-- **NPE tab:** Constraints and Network check.
-- **Installers** for Windows x64, Windows ARM64 and macOS (Apple silicon).
+- **Larger NSLD values:** the layer editor accepts NSLD Re and Im from −1000 to 1000 ×10⁻⁶ Å⁻² (was ±100), e.g. X-ray SLDs of heavy elements (Pt, Ir, Os) for fitting XRR data.
+- **Fit window:** the model curves stop at the fitted Q min and Q max, so the fit is easier to see on data that go to high Q (with the Licorne resolution they used to run over all the data's Q).
+- **Session folder remembered:** once a session is opened or saved, Open session and Save session start in its folder for the rest of the run.
+
+Everything in 0.4 (a model per dataset, Copy to…, stitch factors, faster Licorne resolution, the three installers) is included.
 
 ## Downloads
 

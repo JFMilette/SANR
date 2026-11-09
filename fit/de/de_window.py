@@ -218,7 +218,8 @@ class DEWindow(QtWidgets.QWidget):
         order: name, data (the fitted points {channel: dict(Q, R, dR,
         dQ)}), vectors (the {channel: [Pi, Pa]} of every model channel),
         grids (the {channel: Q} of the model curves,
-        tabs.experimental.model_grid); polish whether the fit ends with a
+        tabs.experimental.model_grid), qrange (optional: the fitted
+        [Q min, Q max], the curves are drawn within it); polish whether the fit ends with a
         polish; method 'de', 'lbfgs' or 'lsq' (a local fit: iterations,
         no polish), one of fit.de.global_fit.METHODS (its own steps) or
         'multistart' (the minima, given by show_minima)."""
@@ -242,7 +243,8 @@ class DEWindow(QtWidgets.QWidget):
                                v['vectors'], v['grids'],
                                {name[1:]: n for (name, *_), n
                                 in zip(sub.channels, sub.norms)},
-                               fit=copy.deepcopy(sub))
+                               fit=copy.deepcopy(sub),
+                               qrange=v.get('qrange'))
             if getattr(sub, 'combined', None) is not None and \
                     sub.target == 'asym':
                 # the fitted quantity: SA of the pair combined
@@ -693,12 +695,16 @@ class DatasetView(QtWidgets.QSplitter):
     """The depth profile and the model against the fitted data of one
     dataset, in a tab of the DE window."""
 
-    def __init__(self, stack, data, vectors, grids, norms, fit=None):
+    def __init__(self, stack, data, vectors, grids, norms, fit=None,
+                 qrange=None):
         """stack: the view's own copy of the model; data, vectors, grids,
         norms: see DEWindow.start; fit: the view's own copy of its
-        dataset's fit.problem.FitProblem, for the residuals."""
+        dataset's fit.problem.FitProblem, for the residuals; qrange: the
+        fitted (Q min, Q max), the only part of the model curves drawn (a
+        Licorne grid runs over all the data's Q, model_grid), None: all."""
         super().__init__(QtCore.Qt.Orientation.Vertical)
         self.stack = stack
+        self.qrange = qrange
         self.data, self.vectors, self.model_Q = data, vectors, grids
         self.norms = norms
         self.fit = fit
@@ -924,6 +930,9 @@ class DatasetView(QtWidgets.QSplitter):
         model = {c: d for c, d in self._model.items()
                  if name != POLARIZED or c in self.data}
         for lab, col, Q, y, _, _ in dataset_series(model, k, line=True)[0]:
+            if self.qrange is not None:
+                keep = (Q >= self.qrange[0]) & (Q <= self.qrange[1])
+                Q, y = Q[keep], y[keep]
             y = y * Q**4 if rq4 else y
             if log:
                 y = np.where(y > 0, y, np.nan)
