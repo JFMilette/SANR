@@ -1,7 +1,8 @@
-"""Model curves drawn against data: with the 'licorne' resolution scheme the
-live simulation dataset and the DE window compute on the data's Q points,
-as the fit does (tabs.experimental.model_grid), with the fitted dataset's
-fixed norms.
+"""Model curves drawn against data: the live simulation datasets on the
+Simulation tab's grid with their own model's dataset's fixed norms, whatever
+the Fit tab fits; with the 'licorne' resolution scheme the DE window
+computes on the data's Q points, as the fit does
+(tabs.experimental.model_grid).
 
 Run from the repo root: python -m pytest tests
 """
@@ -54,10 +55,12 @@ def tab(scheme='licorne', norm=1.0):
     return sim, exp
 
 
-def live_set(exp):
-    """The model's live dataset (always there), up to date."""
+def live_set(exp, link=None):
+    """The live dataset (always there) of model `link` (default: the first
+    one listed), up to date."""
     exp._update_live()
-    return next(s for s in exp.sets if s.get('live'))
+    return next(s for s in exp.sets if s.get('live')
+                and link in (None, s.get('link')))
 
 
 def test_de_window_draws_the_fitted_model(app):
@@ -77,25 +80,48 @@ def test_de_window_draws_the_fitted_model(app):
     win.close()
 
 
-def test_live_curves_on_the_data_grid(app):
-    sim, exp = tab()
-    live = live_set(exp)['channels']
-    assert live and all(np.array_equal(c['Q'], Q1) for c in live.values())
-    # the quadrature keeps the Simulation tab's grid
-    sim, exp = tab('quadrature')
-    assert all(np.array_equal(c['Q'], sim.last_Q)
-               for c in live_set(exp)['channels'].values())
+def test_live_curves_on_the_simulation_grid(app):
+    """Every live curve is on its model's Simulation grid (Q min, Q max, Q
+    points), whatever the resolution scheme and whatever the Fit tab
+    fits, and follows it."""
+    for scheme in ('licorne', 'quadrature'):
+        sim, exp = tab(scheme)
+        for link in (sim.shown_model(), 'd'):
+            live = live_set(exp, link)['channels']
+            assert live and all(np.array_equal(c['Q'], sim.last_Q)
+                                for c in live.values())
+        # no dataset chosen in the Fit tab: the same curves
+        before = live_set(exp, 'd')['channels']['+']['R'].copy()
+        exp.fit_set.setCurrentIndex(-1)
+        assert np.array_equal(live_set(exp, 'd')['channels']['+']['R'],
+                              before)
+        # the shown model's Q max: its curve follows; model d keeps its
+        # own range (tests/test_model_q_range)
+        d_grid = sim.q_grid('d').copy()
+        sim.qmax.setValue(0.15)
+        sim._timer.stop()
+        sim.recompute()
+        assert sim.last_Q[-1] == 0.15
+        assert all(np.array_equal(c['Q'], sim.last_Q) for c in live_set(
+            exp, sim.shown_model())['channels'].values())
+        assert all(np.array_equal(c['Q'], d_grid)
+                   for c in live_set(exp, 'd')['channels'].values())
 
 
 def test_live_curves_take_the_norms(app):
+    """A live curve takes the norms of its own model's dataset ('d' is
+    fitted with its own model, DATASET MODELS), another model's none."""
     sim, exp = tab('quadrature', norm=0.5)
-    s = live_set(exp)
+    other = live_set(exp, sim.shown_model())
+    s = live_set(exp, 'd')
     live = s['channels']
     Q = sim.last_Q
     pair = vectors_pair(*exp.channel_vectors(s, '+'))
     st = sim.stack
     bare = st.reflectivities(Q, [pair])[:, 0] - st.background
     assert np.allclose(live['+']['R'], 0.5 * bare + st.background,
+                       rtol=1e-12, atol=0)
+    assert np.allclose(other['channels']['+']['R'], bare + st.background,
                        rtol=1e-12, atol=0)
 
 

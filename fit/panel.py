@@ -1599,8 +1599,13 @@ class FitPanel:
         if inputs is None:
             return None
         vec, data, grid = inputs
-        # the Simulation tab's Q range selects the fitted points
-        return sets[0], vec, data, sim.qmin.value(), sim.qmax.value(), grid
+        # its model's Q range selects the fitted points
+        return (sets[0], vec, data) + self._q_range(sets[0]) + (grid,)
+
+    def _q_range(self, s):
+        """(Q min, Q max) dataset s is fitted in: its model's
+        (SimulationTab.q_range, MODELS)."""
+        return self.simulation.q_range(self._link(s))
 
     def _set_inputs(self, s, report):
         """({channel: [Pi, Pa]}, data list, grid) of dataset s (see
@@ -1654,18 +1659,21 @@ class FitPanel:
             if got is None:
                 return None
             inputs.append((s,) + got)
-        qmin, qmax = sim.qmin.value(), sim.qmax.value()
+        # each dataset is fitted within its own model's Q range; qmin, qmax
+        # returned span them all (for the reports)
+        ranges = [self._q_range(s) for s, *_ in inputs]
+        qmin, qmax = min(r[0] for r in ranges), max(r[1] for r in ranges)
         joint = self.fit_set.currentData() == JOINT
         if target is None:
             target = self.fit_target.currentData()
         fits, said = [], {}             # warning -> datasets that gave it
-        for s, vec, data, grid in inputs:
+        for (s, vec, data, grid), (lo, hi) in zip(inputs, ranges):
             try:
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter('always')
                     fp = FitProblem(
                         self._dataset_stack(s, self._set_stack(s)), data,
-                        cost, qmin, qmax, grid,
+                        cost, lo, hi, grid,
                         error_floor=self.fit_floor.value() / 100,
                         target=target,
                         stitch_extra='fix' if joint else 'error')
@@ -1858,7 +1866,8 @@ class FitPanel:
             if m not in sim.model_names():
                 base = sub.model_name if sub.model_name in \
                     sim.model_names() else sim.shown_model()
-                m = sim.add_model(m, sim.model_dict(base))
+                m = sim.add_model(m, sim.model_dict(base),
+                                  sim.q_settings(base))
                 made.append(m)
             fitted = [(n, j) for n, j in zip(sub.names,
                                             part_index(problem, k))
@@ -2019,14 +2028,18 @@ class FitPanel:
                 lambda x, label, part, w=w: self._send_fit(x, label, part, w))
         self.fit_window.tab_name = self._tab_name(
             method, [s['name'] for s, *_ in inputs])
-        # the model's other channels use the Simulation tab's pairs
-        Q = np.linspace(qmin, qmax, sim.nq.value())
-        views = [dict(name=s['name'],
-                      data=self._fitted_points(s, qmin, qmax, problem.cost),
-                      vectors=dict(self.sim_vectors(), **vec),
-                      grids=model_grid(sim.stack, Q, s['channels'], grid),
-                      qrange=[qmin, qmax])
-                 for s, vec, data, grid in inputs]
+        # the model's other channels use the Simulation tab's pairs; each
+        # dataset in its own model's Q range, on its Q points (MODELS)
+        views = []
+        for s, vec, data, grid in inputs:
+            lo, hi = self._q_range(s)
+            Q = sim.q_grid(self._link(s))
+            views.append(dict(
+                name=s['name'],
+                data=self._fitted_points(s, lo, hi, problem.cost),
+                vectors=dict(self.sim_vectors(), **vec),
+                grids=model_grid(sim.stack, Q, s['channels'], grid),
+                qrange=[lo, hi]))
         title = ' + '.join(s['name'] for s, *_ in inputs)
         self.fit_window.start(
             problem, views, title,

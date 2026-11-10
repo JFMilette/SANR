@@ -182,6 +182,11 @@ one sigma function per mode):
             two or more limits, Q equal to the last one stays with the
             angle below it, as in Licorne's TOF template
             (QP2=(Q>=Q1)&(Q<=Q2)).
+  'mono' -- monochromator: fixed wavelength, angle scan,
+            theta = asin(Q lambda / 4 pi) (theta = pi/2 past Q = 4 pi /
+            lambda); 'mono_wavelength' (A), 'mono_dlambda_rel'
+            (dlambda / lambda) and 'mono_dtheta' (rad, the same at every
+            angle).
   'data' -- the measured dQ: 'data_q', 'data_dq' (A^-1, already a
             standard deviation) are a table of sigma_Q against Q, linearly
             interpolated (end values outside it), taken from a dataset
@@ -632,6 +637,7 @@ DEFAULT_RESOLUTION = {
     'tof_angles': [{'theta': 0.006, 'dtheta': 3e-4, 'qmax': 0.04},
                    {'theta': 0.010, 'dtheta': 5e-4, 'qmax': 0.12},
                    {'theta': 0.017, 'dtheta': 5e-4, 'qmax': None}],
+    'mono_wavelength': 5.0, 'mono_dlambda_rel': 0.01, 'mono_dtheta': 3e-4,
     'scheme': 'quadrature', 'licorne_fun': 3,
     'data_q': [], 'data_dq': [], 'data_set': '',
     'data_overlap': 'mean',
@@ -661,6 +667,15 @@ def _sigma_tof(Q, res):
     return Q * np.hypot(dtheta[k] / theta[k], res['tof_dlambda'] / lam)
 
 
+def _sigma_mono(Q, res):
+    """Fixed wavelength, angle scan (see RESOLUTION); Q > 0."""
+    lam = res['mono_wavelength']
+    if lam <= 0:
+        raise ValueError('monochromator wavelength must be > 0')
+    theta = np.arcsin(np.clip(Q * lam / (4 * np.pi), 0.0, 1.0))
+    return Q * np.hypot(res['mono_dtheta'] / theta, res['mono_dlambda_rel'])
+
+
 def _sigma_data(Q, res):
     """The measured dQ table (see RESOLUTION); Q > 0."""
     q = np.asarray(res.get('data_q', ()), dtype=float)
@@ -671,9 +686,13 @@ def _sigma_data(Q, res):
 
 
 # resolution['mode'] -> sigma_Q(Q > 0, resolution dict)
-RESOLUTION_MODES = {'tof': _sigma_tof, 'data': _sigma_data}
-# keys of resolution modes that no longer exist (fixed wavelength, FWHM dQ)
-OLD_RESOLUTION_KEYS = ('wavelength', 'dlambda_rel', 'dtheta', 'data_fwhm')
+RESOLUTION_MODES = {'tof': _sigma_tof, 'mono': _sigma_mono,
+                    'data': _sigma_data}
+# keys of the first fixed-wavelength mode -> their 'mono' keys (same units)
+OLD_MONO_KEYS = {'wavelength': 'mono_wavelength',
+                 'dlambda_rel': 'mono_dlambda_rel', 'dtheta': 'mono_dtheta'}
+# keys of resolution modes that no longer exist (FWHM dQ)
+OLD_RESOLUTION_KEYS = ('data_fwhm',)
 
 
 def _res_grid(Qn, sigma, bins=2048, edges_q=(), step=None):
@@ -1040,8 +1059,9 @@ class Stack:
     def from_dict(cls, d):
         """Inverse of to_dict.  Files written before the Licorne scheme
         existed load as 'rms', before interface_order existed as
-        'additive' (so old fits reproduce); a resolution in the removed fixed-wavelength
-        ('mono') mode loads as 'tof', off."""
+        'additive' (so old fits reproduce); a resolution of the first
+        fixed-wavelength mode ('wavelength', 'dlambda_rel', 'dtheta') loads
+        as 'mono' with the same values (OLD_MONO_KEYS)."""
         s = cls([Layer(**l) for l in d['layers']], tail=d['tail'],
                 roughness_scheme=d.get('roughness_scheme', 'rms'),
                 magnetic_smearing=d.get('magnetic_smearing'),
@@ -1063,6 +1083,9 @@ class Stack:
         res = copy.deepcopy(d['resolution'])
         if res.get('mode', 'tof') not in RESOLUTION_MODES:
             res.update(mode='tof', enabled=False)
+        for old, new in OLD_MONO_KEYS.items():
+            if old in res:
+                res.setdefault(new, float(res.pop(old)))
         for k in OLD_RESOLUTION_KEYS:
             res.pop(k, None)
         s.resolution.update(res)

@@ -237,17 +237,74 @@ def test_angles_told_apart_by_theta():
     assert len(split_angles(Q, dQ, np.linspace(0.005, 0.03, Q.size))) == 1
 
 
-def test_old_mono_session_loads_as_tof_off():
-    """The fixed-wavelength mode and the FWHM flag were removed: a session
-    saved with them loads in the 'tof' mode, off, without their keys."""
+def test_old_mono_session_loads_as_mono():
+    """A session of the first fixed-wavelength mode (keys 'wavelength',
+    'dlambda_rel', 'dtheta') loads in the 'mono' mode with its values; the
+    removed FWHM flag is dropped."""
     from model.stack import Stack
     from tabs.simulation import make_stack
     d = make_stack().to_dict()
-    d['resolution'].update(enabled=True, mode='mono', wavelength=5.0,
+    for k in ('mono_wavelength', 'mono_dlambda_rel', 'mono_dtheta'):
+        del d['resolution'][k]                  # not in files of that time
+    d['resolution'].update(enabled=True, mode='mono', wavelength=4.5,
                            dlambda_rel=0.002, dtheta=7e-4, data_fwhm=True)
     r = Stack.from_dict(d).resolution
-    assert r['mode'] == 'tof' and not r['enabled']
+    assert r['mode'] == 'mono' and r['enabled']
+    assert (r['mono_wavelength'], r['mono_dlambda_rel'],
+            r['mono_dtheta']) == (4.5, 0.002, 7e-4)
     assert not {'wavelength', 'dlambda_rel', 'dtheta', 'data_fwhm'} & set(r)
+
+
+def test_mono_sigma():
+    """sigma_Q = Q sqrt((dtheta/theta)^2 + (dlambda/lambda)^2), theta =
+    asin(Q lambda / 4 pi); theta stops at pi/2 past Q = 4 pi / lambda."""
+    r = res('mono', mono_wavelength=5.0, mono_dlambda_rel=0.01,
+            mono_dtheta=5e-4)
+    theta = np.arcsin(Q * 5.0 / (4 * np.pi))
+    assert RESOLUTION_MODES['mono'](Q, r) == pytest.approx(
+        Q * np.sqrt((5e-4 / theta)**2 + 0.01**2), rel=1e-12)
+    far = np.array([3.0])
+    assert RESOLUTION_MODES['mono'](far, r) == pytest.approx(
+        far * np.hypot(5e-4 / (np.pi / 2), 0.01))
+    with pytest.raises(ValueError):
+        RESOLUTION_MODES['mono'](Q, res('mono', mono_wavelength=0.0))
+
+
+def test_mono_spreads_recovered():
+    true = res('mono', mono_wavelength=4.0, mono_dlambda_rel=0.015,
+               mono_dtheta=4e-4)
+    start = res('mono', mono_wavelength=4.0, mono_dlambda_rel=0.1,
+                mono_dtheta=1e-3)
+    fit, misfit = fit_resolution(Q, RESOLUTION_MODES['mono'](Q, true), start)
+    assert fit['mono_dlambda_rel'] == pytest.approx(0.015, rel=1e-6)
+    assert fit['mono_dtheta'] == pytest.approx(4e-4, rel=1e-6)
+    assert fit['mono_wavelength'] == 4.0 and misfit < 1e-6
+    # Q beyond 4 pi / lambda cannot be measured at that wavelength
+    with pytest.raises(ValueError):
+        fit_resolution(Q, Q, res('mono', mono_wavelength=100.0))
+
+
+def test_mono_widgets_round_trip(app):
+    """The monochromator page sets the stack's resolution, and a session
+    brings it back."""
+    from tabs.simulation import RES_MODES
+    sim = SimulationTab()
+    sim.res_mode.setCurrentIndex(RES_MODES.index('mono'))
+    sim.res_mono_lam.setValue(4.75)
+    sim.res_mono_dl.setValue(1.5)               # %
+    sim.res_mono_dth.setValue(0.4)              # mrad
+    sim.res_on.setChecked(True)
+    shown = sim.resolution_shown()
+    assert shown['mode'] == 'mono'
+    assert shown['mono_wavelength'] == pytest.approx(4.75)
+    assert shown['mono_dlambda_rel'] == pytest.approx(0.015)
+    assert shown['mono_dtheta'] == pytest.approx(4e-4)
+    assert sim.res_pages.currentIndex() == RES_MODES.index('mono')
+    sim.recompute()
+    r = sim.stack.resolution
+    assert r['enabled'] and r['mode'] == 'mono'
+    assert r['mono_dtheta'] == pytest.approx(4e-4)
+    assert np.all(sim.stack.resolution_sigma(Q) > 0)
 
 
 def stitched_tof(sort=False):

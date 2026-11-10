@@ -24,7 +24,10 @@ start of the later one's, 'mean' the middle of their overlap.  Otherwise
 the angle of its Q band, as model.stack._sigma_tof, the Q max kept, and an
 angle with no data in its band keeps its dtheta.  Every point weighs the
 same in sigma_Q^2 / Q^2.  The dQ column is a standard deviation; points with
-dQ <= 0 or Q <= 0 are left out.
+dQ <= 0 or Q <= 0 are left out.  In the 'mono' mode (fixed wavelength) the
+same least squares gives the one dtheta^2 and (dlambda/lambda)^2, theta =
+asin(Q lambda / 4 pi) at the mode's wavelength (kept); the stitched angles
+and the overlap rule play no part.
 """
 
 import copy
@@ -65,7 +68,9 @@ def fit_resolution(Q, dQ, res, angle=None, overlap='mean', thetas=None):
     too few points are usable or the angles do not match the table."""
     if res['mode'] == 'data':
         raise ValueError('the resolution is the data dQ: choose fixed θ per '
-                         'Q band to fit spreads')
+                         'Q band or monochromator to fit spreads')
+    if res['mode'] == 'mono':
+        return _fit_mono(Q, dQ, res)
     if res['mode'] != 'tof':
         raise ValueError('unknown resolution mode %r' % (res['mode'],))
     if overlap not in dict((k, k) for _, k in OVERLAPS):
@@ -110,6 +115,31 @@ def fit_resolution(Q, dQ, res, angle=None, overlap='mean', thetas=None):
                          (4 * np.pi * np.sin(theta[k])))
     misfit = float(np.sqrt(np.mean((model / sig - 1)**2)))
     return new, misfit
+
+
+def _fit_mono(Q, dQ, res):
+    """fit_resolution in the 'mono' mode (see FIT)."""
+    Q, dQ = np.asarray(Q, dtype=float), np.asarray(dQ, dtype=float)
+    ok = np.isfinite(Q) & np.isfinite(dQ) & (Q > 0) & (dQ > 0)
+    lam = res['mono_wavelength']
+    if lam <= 0:
+        raise ValueError('monochromator wavelength must be > 0')
+    s = Q * lam / (4 * np.pi)
+    if np.any(ok & (s > 1)):
+        raise ValueError('Q up to %.4g Å⁻¹ is out of reach of λ = %.4g Å '
+                         '(Q max 4π/λ = %.4g Å⁻¹)'
+                         % (Q[ok].max(), lam, 4 * np.pi / lam))
+    Q, sig, s = Q[ok], dQ[ok], s[ok]
+    if Q.size < 2:
+        raise ValueError('needs at least 2 points with dQ > 0')
+    theta = np.arcsin(s)
+    x, _ = nnls(np.column_stack([1 / theta**2, np.ones_like(Q)]),
+                (sig / Q)**2)
+    new = copy.deepcopy(res)
+    new['mono_dtheta'] = float(np.sqrt(x[0]))
+    new['mono_dlambda_rel'] = float(np.sqrt(x[1]))
+    model = Q * np.hypot(new['mono_dtheta'] / theta, new['mono_dlambda_rel'])
+    return new, float(np.sqrt(np.mean((model / sig - 1)**2)))
 
 
 def _overlap_edges(Q, k, n, overlap):
@@ -253,6 +283,10 @@ def dq_table(chans, overlap='mean'):
 
 def describe(res):
     """The spreads of res as text, in the units of the Simulation tab."""
+    if res['mode'] == 'mono':
+        return 'λ = %.7g Å, Δλ/λ = %.3g %%, Δθ = %.3g mrad' % (
+            res['mono_wavelength'], 100 * res['mono_dlambda_rel'],
+            1e3 * res['mono_dtheta'])
     return 'Δλ = %.3g Å, Δθ = %s mrad' % (
         res['tof_dlambda'],
         ', '.join('%.3g' % (1e3 * a['dtheta']) for a in res['tof_angles']))
@@ -394,15 +428,20 @@ class ResolutionDialog(QtWidgets.QDialog):
         chans = self._sets[self.dataset.currentIndex()][1]
         overlap = OVERLAPS[self.overlap.currentIndex()][1]
         try:
-            Q, dQ, angle, thetas = stitched_points(chans)
-            self.fitted, misfit = fit_resolution(Q, dQ, self.current(),
-                                                 angle, overlap, thetas)
+            res = self.current()
+            if res['mode'] == 'mono':       # an angle scan: no stitching
+                (Q, dQ), angle, thetas = self.data(), None, None
+            else:
+                Q, dQ, angle, thetas = stitched_points(chans)
+            self.fitted, misfit = fit_resolution(Q, dQ, res, angle, overlap,
+                                                 thetas)
         except ValueError as exc:
             self.fitted = None
             self._message = '<span style="color:%s">Cannot fit: %s</span>' % (
                 style.ERROR, exc)
         else:
-            limits = '' if angle is None else ' — each angle on its own%s; ' \
+            mono = self.fitted['mode'] == 'mono'
+            limits = '' if angle is None or mono else ' — each angle on its own%s; ' \
                 'Q max %s Å⁻¹ (%s)' % (
                     '' if thetas is None else ', θ %s mrad from the data' %
                     ', '.join('%.4g' % (1e3 * t) for t in thetas),
@@ -411,7 +450,8 @@ class ResolutionDialog(QtWidgets.QDialog):
                     OVERLAPS[self.overlap.currentIndex()][0])
             self._message = 'Fitted: %s%s — rms misfit of σ_Q %.2g %%%s' % (
                 describe(self.fitted), limits, 100 * misfit,
-                '' if misfit < 0.05 else ' (large: is the angle table right?)')
+                '' if misfit < 0.05 else ' (large: is the %s right?)'
+                % ('wavelength' if mono else 'angle table'))
         self.btn_apply.setEnabled(self.fitted is not None)
         self.redraw()
 

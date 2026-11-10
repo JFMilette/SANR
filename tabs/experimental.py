@@ -27,12 +27,15 @@ Every model of the Simulation tab's Model box has a live dataset, always
 there and listed last ('<model> (simulation)', named after it, not
 removable; unticked when new): the model's
 channels R++, R+-, R-+, R--, R+, R- (background included, once each) on the
-Simulation tab's Q grid, with the Simulation tab's pairs unless it has its
-own, and the fixed norms of the first dataset fitted with that model (else
-of the first dataset fitted).  With the 'licorne' resolution scheme a curve
-depends on the grid it is convolved on (model.stack RESOLUTION), so the
-live channels are then computed on that dataset's Q points, as the fit
-computes them (model_grid).  Starting a fit gives every live dataset the
+model's own Q grid (its Q min, Q max, Q points, SimulationTab MODELS), with
+the Simulation tab's pairs unless it has its
+own, and the fixed norms of the first measured dataset linked to that model
+(else 1); what the Fit tab fits changes neither.  Every dataset is drawn
+within its model's Q range (a frozen copy within the shown model's).
+Always on the model's grid: with the 'licorne' resolution scheme a curve depends on the
+grid it is convolved on (model.stack RESOLUTION), so the live curve can then
+differ a little from the fit's, which is computed on the data's Q points
+(model_grid, the fit and DE windows).  Starting a fit gives every live dataset the
 fitted channels' pairs (those of the first dataset fitted with its model),
 so what is drawn against the data is exactly what is fitted.  A measured
 dataset is linked to the model it is fitted with in the Fit tab (fit.panel
@@ -1071,9 +1074,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
             # a live dataset per model
             simulation.modelsChanged.connect(self._models_changed)
             simulation.modelRenamed.connect(self._model_renamed)
-            # the live curves take that dataset's norms (and Licorne grid)
-            self.fit_set.currentIndexChanged.connect(self._update_live)
-            # the plotted Q range follows the Simulation tab's
+            # the shown model's datasets follow its Q range at once
             simulation.qmin.valueChanged.connect(self.redraw)
             simulation.qmax.valueChanged.connect(self.redraw)
         self.refresh_tree()
@@ -1635,43 +1636,35 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                 s['link'] = new
 
     def _live_channels(self, s):
-        """Channels of live dataset s: its model with the norms of the
-        first dataset fitted with that model (else of the first one
-        fitted), on its Q points with the 'licorne' resolution scheme
-        (model_grid; the grid chosen for the fit when its channels differ).
-        A model the Simulation tab does not show is computed from its
-        stored dict, again only when that dict, the grid, the norms or the
-        pairs change."""
+        """Channels of live dataset s: its model on its own Q grid (that
+        model's Q min, Q max, Q points, SimulationTab.q_grid, whatever the
+        resolution scheme), with
+        the norms of the first measured dataset linked to that model (none:
+        1).  Neither depends on the datasets the Fit tab fits.  A model the
+        Simulation tab does not show is computed from its stored dict,
+        again only when that dict, the grid, the norms or the pairs
+        change."""
         sim = self.simulation
-        sets = self._fit_sets()
-        data = next((t for t in sets if self._link(t) == s.get('link')),
-                    next(iter(sets), None))
+        model = s.get('link') or sim.shown_model()
+        data = next((t for t in self.sets
+                     if self._measured(t) and self._link(t) == model), None)
         channels = data['channels'] if data else None
-        grid = None
-        ch = data and self._grid_choice.get(data['name'])
-        if ch in (channels or {}):
-            grid = channels[ch]['Q']
-            grid = grid[np.isfinite(grid)]
         norms = {c: d.get('norm', 1.0) for c, d in channels.items()} \
             if channels else None
-        model = s.get('link') or sim.shown_model()
+        grids = {None: sim.q_grid(model)}
         vectors = self.live_vectors(s)
         stored = sim.stored_model(model)
         if stored is None:                    # the shown model
-            return model_channels(sim.stack,
-                                  model_grid(sim.stack, sim.last_Q, channels,
-                                             grid), vectors, norms)
+            return model_channels(sim.stack, grids, vectors, norms)
         key = (repr(sorted((norms or {}).items())), repr(vectors),
-               sim.last_Q.tobytes(), None if grid is None
-               else grid.tobytes(), data and data['name'])
+               grids[None].tobytes())
         cache = s.get('_cache')
         if cache is not None and cache[0] is stored and cache[1] == key:
             return cache[2]
         try:
             st = sim.model_stack(model)
             st.build_sublayers()
-            out = model_channels(st, model_grid(st, sim.last_Q, channels,
-                                                grid), vectors, norms)
+            out = model_channels(st, grids, vectors, norms)
         except Exception:                     # e.g. a model that cannot be
             out = {}                          # computed: no curve
         s['_cache'] = (stored, key, out)
@@ -1790,7 +1783,8 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                 base = s.get('link')
                 if base not in sim.model_names():
                     base = sim.shown_model()
-                s['link'] = sim.add_model(s['name'], sim.model_dict(base))
+                s['link'] = sim.add_model(s['name'], sim.model_dict(base),
+                                          sim.q_settings(base))
         finally:
             self._ensuring = False
 
@@ -2064,11 +2058,13 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
             if note:
                 notes.append('%s: %s' % (s['name'], note))
             symbol = SYMBOLS[i % len(SYMBOLS)]
+            # each dataset within its own model's Q range (a frozen copy:
+            # the shown model's)
+            qlo, qhi = (self.simulation.q_range(self._link(s))
+                        if self.simulation is not None else (-np.inf, np.inf))
             for sname, col, Q, y, dy, dQ in series:
-                if self.simulation is not None:
-                    keep = (Q >= self.simulation.qmin.value()) & \
-                        (Q <= self.simulation.qmax.value())
-                    Q, y, dy, dQ = Q[keep], y[keep], dy[keep], dQ[keep]
+                keep = (Q >= qlo) & (Q <= qhi)
+                Q, y, dy, dQ = Q[keep], y[keep], dy[keep], dQ[keep]
                 if rq4:
                     y, dy = y * Q**4, dy * Q**4
                 lab = '%s — %s' % (s['name'], sname) if prefix else sname

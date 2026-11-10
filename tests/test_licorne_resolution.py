@@ -284,3 +284,38 @@ def test_fit_window_keeps_full_grid():
     R[drop] = -1.0
     fp = FitProblem(st, data, cost='log')
     assert np.max(np.abs(fp.model(x)[0] / ref[~drop] - 1)) <= 1e-12
+
+
+def test_trimmed_grid_gives_the_same_fit():
+    """fit.problem LICORNE TRIM: with the Q range keeping part of the
+    data, the Licorne grid is cut to what the fitted points depend on;
+    every fitted value is exactly the whole grid's, in modes 1-3, with the
+    data's dQ or the TOF resolution, on a stitched grid whose Q repeat."""
+    from fit.problem import FitProblem
+    st = fixture1_stack()
+    st.layers[2].fit_entry('thickness')['vary'] = True
+    # two stitched angles overlapping on 0.10-0.14 (repeated Q there)
+    q = np.sort(np.concatenate([Q1, np.linspace(0.10, 0.14, 15)]))
+    table = st.resolution_sigma(q)
+    x = [p[2] for p in FitProblem(st, [dict(
+        Q=q, R=np.ones_like(q), dR=np.ones_like(q), P0=X, P=None)]).params]
+    for mode in ('tof', 'data'):
+        st.resolution.update(mode=mode, data_q=q, data_dq=table)
+        for fun in (1, 2, 3):
+            st.resolution['licorne_fun'] = fun
+            ref = st.reflectivities(q, [(X, None)], sigma=table
+                                    if mode == 'data' else None)[:, 0]
+            R = ref.copy()
+            data = [dict(Q=q, R=R, dR=0.1 * R, dQ=table, P0=X, P=None)]
+            for lo, hi in ((0.0, 0.05), (0.06, 0.12), (0.11, 0.135),
+                           (0.2, 1.0), (0.0, 1.0)):
+                fp = FitProblem(st, data, qmin=lo, qmax=hi)
+                keep = (q >= lo) & (q <= hi)
+                assert np.array_equal(fp.model(x)[0], ref[keep]), \
+                    (mode, fun, lo, hi)
+                g = fp.groups[0][0]
+                assert g[0] != g[1] and g[-1] != g[-2]
+                if (lo, hi) == (0.0, 1.0):
+                    assert len(g) == len(q)          # nothing to cut
+                elif (lo, hi) == (0.11, 0.135):
+                    assert len(g) < len(q)

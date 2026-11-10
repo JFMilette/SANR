@@ -42,6 +42,16 @@ of its own points: those of the channel whose finite Q are the grid (the
 dQ table where a point has none, or where no channel's Q are the grid,
 e.g. a grid shared by channels whose dQ differ: the first one's is used).
 
+LICORNE TRIM -- a fitted point's row of the Licorne weights
+(model.licorne_resolution) depends only on the grid points within 2 x 3
+sigma of it (the window its row scans) and their neighbours, and on the
+grid's ends only when that window reaches one.  So each Licorne grid is cut
+to the fitted points' span widened by 6 sigma (the largest of theirs) and
+TRIM_PAD points on each side, never ending on a repeated Q: every fitted
+value is the same as on the whole grid, computed on far fewer points when
+the Q range keeps part of the data (an X-ray scan to 4 A^-1 fitted to
+0.25).  The thickness spread's nodes are chosen from the whole grid first.
+
 COST -- mean over all points of the squared residual, plus, for parameters
 with a prior from other measurements (fit.priors), -2 (log p - its maximum)
 / N of each: the DE optimum is then DREAM's MAP (zero when every such
@@ -146,6 +156,8 @@ SAME_ANGLE = 0.05
 # more distinct angles than this: an angle scan, not stitched angles
 # (ANGLES); each of up to this many has its stitch factor
 MAX_ANGLES = STITCH_MAX
+# points kept on each side beyond the fitted ones' windows (LICORNE TRIM)
+TRIM_PAD = 4
 
 
 def angle_groups(thetas):
@@ -355,6 +367,8 @@ class FitProblem:
 
         self.stack.check_spread_or_mixture()
         self.spread_nodes = self._freeze_spread_nodes()
+        # after the spread's nodes: those stay what the whole grid gives
+        self._trim_licorne_groups()
 
         # said once here; the cost function itself never warns
         m = self.stack.fronting_direction()
@@ -546,6 +560,43 @@ class FitProblem:
                           'different Q grids; each grid is convolved on its '
                           'own', stacklevel=3)
         return list(grids.values())
+
+    def _trim_licorne_groups(self):
+        """Each Licorne grid cut to the points its fitted ones depend on
+        (see LICORNE TRIM): the model is then computed on far fewer points
+        when the Q range keeps only part of the data, every fitted value
+        the same."""
+        res = self.stack.resolution
+        if not (res.get('enabled') and res.get('scheme') == 'licorne') or \
+                self._pointwise():
+            return
+        for n, ((g, members), sg) in enumerate(zip(self.groups,
+                                                   self.sigmas)):
+            used = [q for _, _, q in members if len(q)]
+            if not used or len(g) < 2 * TRIM_PAD + 4:
+                continue
+            lo_q = min(float(q.min()) for q in used)
+            hi_q = max(float(q.max()) for q in used)
+            s = self.stack.resolution_sigma(g) if sg is None else sg
+            inside = (g >= lo_q) & (g <= hi_q)
+            # the window a fitted point's row scans: 2 x 3 sigma
+            # (model.licorne_resolution _window), its own sigma
+            reach = 6 * float(np.max(s[inside], initial=0.0))
+            a = max(int(np.searchsorted(g, lo_q - reach, 'left'))
+                    - TRIM_PAD, 0)
+            b = min(int(np.searchsorted(g, hi_q + reach, 'right'))
+                    + TRIM_PAD, len(g))
+            # never ending on a repeated Q (model.licorne_resolution)
+            while a > 0 and g[a] == g[a + 1]:
+                a -= 1
+            while b < len(g) and g[b - 1] == g[b - 2]:
+                b += 1
+            if (a == 0 and b == len(g)) or b - a < 2 * TRIM_PAD + 4:
+                continue
+            self.groups[n] = (g[a:b], [
+                (k, None if idx is None else idx - a, q)
+                for k, idx, q in members])
+            self.sigmas[n] = None if sg is None else sg[a:b]
 
     def _licorne_data(self):
         """The 'licorne' scheme with the data's dQ (see RESOLUTION)."""

@@ -17,18 +17,24 @@ save_model / load_model write / read the stack and Q settings as JSON.
 MODELS -- the tab holds several models (Stack.to_dict each), the Model box
 above the layer list showing one of them in self.stack: switching keeps the
 shown one as it is and loads the other (restore_state, models=False), so
-each keeps its layers, general parameters, resolution, fit settings and
-selected layer; the polarisation, Q range and display are the tab's.  New
-takes no layer (empty_stack) with the shown model's other settings,
-Copy the whole model.  Copy to… writes the shown model's parameter values
-and fit bounds (Fit ticks, priors, general parameters if asked) into the
+each keeps its layers, general parameters, resolution, fit settings,
+selected layer and Q range (Q min, Q max, Q points: the boxes show the
+shown model's, its entry's 'q' holds a stored one's, q_settings): the
+points its curves are computed on (q_grid) and the Q range its datasets
+are fitted in; the polarisation and display are the tab's.  New
+takes no layer (empty_stack) with the shown model's other settings and Q
+range, Copy the whole model.  Copy to… writes the shown model's parameter
+values and fit bounds (Fit ticks, priors, general parameters and the Q
+range if asked) into the
 models picked, matched by name, leaving the rest of them as it is; or, if
 asked, replaces their layers by copies of the shown model's
 (copy_parameters).
 Every imported dataset has a model of its own, named after it
 (tabs.experimental DATASET MODELS; dataset_model): it cannot be renamed or
 deleted here, only by renaming or removing its dataset.  A session file is the shown model as before, the
-others under 'simulation' -> 'models'; switching is off while a fit runs.
+others under 'simulation' -> 'models' (each with its 'q'; a session saved
+before gives every model the session's Q range); switching is off while a
+fit runs.
 
 The thickness spread and the mixture of models (model.stack MIXTURE) have
 their own window (General parameters -> Spread / mixture -> Edit…): the
@@ -835,7 +841,7 @@ PARAM_DISPLAY.update(scale=('Scale', 1.0, ''),
 # the stack rows shown in other units than stored: attr -> factor (shown =
 # factor x stored)
 STACK_ROW_FACTOR = {'thickness_spread': 100.0}
-RES_MODES = ('tof', 'data')     # res_mode combo order
+RES_MODES = ('tof', 'mono', 'data')     # res_mode combo order
 # res_conv combo: label, resolution['scheme'], resolution['licorne_fun']
 RES_CONVOLUTIONS = [('quadrature', 'quadrature', None),
                     ('Licorne 1: simple mean', 'licorne', 1),
@@ -1747,12 +1753,16 @@ class SimulationTab(QtWidgets.QWidget):
             'Average the reflectivity over a Gaussian in Q of standard '
             'deviation\nσ_Q = Q·√((Δθ/θ)² + (Δλ/λ)²).')
         self.res_mode = QtWidgets.QComboBox()
-        self.res_mode.addItems(['fixed θ per Q band', 'from data dQ'])
+        self.res_mode.addItems(['fixed θ per Q band', 'monochromator',
+                                'from data dQ'])
         self.res_mode.setCurrentIndex(RES_MODES.index(res['mode']))
         self.res_mode.setToolTip(
             'fixed θ per Q band: time of flight at one or more fixed angles, '
             'each used over a Q band,\nλ = 4π sin θ / Q (presets: 3 angles '
             'or 1).\n'
+            'monochromator: a fixed wavelength λ and an angle scan, '
+            'θ = asin(Qλ/4π), with a constant Δθ\nand a relative '
+            'wavelength spread Δλ/λ.\n'
             'from data dQ: the measured dQ — a fit averages each data point '
             'over its own dQ (stitched angles\nas measured); curves '
             'elsewhere interpolate the dQ of the dataset chosen with '
@@ -1801,6 +1811,19 @@ class SimulationTab(QtWidgets.QWidget):
         tof_add.setToolTip('Add an angle after the last one')
         tof_del.setToolTip('Remove the selected angle')
         tof_add.clicked.connect(self._add_tof_angle)
+        # monochromator: lambda (A), dlambda / lambda (% in the box), dtheta
+        # (mrad in the box, rad in the model)
+        self.res_mono_lam = dspin(0.1, 50, 6, 0.01, ' Å')
+        self.res_mono_lam.setValue(res['mono_wavelength'])
+        self.res_mono_lam.setToolTip('Wavelength λ of the monochromatic beam')
+        self.res_mono_dl = dspin(0, 50, 3, 0.1, ' %')
+        self.res_mono_dl.setValue(100 * res['mono_dlambda_rel'])
+        self.res_mono_dl.setToolTip('Relative wavelength spread Δλ/λ '
+                                    '(standard deviation, not FWHM)')
+        self.res_mono_dth = dspin(0, 100, 4, 0.01, ' mrad')
+        self.res_mono_dth.setValue(1e3 * res['mono_dtheta'])
+        self.res_mono_dth.setToolTip('Angular spread Δθ (standard deviation, '
+                                     'not FWHM), the same at every angle')
         self.res_preset = QtWidgets.QComboBox()
         self.res_preset.addItems(['Preset…'] + list(RES_PRESETS))
         self.res_preset.setToolTip('Fill Δλ and the angle table with a '
@@ -1817,6 +1840,11 @@ class SimulationTab(QtWidgets.QWidget):
         qrange.addWidget(self.qmax, 1)
         f.addRow('Q (Å⁻¹)', qrange)
         f.addRow('Q points', self.nq)
+        for w in (self.qmin, self.qmax, self.nq):
+            w.setToolTip('This model\'s own: the Q its curves are computed '
+                         'on, and the Q range its datasets are fitted in.\n'
+                         'Copy to… with general parameters ticked copies it '
+                         'into other models.')
         f.addRow('Window tail', self.tail)
         for attr, label in (('scale', 'Scale'), ('background', 'Background'),
                             ('q_shift', 'Q shift (Å⁻¹)')):
@@ -1864,6 +1892,13 @@ class SimulationTab(QtWidgets.QWidget):
         tg.addWidget(self.res_preset, 0, 4)
         tg.addWidget(self.res_tof, 1, 0, 1, 5)
         tg.setColumnStretch(1, 1)
+        mono = QtWidgets.QWidget()
+        mrow = QtWidgets.QHBoxLayout(mono)
+        mrow.setContentsMargins(0, 0, 0, 0)
+        for label, w in (('λ', self.res_mono_lam), ('Δλ/λ', self.res_mono_dl),
+                         ('Δθ', self.res_mono_dth)):
+            mrow.addWidget(QtWidgets.QLabel(label))
+            mrow.addWidget(w, 1)
         data = QtWidgets.QWidget()
         drow = QtWidgets.QHBoxLayout(data)
         drow.setContentsMargins(0, 0, 0, 0)
@@ -1878,11 +1913,13 @@ class SimulationTab(QtWidgets.QWidget):
         drow.addWidget(res_data_pick)
         self.res_pages = QtWidgets.QStackedWidget()
         self.res_pages.addWidget(tof)
+        self.res_pages.addWidget(mono)
         self.res_pages.addWidget(data)
         f.addRow(self.res_pages)
 
         for w in (self.qmin, self.qmax, self.tail,
-                  self.background, self.res_tof_dl):
+                  self.background, self.res_tof_dl, self.res_mono_lam,
+                  self.res_mono_dl, self.res_mono_dth):
             w.valueChanged.connect(self.schedule)
         for val, bmin, bmax, cb in self.stack_rows.values():
             for w in (val, bmin, bmax):
@@ -1914,7 +1951,7 @@ class SimulationTab(QtWidgets.QWidget):
         self.model_box = QtWidgets.QComboBox()
         self.model_box.setToolTip(
             'The model shown; each keeps its own layers, general parameters, '
-            'resolution and fit settings.\nPolarisation, the Q range and the '
+            'Q range, resolution and fit settings.\nPolarisation and the '
             'plots are shared.')
         self.model_box.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                                      QtWidgets.QSizePolicy.Policy.Fixed)
@@ -2780,7 +2817,7 @@ class SimulationTab(QtWidgets.QWidget):
             mode = RES_MODES[self.res_mode.currentIndex()]
             self.stack.resolution.update(
                 enabled=self.res_on.isChecked(), mode=mode,
-                tof_dlambda=self.res_tof_dl.value())
+                tof_dlambda=self.res_tof_dl.value(), **self._mono_values())
             scheme, fun = RES_CONVOLUTIONS[self.res_conv.currentIndex()][1:]
             self.stack.resolution['scheme'] = scheme
             if fun is not None:
@@ -2808,8 +2845,9 @@ class SimulationTab(QtWidgets.QWidget):
             res = self.stack.resolution
             if res['enabled'] and res.get('scheme') == 'licorne':
                 text += ('<br><i>Licorne convolution: this curve depends on '
-                         'its Q grid; compare with data on the data\'s Q '
-                         '(the Experimental tab\'s live curves are)</i>')
+                         'its Q grid (here and in the Experimental tab: Q min, '
+                         'Q max, Q points); the fit computes it on the data\'s '
+                         'Q, as the fit window shows</i>')
             self.status.setText(text)
             self.status.setStyleSheet('')
             self.prof_cursor.refresh()
@@ -2840,16 +2878,29 @@ class SimulationTab(QtWidgets.QWidget):
         included), whether the resolution is on or not."""
         res = copy.deepcopy(self.stack.resolution)
         res.update(mode=RES_MODES[self.res_mode.currentIndex()],
-                   tof_dlambda=self.res_tof_dl.value())
+                   tof_dlambda=self.res_tof_dl.value(), **self._mono_values())
         if res['mode'] == 'tof':
             res['tof_angles'] = self._tof_angles()
         return res
 
+    def _mono_values(self):
+        """The monochromator entries of the resolution, as the widgets show
+        them (model units)."""
+        return dict(mono_wavelength=self.res_mono_lam.value(),
+                    mono_dlambda_rel=self.res_mono_dl.value() / 100,
+                    mono_dtheta=self.res_mono_dth.value() / 1e3)
+
+    def _set_mono_values(self, res):
+        self.res_mono_lam.setValue(res['mono_wavelength'])
+        self.res_mono_dl.setValue(100 * res['mono_dlambda_rel'])
+        self.res_mono_dth.setValue(1e3 * res['mono_dtheta'])
+
     def set_resolution_spreads(self, res):
-        """The spreads of res (Δλ and the angles' Δθ) into the widgets, and
-        the resolution on."""
+        """The spreads of res (Δλ and the angles' Δθ, or the
+        monochromator's) into the widgets, and the resolution on."""
         self.res_tof_dl.setValue(res['tof_dlambda'])
         self._set_tof_angles(res['tof_angles'])
+        self._set_mono_values(res)
         self.res_mode.setCurrentIndex(RES_MODES.index(res['mode']))
         self.res_on.setChecked(True)
         self.schedule()
@@ -3189,6 +3240,36 @@ class SimulationTab(QtWidgets.QWidget):
         return next((m['model'] for m in self._models if m['name'] == name),
                     None)
 
+    def _q_now(self):
+        """The Q min, Q max and Q points boxes (the shown model's)."""
+        return dict(qmin=self.qmin.value(), qmax=self.qmax.value(),
+                    nq=self.nq.value())
+
+    def q_settings(self, name=None):
+        """{'qmin', 'qmax', 'nq'} of model `name` (MODELS): the boxes for the
+        shown one (default), else its own (the boxes' for an unknown name
+        or a model without any)."""
+        m = next((m for m in self._models if m['name'] == name), None)
+        if m is None or m['model'] is None or not m.get('q'):
+            return self._q_now()
+        q = m['q']
+        return dict(qmin=float(q['qmin']), qmax=float(q['qmax']),
+                    nq=int(q['nq']))
+
+    def q_range(self, name=None):
+        """(Q min, Q max) of model `name` (q_settings): the points its
+        curves show and its datasets fit."""
+        q = self.q_settings(name)
+        return q['qmin'], q['qmax']
+
+    def q_grid(self, name=None):
+        """The Q points model `name`'s curves are computed on: the shown
+        one's last computed grid, else its own Q min, Q max, Q points."""
+        if name in (None, self.shown_model()) and self.last_Q is not None:
+            return self.last_Q
+        q = self.q_settings(name)
+        return np.linspace(q['qmin'], q['qmax'], q['nq'])
+
     def model_stack(self, name):
         """The Stack of model `name` as a fit or a curve takes it: the
         tab's own for the shown model, else a new one from its stored dict
@@ -3274,7 +3355,10 @@ class SimulationTab(QtWidgets.QWidget):
         d, sim = self._shown_model()
         cur, new = self._models[self._model_index], self._models[i]
         state = copy.deepcopy(new['model'])
-        state['simulation'] = dict(sim, selected_layer=new['selected_layer'])
+        # its own Q range (MODELS); none (an old session): the boxes' as
+        # they are
+        state['simulation'] = dict(sim, selected_layer=new['selected_layer'],
+                                   **self.q_settings(new['name']))
         try:
             self.restore_state(state, models=False)
         except Exception as exc:
@@ -3285,8 +3369,10 @@ class SimulationTab(QtWidgets.QWidget):
             self.restore_state(d, models=False)
             self._refresh_models()
             return
-        cur.update(model=d, selected_layer=sim['selected_layer'])
+        cur.update(model=d, selected_layer=sim['selected_layer'],
+                   q={k: sim[k] for k in ('qmin', 'qmax', 'nq')})
         new.update(model=None)
+        new.pop('q', None)                   # the boxes hold it now
         self._model_index = i
         self._refresh_models()
         self._refresh_mixture_table()
@@ -3294,9 +3380,11 @@ class SimulationTab(QtWidgets.QWidget):
         self.recompute()                     # this model's mixture linked
 
     def _add_model(self, name, d, selected_layer=1):
-        """Append model dict d as `name` and show it."""
+        """Append model dict d as `name` (with the shown model's Q range)
+        and show it."""
         self._models.append(dict(name=self._unique_name(name), model=d,
-                                 selected_layer=selected_layer))
+                                 selected_layer=selected_layer,
+                                 q=self._q_now()))
         self.switch_model(len(self._models) - 1)
 
     def new_model(self):
@@ -3360,11 +3448,11 @@ class SimulationTab(QtWidgets.QWidget):
         v.addLayout(row)
         boxes['general'].setToolTip(
             'Also the General parameters page: scale, background, Q shift '
-            'and thickness spread (as the boxes beside say),\nwindow tail, '
+            'and thickness spread (as the boxes beside say),\nthe Q range '
+            '(Q min, Q max, Q points), window tail, '
             'Q reference, roughness scheme, interfaces, M smearing, the '
             'Licorne options\nand the spread\'s distribution, nodes and '
-            'layer.  Not the resolution (its own box), the Q range (the '
-            'tab\'s) nor the mixture.')
+            'layer.  Not the resolution (its own box) nor the mixture.')
         boxes['resolution'].setToolTip(
             'Also the resolution settings (on / off, mode and its '
             'parameters), whatever the general parameters box says.')
@@ -3411,8 +3499,9 @@ class SimulationTab(QtWidgets.QWidget):
         matched by name (fit.problem.parameter_names of
         free_parameters(everything=True)): `what` of 'values', 'bounds',
         'ticks' (Fit), 'priors', and 'general': the stack's own parameters
-        (scale, background, Q shift, thickness spread; left out without it)
-        and GENERAL_SETTINGS, the spread's layer matched by name;
+        (scale, background, Q shift, thickness spread; left out without it),
+        GENERAL_SETTINGS, the spread's layer matched by name, and the Q
+        range (Q min, Q max, Q points, MODELS);
         'resolution': the resolution settings; 'layers':
         the target's layers and ties replaced by copies of the shown
         model's first (its spread's layers then matched by name, else the
@@ -3489,9 +3578,11 @@ class SimulationTab(QtWidgets.QWidget):
                         pass                     # its own target kept
         for name in targets:
             if name in self.model_names() and name != self.shown_model():
-                self._edit_stored(name, edit)
+                m = next(m for m in self._models if m['name'] == name)
+                if general:                  # its Q range too (MODELS)
+                    m['q'] = self._q_now()
+                self._edit_stored(name, edit)    # tells the curves
                 if 'layers' in what:                 # its selection in range
-                    m = next(m for m in self._models if m['name'] == name)
                     m['selected_layer'] = min(m.get('selected_layer', 1),
                                               len(src.layers) - 1)
         return len(source), missing
@@ -3550,10 +3641,12 @@ class SimulationTab(QtWidgets.QWidget):
         self._refresh_mixture_table()
         self.schedule()
 
-    def add_model(self, name, d):
-        """Append model dict d (Stack.to_dict) as `name`, not shown."""
+    def add_model(self, name, d, q=None):
+        """Append model dict d (Stack.to_dict) as `name`, not shown, with Q
+        range q (q_settings; default the shown model's)."""
         self._models.append(dict(name=self._unique_name(name), model=d,
-                                 selected_layer=1))
+                                 selected_layer=1,
+                                 q=dict(q) if q else self._q_now()))
         self._refresh_models()
         self._refresh_mixture_table()
         return self._models[-1]['name']
@@ -3763,9 +3856,16 @@ class SimulationTab(QtWidgets.QWidget):
             cur, lst = int(models['current']), copy.deepcopy(models['list'])
             if not 0 <= cur < len(lst) or lst[cur]['model'] is not None:
                 raise ValueError('the session\'s models are inconsistent')
+            # a session saved before each model had its own Q range: every
+            # model takes the session's one
+            shared = {k: sim.get(k, v) for k, v in self._q_now().items()}
             for m in lst:
                 if m['model'] is not None:
                     Stack.from_dict(m['model'])
+                    q = m.get('q') or {}
+                    m['q'] = {k: q.get(k, v) for k, v in shared.items()}
+                else:
+                    m.pop('q', None)          # the shown one: the boxes
             self._models, self._model_index = lst, cur
             self._refresh_models()
         self.stack.layers = new.layers
@@ -3797,7 +3897,8 @@ class SimulationTab(QtWidgets.QWidget):
         widgets = [self.qmin, self.qmax, self.nq, self.tail, self.pol,
                    self.background, self.q_fronting, self.res_on,
                    self.msmear, self.rscheme, self.iorder, self.res_mode,
-                   self.res_conv, self.res_tof_dl]
+                   self.res_conv, self.res_tof_dl, self.res_mono_lam,
+                   self.res_mono_dl, self.res_mono_dth]
         for w in widgets:
             w.blockSignals(True)
         self.qmin.setValue(sim.get('qmin', self.qmin.value()))
@@ -3819,6 +3920,7 @@ class SimulationTab(QtWidgets.QWidget):
         self.res_conv.setCurrentIndex(res_convolution(res))
         self.res_tof_dl.setValue(res['tof_dlambda'])
         self._set_tof_angles(res['tof_angles'])
+        self._set_mono_values(res)
         disp = sim.get('display', {})
         display = [self.refl_quantity, self.r_scale, self.freeze_y,
                    self.prof_show_bars, self.prof_show_smooth] + self.prof_boxes
