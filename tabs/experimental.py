@@ -1107,12 +1107,19 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self.btn_import = QtWidgets.QPushButton('Import…')
         self.btn_new = QtWidgets.QPushButton('+ Dataset')
         self.btn_remove = QtWidgets.QPushButton('− Remove')
-        for b in (self.btn_import, self.btn_new, self.btn_remove):
+        self.btn_export = QtWidgets.QPushButton('Export…')
+        self.btn_export.setToolTip(
+            'Save datasets as CSV: the SLD profile of their model and any '
+            'of the plotted quantities\n(R, log₁₀ R or R·Q⁴ with scaled '
+            'errors), in a folder you choose (tabs.export_data)')
+        for b in (self.btn_import, self.btn_new, self.btn_remove,
+                  self.btn_export):
             row.addWidget(b)
         bv.addLayout(row)
         self.btn_import.clicked.connect(self.import_data)
         self.btn_new.clicked.connect(lambda: self.new_set())
         self.btn_remove.clicked.connect(self.remove_selected)
+        self.btn_export.clicked.connect(self.export_data)
 
         disp = QtWidgets.QGroupBox('Display')
         f = QtWidgets.QFormLayout(disp)
@@ -1362,6 +1369,11 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
     def _selected(self):
         it = self.tree.currentItem()
         return it.data(0, ROLE) if it is not None else None
+
+    def export_data(self):
+        """Export…: datasets to CSV files (tabs.export_data)."""
+        from .export_data import run_export
+        run_export(self)
 
     def _update_buttons(self, *_):
         sel = self._selected()
