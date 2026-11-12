@@ -132,8 +132,19 @@ def test_running_tab_left_out(app):
     wait_fit(app, exp)
 
 
-def test_dream_tab_round_trip(app):
+def test_dream_tab_round_trip(app, monkeypatch):
     from fit.dream.dream_fit import PosteriorProblem, sample
+    from fit.dream.dream_window import DreamWindow
+    # the background end runs on its own copy of the problem: evaluating
+    # one writes its parameters into its stack, so sharing it with the
+    # window's thread mixed them (a wrong log p now and then)
+    used = []
+    end_texts = DreamWindow._end_texts
+
+    def record(self, result, problem):
+        used.append((self, problem))
+        return end_texts(self, result, problem)
+    monkeypatch.setattr(DreamWindow, '_end_texts', record)
     exp = tab()
     fit, *_ = exp._problem(exp.dream_report, 'chi2', 'channels')
     pp = PosteriorProblem(fit)
@@ -169,3 +180,7 @@ def test_dream_tab_round_trip(app):
         == [win.send_from.itemText(k) for k in range(win.send_from.count())]
     assert back.send_from.count() == 1 + res.chains.shape[1]
     assert back.btn_map.isEnabled()
+    copies = [p for w, p in used if w is back]
+    assert len(copies) == 1 and copies[0] is not back.problem
+    assert copies[0].fit.stack is not back.problem.fit.stack
+    assert back.problem(x) == pp(x)

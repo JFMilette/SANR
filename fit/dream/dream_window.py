@@ -42,6 +42,7 @@ writes the run with fit.dream.dream_fit.save_result.
 """
 
 import base64
+import copy
 import io
 import os
 import threading
@@ -1305,11 +1306,16 @@ class DreamWindow(QtWidgets.QWidget):
         self.summary.setPlainText('Computing…')
         self.converged.setText('Computing…')
         self.send_from.clear()
+        # its own copy: evaluating a problem writes the parameters into its
+        # stack, so the window's thread (a drawn page, a send) must not
+        # share it with the computation
         threading.Thread(target=self._end_in_background,
-                         args=(result, self.problem), daemon=True).start()
+                         args=(result, copy.deepcopy(self.problem)),
+                         daemon=True).start()
 
     def _end_in_background(self, result, problem):
-        """_end_texts off the GUI thread, handed back by _ended."""
+        """_end_texts off the GUI thread (on a copy of the problem), handed
+        back by _ended."""
         try:
             texts = self._end_texts(result, problem)
         except Exception as exc:
