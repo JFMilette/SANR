@@ -174,6 +174,9 @@ class DreamThread(QtCore.QThread):
     # thinned chains so far: generations (n,), X (n, N, d), logp (n, N),
     # last R-hat (d,) or None
     snapshot = QtCore.pyqtSignal(object, object, object, object)
+    # with each snapshot: the max R-hat so far, generations (n,), values
+    # (n,), and the run's target
+    rhat = QtCore.pyqtSignal(object, object, float)
     done = QtCore.pyqtSignal(object)
     failed = QtCore.pyqtSignal(str)
 
@@ -193,6 +196,14 @@ class DreamThread(QtCore.QThread):
         # generations, halved (stride doubled) when it reaches TRACE_ROWS
         hist = {'g': [], 'X': [], 'lp': [], 'stride': 1}
         prev = self.options.get('resume')
+        # (generation, max R-hat) each time the sampler computes a new R-hat
+        rh = {'g': [], 'r': [], 'last': None}
+        if prev is not None:
+            g0, r0 = rhat_curve(prev.rhat_history)
+            rh.update(g=list(g0), r=list(r0))
+            if prev.rhat_history:
+                rh['last'] = prev.rhat_history[-1][1]
+        target = float(self.options.get('rhat_target', 1.2))
         if prev is not None:          # continuing: start from its chains
             g = prev.generations
             while len(g) // hist['stride'] >= TRACE_ROWS // 2:
@@ -207,6 +218,10 @@ class DreamThread(QtCore.QThread):
             if last['X'] is not None:
                 moved.append(np.mean(np.any(X != last['X'], axis=1)))
             last['X'] = X
+            if rhat is not None and rhat is not rh['last']:   # a new R-hat
+                rh['last'] = rhat
+                rh['g'].append(t)
+                rh['r'].append(float(np.max(rhat)))
             if t % hist['stride'] == 0:
                 hist['g'].append(t)
                 hist['X'].append(X)
@@ -224,6 +239,7 @@ class DreamThread(QtCore.QThread):
                 self.snapshot.emit(np.array(hist['g']), np.array(hist['X']),
                                    np.array(hist['lp']),
                                    None if rhat is None else np.array(rhat))
+                self.rhat.emit(np.array(rh['g']), np.array(rh['r']), target)
             return self._stop
 
         try:
@@ -389,6 +405,72 @@ class TracePanel(QtWidgets.QWidget):
                                  fin.max() + 0.05 * (fin.max() - lo + 1))
         else:
             self.p.enableAutoRange(axis='y')
+
+
+# ------------------------------------------------------------- R-hat ----
+class RhatPanel(QtWidgets.QWidget):
+    """The largest R-hat over the parameters against generation (computed
+    from the end of the adaptation phase on), log scale, with the run's
+    R-hat target: how convergence went, live and after the run."""
+
+    def __init__(self):
+        super().__init__()
+        self.info = QtWidgets.QLabel(wordWrap=True)
+        self.glw = pg.GraphicsLayoutWidget()
+        self.p = plot_item('generation', 'max R̂ (all parameters)')
+        self.p.setLogMode(y=True)
+        self.glw.addItem(self.p)
+        self.curve = pg.PlotDataItem(pen=pg.mkPen(CHAIN_COLOURS[0], width=2),
+                                     symbol='o', symbolSize=4,
+                                     symbolBrush=CHAIN_COLOURS[0],
+                                     symbolPen=None)
+        self.p.addItem(self.curve)
+        self.target = pg.InfiniteLine(
+            angle=0, movable=False,
+            pen=pg.mkPen(OK, width=1, style=QtCore.Qt.PenStyle.DashLine))
+        self.p.addItem(self.target)
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.addWidget(self.info)
+        v.addWidget(self.glw, 1)
+        self.clear()
+
+    def clear(self):
+        self.gens, self.rmax, self.rhat_target = [], [], None
+        self.curve.setData([], [])
+        self.target.hide()
+        self.info.setText('R̂ is computed once the adaptation phase is over.')
+
+    def set_history(self, gens, rmax, target=None):
+        """gens (n,), the max R-hat at each (n,), the run's target."""
+        self.gens = np.asarray(gens, dtype=float)
+        self.rmax = np.asarray(rmax, dtype=float)
+        if target is not None:
+            self.rhat_target = float(target)
+        ok = np.isfinite(self.rmax) & (self.rmax > 0)
+        self.curve.setData(self.gens[ok], self.rmax[ok])
+        if self.rhat_target is not None:
+            self.target.setValue(np.log10(self.rhat_target))  # log axis
+            self.target.show()
+        if not ok.any():
+            self.info.setText('R̂ is computed once the adaptation phase is '
+                              'over.')
+            return
+        text = 'max R̂ now %.3f at generation %d' % (self.rmax[ok][-1],
+                                                    self.gens[ok][-1])
+        if self.rhat_target is not None:
+            below = np.flatnonzero(ok & (self.rmax < self.rhat_target))
+            text += ' — target %g (dashed): %s' % (
+                self.rhat_target, 'first reached at generation %d'
+                % self.gens[below[0]] if below.size else 'not reached yet')
+        self.info.setText(text)
+
+
+def rhat_curve(rhat_history):
+    """(generations, max R-hat) of a run's rhat_history [(gen, R (d,))]."""
+    g = [t for t, _ in rhat_history]
+    r = [float(np.max(R)) if np.size(R) else np.nan for _, R in rhat_history]
+    return np.array(g, dtype=float), np.array(r, dtype=float)
 
 
 # ------------------------------------------------------------ corner ----
@@ -915,9 +997,11 @@ class DreamWindow(QtWidgets.QWidget):
         self.summary.setLineWrapMode(
             QtWidgets.QPlainTextEdit.LineWrapMode.NoWrap)
         self.trace = TracePanel()
+        self.rhat = RhatPanel()
         self.corner = CornerPanel()
         self.tabs.addTab(self.summary, 'Summary')
         self.tabs.addTab(self.trace, 'Traces')
+        self.tabs.addTab(self.rhat, 'R̂')
         # result tabs: a page holding either a placeholder or the panel;
         # 'Corner', then each dataset's (start), drawn when first shown
         self.pages = {'Corner': self._page(self.corner)}
@@ -1038,6 +1122,7 @@ class DreamWindow(QtWidgets.QWidget):
         self.summary.setPlainText('')
         self.trace.clear()
         self.trace.set_parameters(self.infos, max(n_gen // 10, 1))
+        self.rhat.clear()
         self.corner.clear()
         self._live, self._corner_t = None, 0.0
         for page in self._all_pages():
@@ -1189,6 +1274,9 @@ class DreamWindow(QtWidgets.QWidget):
         self._chain_chi2(result.chains[-1], result.logp[-1])
         self.trace.set_data(result.generations, result.chains, result.logp,
                             rhat)
+        self.rhat.set_history(*rhat_curve(result.rhat_history),
+                              target=(result.state or {}).get('rhat_target',
+                                                              1.2))
         self.btn_save.setEnabled(True)
         st = result.state or {}
         can = bool(st.get('cancelled')) and st.get('n_gen', 0) > st['t']

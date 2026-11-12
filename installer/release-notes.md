@@ -7,8 +7,8 @@
 - Sessions now also keep the settings of the **DREAM**, **NPE** and **multistart** pages.
 
 ### Fitting
-- **DREAM:** the Chains box (and NPE's Seeds) starts at 8 and can be typed into freely; "auto" is gone. **Apply ±σ to bounds** and **Load into model** apply to every dataset of a joint run, each in its own model: the Dataset box is gone. The error scale is no longer ticked automatically after a fit.
-- **Multistart:** the minima are listed in the multistart's fit tab, where you select one and send it to the Simulation tab. The table on the multistart page, its buttons and the DREAM start "multistart minimum" are gone: to start DREAM there, send the minimum and use **Start = current values**. DE's **Restarts** box is gone too.
+- **DREAM:** a new **R̂** tab plots the largest R̂ over the parameters against generation, live while the run goes and for a finished or reopened run, with the run's R̂ target as a dashed line and the generation where it was first reached. The Chains box (and NPE's Seeds) starts at 8 and can be typed into freely; "auto" is gone. **Apply ±σ to bounds** and **Load into model** apply to every dataset of a joint run, each in its own model: the Dataset box is gone. The error scale is no longer ticked automatically after a fit.
+- **Multistart:** the local fit "short DE" is now **DE** and uses the DE page's settings (Max iter, Pop, Tol, mutation, strategy, polish) instead of fixed ones. The minima are listed in the multistart's fit tab, where you select one and send it to the Simulation tab. The table on the multistart page, its buttons and the DREAM start "multistart minimum" are gone: to start DREAM there, send the minimum and use **Start = current values**. DE's **Restarts** box is gone too.
 - **Licorne resolution:** when the channels are not on the same Q points, the Q-grid dialog now suggests a channel (the one covering the others' Q range, unless another is much denser).
 - Fit and DREAM tabs are numbered by their place among the tabs open (1, 2, 3…), renumbered when one is closed.
 - The **independent** interface order computes profiles about 25 % faster.

@@ -476,21 +476,41 @@ def test_strategy_reaches_the_fit_and_the_session(app, monkeypatch):
     assert exp.fit_strategy.currentData() == 'rand1bin'
 
 
-def test_multistart_de_follows_polish_box(app, monkeypatch):
-    """The short DEs of the multistart polish only if the DE page's polish
-    box is ticked."""
+def test_multistart_de_follows_de_page(app, monkeypatch):
+    """The multistart's DE takes the DE page's settings: Max iter, Pop,
+    Tol, mutation, strategy and polish; mutation min > max stops it."""
     import fit.panel as P
     seen = []
     monkeypatch.setattr(P.MultistartThread, 'start',
                         lambda self: seen.append(self.options))
     exp = tab(QA, QA, licorne=False)
     exp.ms_method.setCurrentIndex(exp.ms_method.findData('de'))
+    assert exp.ms_method.currentText() == 'DE'
+    exp.fit_maxiter.setValue(321)
+    exp.fit_pop.setValue(9)
+    exp.fit_tol.setValue(1e-4)
+    exp.fit_mut_lo.setValue(0.6)
+    exp.fit_mut_hi.setValue(0.9)
+    exp.fit_strategy.setCurrentIndex(exp.fit_strategy.findData('rand1bin'))
     for ticked in (False, True):
         exp.fit_polish.setChecked(ticked)
         exp.start_multistart()
+        o = seen[-1]['de_options']
         assert seen[-1]['method'] == 'de'
-        assert seen[-1]['de_options']['polish'] is ticked
+        assert o['polish'] is ticked
+        assert (o['maxiter'], o['popsize'], o['strategy']) == \
+            (321, 9, 'rand1bin')
+        assert o['tol'] == pytest.approx(1e-4)
+        assert o['mutation'] == pytest.approx((0.6, 0.9))
         exp._ms = None
+    exp.fit_mut_hi.setValue(0.6)                # min = max: a constant F
+    exp.start_multistart()
+    assert seen[-1]['de_options']['mutation'] == pytest.approx(0.6)
+    exp._ms = None
+    exp.fit_mut_lo.setValue(0.8)                # min > max
+    n = len(seen)
+    exp.start_multistart()
+    assert len(seen) == n and 'Mutation' in exp.ms_report.text()
 
 
 def test_collapsed_sets_stay_collapsed(app):

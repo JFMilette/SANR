@@ -105,7 +105,7 @@ FIT_METHODS = [('de', 'Differential evolution'),
 SHGO_SAMPLING = [('sobol', 'Sobol'), ('halton', 'Halton'),
                  ('simplicial', 'simplicial')]
 MS_METHODS = [('L-BFGS-B', 'lbfgs'), ('least squares', 'lsq'),
-              ('short DE', 'de')]
+              ('DE', 'de')]
 # height (px) the fit box keeps however short the window; taller content
 # scrolls
 FIT_PAGE_MIN = 160
@@ -329,8 +329,7 @@ class FitPanel:
             'rand1bin: random member + F × (difference of two members); no '
             'pull towards the best:\n  slower to converge, much wider '
             'search (to check whether a fit is stuck).\n'
-            'Also used by the multistart\'s short DE and DREAM\'s DE '
-            'start.')
+            'Also used by the multistart\'s DE and DREAM\'s DE start.')
         self.fit_polish = QtWidgets.QCheckBox('polish (L-BFGS-B)')
         self.fit_polish.setChecked(True)
         self.fit_polish.setToolTip('Refine the best member with a local '
@@ -716,9 +715,9 @@ class FitPanel:
             'L-BFGS-B: a gradient descent from each start (fast).\n'
             'least squares: trust-region least squares on the residuals '
             '(Gauss-Newton like, often fewer steps than L-BFGS-B).\n'
-            'short DE: 100 generations of differential evolution holding '
-            'the start, then the polish if it is ticked in the DE options\n'
-            '(slower, looks wider).')
+            'DE: differential evolution holding the start, with the DE '
+            'page\'s settings\n(Max iter, Pop, Tol, mutation, strategy, '
+            'polish; slower, looks wider).')
         f.addRow(self._grid([('Starts', self.ms_starts),
                              ('Local fit', self.ms_method)]))
         row = QtWidgets.QHBoxLayout()
@@ -747,6 +746,11 @@ class FitPanel:
         sim = self.simulation
         if sim is None or self.busy():
             return
+        if self.ms_method.currentData() == 'de' and \
+                self.fit_mut_lo.value() > self.fit_mut_hi.value():
+            self.ms_report.setText(self._error(
+                'Mutation: min must not exceed max.'))
+            return
         built = self._problem(self.ms_report,
                               FIT_COSTS[self.fit_cost.currentIndex()][0])
         if built is None:
@@ -762,9 +766,7 @@ class FitPanel:
             problem, n_starts=self.ms_starts.value(),
             method=self.ms_method.currentData(),
             workers=self.fit_workers.value(),
-            de_options=dict(popsize=self.fit_pop.value(), init='sobol',
-                            strategy=self.fit_strategy.currentData(),
-                            polish=self.fit_polish.isChecked()))
+            de_options=self._ms_de_options())
         self._ms.progress.connect(self._ms_progress)
         self._ms.progress.connect(self.fit_window.set_starts)
         self._ms.status.connect(self.fit_window.set_start_status)
@@ -785,6 +787,16 @@ class FitPanel:
         self.ms_report.setText(self._ms_note + 'Fitting from %d starts…'
                                % (self.ms_starts.value() + 1))
         self._ms.start()
+
+    def _ms_de_options(self):
+        """The multistart's DE (Local fit 'DE'): the DE page's settings, as
+        the DE fit itself takes them (start_fit)."""
+        lo, hi = self.fit_mut_lo.value(), self.fit_mut_hi.value()
+        return dict(maxiter=self.fit_maxiter.value(),
+                    popsize=self.fit_pop.value(), tol=self.fit_tol.value(),
+                    mutation=lo if lo == hi else (lo, hi), atol=0.0,
+                    init='sobol', strategy=self.fit_strategy.currentData(),
+                    polish=self.fit_polish.isChecked())
 
     def stop_multistart(self):
         if self._ms is not None:
@@ -2126,6 +2138,7 @@ class FitPanel:
         self._dream = DreamThread(problem, **options)
         self._dream.progress.connect(self.dream_window.progress)
         self._dream.snapshot.connect(self.dream_window.snapshot)
+        self._dream.rhat.connect(self.dream_window.rhat.set_history)
         self._dream.done.connect(self._dream_done)
         self._dream.failed.connect(self._dream_failed)
         self._dream.finished.connect(self._dream_cleanup)

@@ -446,9 +446,9 @@ def test_windows_have_a_tab_per_dataset():
     dw = DreamWindow()
     dw.start(pp, 120, 'joint')
     assert [dw.tabs.tabText(k) for k in range(dw.tabs.count())] == \
-        ['Summary', 'Traces', 'Corner', 'A', 'B']
+        ['Summary', 'Traces', 'R̂', 'Corner', 'A', 'B']
     dw.finish(res)
-    dw.tabs.setCurrentIndex(4)
+    dw.tabs.setCurrentWidget(dw.part_pages[1][0])
     page, pred, prof, view, _ = dw.part_pages[1]
     assert page.currentIndex() == 1, page.widget(0).text()
     # one plot at a time: Reflectance first, then SLD, then SA if any

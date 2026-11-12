@@ -9,9 +9,9 @@ first n points of a scrambled Sobol sequence in the normalised box [0, 1]^d
 LOCAL FIT -- 'lbfgs': scipy's L-BFGS-B from the start (maxiter 3000);
 'lsq': least squares on the residuals (fit.de.de_fit.run_lsq, maxiter
 LSQ_MAXITER); 'de':
-a short differential evolution (fit.de.de_fit.run_de, maxiter 100 with the
-polish unless de_options turn it off, seed + k) whose population holds the
-start.
+a differential evolution (fit.de.de_fit.run_de with `de_options`, the GUI's
+DE page settings; maxiter 100 with the polish where they say nothing, seed
++ k) whose population holds the start.
 
 MINIMA -- the end points are merged when they agree to MERGE_U in every
 normalised coordinate and to MERGE_COST in cost: one minimum, its best

@@ -66,6 +66,42 @@ def test_window_chain_chi2(app):
     win.close()
 
 
+def test_rhat_tab(app):
+    """The R̂ tab: the max R-hat over the parameters at each generation
+    it was computed, the run's target, where it was first reached; the
+    live thread hands the same curve as it goes."""
+    from fit.dream.dream_window import DreamThread, rhat_curve
+    pp = small_problem()
+    res = sample(pp, n_gen=600, seed=0, stop_when_converged=False,
+                 rhat_target=1.2)
+    win = DreamWindow()
+    win.start(pp, 600, 'test')
+    assert win.tabs.tabText(2) == 'R̂' and win.tabs.widget(2) is win.rhat
+    assert len(win.rhat.gens) == 0
+    win.finish(res)
+    g, r = rhat_curve(res.rhat_history)
+    assert len(g) > 3 and g[0] > res.adapt_until
+    assert np.array_equal(win.rhat.gens, g)
+    assert np.allclose(win.rhat.rmax, [np.max(R) for _, R in
+                                       res.rhat_history])
+    assert win.rhat.rhat_target == 1.2 and win.rhat.target.isVisible()
+    assert win.rhat.target.value() == pytest.approx(np.log10(1.2))
+    assert 'target 1.2' in win.rhat.info.text()
+    win.close()
+    # live: the thread's curve ends as the result's
+    got = []
+    th = DreamThread(pp, n_gen=600, seed=0, stop_when_converged=False,
+                     rhat_target=1.2)
+    th.rhat.connect(lambda gg, rr, t: got.append((gg, rr, t)))
+    th.run()                                  # in this thread
+    app.processEvents()
+    g2, r2 = rhat_curve(th.result.rhat_history)
+    assert got and got[-1][2] == 1.2
+    last_g, last_r = got[-1][0], got[-1][1]
+    assert np.array_equal(last_g, g2[:len(last_g)])
+    assert np.allclose(last_r, r2[:len(last_r)])
+
+
 def test_error_floor_reaches_the_problems(app, monkeypatch):
     sim = SimulationTab()
     sim.stack.layers[1].fit_entry('thickness')['vary'] = True
@@ -117,7 +153,7 @@ def test_chain_curves_over_the_bands(app):
     win = DreamWindow()
     win.start(pp, 300, 'test')
     win.finish(res)
-    win.tabs.setCurrentIndex(3)
+    win.tabs.setCurrentWidget(win.part_pages[0][0])
     page, pred, prof, view, box = win.part_pages[0]
     assert page.currentIndex() == 1, page.widget(0).text()
     chains = [it for kind, _, it in pred.items if kind == 'chains']
