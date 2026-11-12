@@ -8,7 +8,11 @@ multistart (fit.multistart, run in a fit.panel.MultistartThread) start by
 start.
 
 The history lists the best cost of every generation (and the polished
-result at the end); for a multistart, the distinct minima of the starts
+result at the end) and, beside it, the data-only chi^2/N of the same
+entry (fit.problem chi2_per_point: the cost without the priors' share,
+the number DREAM reports; one column when there are no priors, as both
+are then the same, '—' under the log R cost); for a multistart, the
+distinct minima of the starts
 ended so far, updated as each one ends (the entry selected stays selected,
 the best otherwise), best first, with how many starts reached each (✓:
 the current values' start among them).  Selecting an entry draws, in one tab per fitted
@@ -55,11 +59,31 @@ AT_BOUND = QtGui.QColor('#f87171')
 # the fit tabs' plot list: the Simulation tab's quantities, then this one
 RESIDUALS = 'Residuals'
 RESIDUAL_FORMULA = "(R_data − R_model) / σ"
+# what a fit target compares (fit.problem TARGET), after the cost's name
+TARGET_OF = {'channels': '', 'sum': ' of (R+ + R−)/2', 'asym': ' of SA'}
+NO_CHI2 = ('χ²/N is not defined for the log R cost (its residuals are not '
+           'divided by dR)')
+RIGHT_ALIGN = QtCore.Qt.AlignmentFlag.AlignRight | \
+    QtCore.Qt.AlignmentFlag.AlignVCenter
 
 
 def at_bound(v, lo, hi):
     """A value pinned at a bound usually means the bound is too tight."""
     return min(v - lo, hi - v) < 1e-3 * (hi - lo)
+
+
+def cost_names(problem, cost_label):
+    """(the cost's short name, the history's cost column header, whether
+    its chi^2/N column shows) of a fit of `problem`: under the chi^2 cost
+    with priors 'cost (χ²/N + prior/N)' beside the data-only χ²/N; without
+    priors both are the same number, one column 'χ²/N'; under the log R
+    cost `cost_label` (the panel's) beside a χ²/N of '—'."""
+    if problem.cost != 'chi2':
+        return 'cost', cost_label, True
+    of = TARGET_OF.get(getattr(problem, 'target', 'channels'), '')
+    if any(problem.priors):
+        return 'cost', 'cost (χ²/N + prior/N)' + of, True
+    return 'χ²/N', 'χ²/N' + of, False
 
 
 class DEThread(QtCore.QThread):
@@ -162,7 +186,7 @@ class DEWindow(QtWidgets.QWidget):
         v.addWidget(self.progress)
 
         self.history = QtWidgets.QTreeWidget()
-        self.history.setColumnCount(2)
+        self.history.setColumnCount(3)
         self.history.setRootIsDecorated(False)
         self.history.setUniformRowHeights(True)
         self.history.setAlternatingRowColors(True)
@@ -256,7 +280,17 @@ class DEWindow(QtWidgets.QWidget):
         self.setWindowTitle('Fit — %s' % title)
         self.history.blockSignals(True)
         self.history.clear()
-        self.history.setHeaderLabels([self.unit.capitalize(), cost_label])
+        self.cost_name, head, show_chi2 = cost_names(problem, cost_label)
+        self.history.setHeaderLabels([self.unit.capitalize(), head, 'χ²/N'])
+        self.history.setColumnHidden(2, not show_chi2)
+        self.history.headerItem().setToolTip(
+            1, 'What the fit minimises' + (
+                ': χ²/N plus the priors\' penalty / N' if show_chi2
+                and problem.cost == 'chi2' else ''))
+        self.history.headerItem().setToolTip(
+            2, 'χ²/N of the data alone (the cost without the priors\' '
+               'share), as DREAM reports it' if problem.cost == 'chi2'
+            else NO_CHI2)
         self.history.setToolTip(
             'Distinct minima, best first, and how many starts ended in each '
             '(✓: the current values\' start did); select one to draw it'
@@ -441,18 +475,14 @@ class DEWindow(QtWidgets.QWidget):
         h.blockSignals(True)
         self.entries = [(label, float(cost), np.array(x, dtype=float))
                         for label, cost, x in d['entries']]
-        items = []
-        for label, cost, _ in self.entries:
-            it = QtWidgets.QTreeWidgetItem([label, '%.6g' % cost])
-            it.setTextAlignment(1, QtCore.Qt.AlignmentFlag.AlignRight
-                                | QtCore.Qt.AlignmentFlag.AlignVCenter)
-            items.append(it)
+        # the chi^2/N column from the restored problem (nothing saved)
+        items = [self._item(*e) for e in self.entries]
         h.addTopLevelItems(items)
         if items:          # the best entry in bold, as _append marks it
             it = items[int(np.argmin([e[1] for e in self.entries]))]
             font = it.font(0)
             font.setBold(True)
-            for c in range(2):
+            for c in range(h.columnCount()):
                 it.setFont(c, font)
         h.blockSignals(False)
         self.tabs.setCurrentIndex(max(d['tab'], 0))
@@ -574,20 +604,31 @@ class DEWindow(QtWidgets.QWidget):
         cur = h.currentItem()
         follow = cur is None or h.indexOfTopLevelItem(cur) == len(self.entries) - 1
         self.entries.append((label, float(cost), np.array(x, dtype=float)))
-        it = QtWidgets.QTreeWidgetItem([label, '%.6g' % cost])
-        it.setTextAlignment(1, QtCore.Qt.AlignmentFlag.AlignRight
-                            | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        it = self._item(*self.entries[-1])
         h.addTopLevelItem(it)
         # mark the best entry so far
         best = int(np.argmin([e[1] for e in self.entries]))
         for i in range(h.topLevelItemCount()):
             font = h.topLevelItem(i).font(0)
             font.setBold(i == best)
-            for c in range(2):
+            for c in range(h.columnCount()):
                 h.topLevelItem(i).setFont(c, font)
         if follow:
             h.setCurrentItem(it)
             h.scrollToItem(it)
+
+    def _item(self, label, cost, x):
+        """The history row of an entry: its label, cost and data-only
+        chi^2/N (fit.problem chi2_per_point, from the cost: derived, not
+        stored with the entry)."""
+        c2 = self.problem.chi2_per_point(x, cost)
+        it = QtWidgets.QTreeWidgetItem(
+            [label, '%.6g' % cost, '—' if c2 is None else '%.6g' % c2])
+        for c in (1, 2):
+            it.setTextAlignment(c, RIGHT_ALIGN)
+        if c2 is None:
+            it.setToolTip(2, NO_CHI2)
+        return it
 
     # -- user actions -------------------------------------------------------
     def _stop(self):

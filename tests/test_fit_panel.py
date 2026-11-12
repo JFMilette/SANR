@@ -34,11 +34,16 @@ def channel(Q):
                 theta=np.nan * one, path='x.dat')
 
 
-def tab(qa, qb, licorne=True):
+def tab(qa, qb, licorne=True, prior=False):
     sim = SimulationTab()
     sim.res_on.setChecked(True)
     sim.res_conv.setCurrentIndex(3 if licorne else 0)
-    sim.stack.layers[1].fit_entry('thickness')['vary'] = True
+    e = sim.stack.layers[1].fit_entry('thickness')
+    e['vary'] = True
+    if prior:                 # a Gaussian prior 30 % into the bounds
+        e['prior'] = {'kind': 'gauss',
+                      'mu': e['min'] + 0.3 * (e['max'] - e['min']),
+                      'tau': 0.05 * (e['max'] - e['min'])}
     exp = ExperimentalTab(simulation=sim)
     exp.sets = [dict(name='d', visible=True,
                      channels={'+': channel(qa), '-': channel(qb)})]
@@ -533,3 +538,48 @@ def test_collapsed_sets_stay_collapsed(app):
     t.expandItem(items['d'])
     exp.refresh_tree()
     assert names()['d'].isExpanded()
+
+
+def lbfgs_fit(app, exp):
+    import time
+    exp.fit_workers.setValue(1)
+    exp.lb_maxiter.setValue(8)
+    exp.start_lbfgs()
+    t0 = time.monotonic()
+    while exp._fit is not None and time.monotonic() - t0 < 60:
+        app.processEvents()
+    return exp.fit_window
+
+
+def test_chi2_column(app):
+    """The history's third column is the data-only chi^2/N of each entry,
+    the cost minus the priors' share (T2); without priors the two are the
+    same and the column is hidden; under log R it reads '—'."""
+    exp = tab(QA, QA, licorne=False, prior=True)
+    win = lbfgs_fit(app, exp)
+    h, p = win.history, win.problem
+    assert [h.headerItem().text(c) for c in range(3)] == [
+        'Iteration', 'cost (χ²/N + prior/N)', 'χ²/N']
+    assert h.columnCount() == 3 and not h.isColumnHidden(2)
+    assert h.topLevelItemCount() == len(win.entries) > 1
+    for k, (_, cost, x) in enumerate(win.entries):
+        it = h.topLevelItem(k)
+        c2 = cost - p.prior_penalty(x) / p.npoints
+        assert it.text(2) == '%.6g' % c2
+        assert c2 == pytest.approx(np.mean(p.residuals(x)**2), rel=1e-9)
+        assert c2 < cost
+    best = int(np.argmin([e[1] for e in win.entries]))
+    assert h.topLevelItem(best).font(2).bold()
+    # no prior: one column, the cost is chi^2/N
+    exp = tab(QA, QA, licorne=False)
+    win = lbfgs_fit(app, exp)
+    h = win.history
+    assert h.headerItem().text(1) == 'χ²/N' and h.isColumnHidden(2)
+    assert h.topLevelItem(0).text(2) == h.topLevelItem(0).text(1)
+    # log R: no chi^2
+    exp = tab(QA, QA, licorne=False)
+    exp.fit_cost.setCurrentIndex(1)
+    win = lbfgs_fit(app, exp)
+    h = win.history
+    assert not h.isColumnHidden(2) and h.topLevelItem(0).text(2) == '—'
+    assert 'log R' in h.topLevelItem(0).toolTip(2)

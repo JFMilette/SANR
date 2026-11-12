@@ -216,7 +216,8 @@ def test_panel_box(monkeypatch):
     exp._open_fit_window(*built[:4], 'lbfgs')
     win = exp.fit_window
     assert win.views[0].quantity.currentText() == 'SA half-polarized'
-    assert win.history.headerItem().text(1) == 'χ² of SA'
+    # the cost per point, χ²/N (no priors: the χ²/N column is hidden)
+    assert win.history.headerItem().text(1) == 'χ²/N of SA'
 
 
 def test_pairs_stay_within_one_angle():
