@@ -282,6 +282,37 @@ def test_unsaved_changes_are_asked_about(window, monkeypatch, tmp_path):
     assert json.loads(out.read_text())['background'] == 1e-6
 
 
+def test_open_session_does_not_ask(window, monkeypatch, tmp_path):
+    """Opening a session replaces the one shown without asking about its
+    unsaved changes: only quitting asks."""
+    import main
+    asked = []
+    B = QtWidgets.QMessageBox.StandardButton
+
+    def question(parent, title, *a, **k):
+        asked.append(title)
+        return B.Cancel
+    out = tmp_path / 's.json'
+    monkeypatch.setattr(QtWidgets.QFileDialog, 'getSaveFileName',
+                        staticmethod(lambda *a, **k: (
+                            str(out), main.SAVE_FILTER.split(';;')[1])))
+    window.simulation.background.setValue(1e-6)
+    APP.processEvents()
+    assert window.save_session() and out.is_file()
+    window.simulation.background.setValue(3e-6)        # not saved
+    APP.processEvents()
+    monkeypatch.setattr(QtWidgets.QMessageBox, 'question', question)
+    monkeypatch.setattr(QtWidgets.QFileDialog, 'getOpenFileName',
+                        staticmethod(lambda *a, **k: (str(out), '')))
+    window.open_session()
+    assert asked == []
+    assert window.simulation.background.value() == pytest.approx(1e-6)
+    window.simulation.background.setValue(4e-6)        # quitting still asks
+    APP.processEvents()
+    window.close()
+    assert asked == ['Quit SANR'] and window.isVisible()
+
+
 def test_failed_open_keeps_the_session(window, monkeypatch, tmp_path):
     import main
     window.simulation.background.setValue(2e-6)

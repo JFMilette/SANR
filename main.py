@@ -156,7 +156,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._saved_key = self._state_key()
 
     def _keep_or_lose(self, title):
-        """Before the session is closed or replaced: True to go on
+        """Before SANR quits (only then: opening a session or importing a
+        Licorne one replaces the session without asking): True to go on
         (nothing unsaved, or saved, or the user chose to discard it), False
         to stay.  A window not shown has no one to ask (tests)."""
         if not self.isVisible():
@@ -204,8 +205,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self, 'Open session',
                 'Stop the running fit or sampling first.')
             return
-        if not self._keep_or_lose('Open session'):
-            return
+        # no question about unsaved changes here: only when quitting
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, 'Open session', self.session_dir, MODEL_FILTER,
             options=DIALOG_OPTIONS)
@@ -297,7 +297,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self, 'Import Licorne session folder', '',
             options=DIALOG_OPTIONS
             | QtWidgets.QFileDialog.Option.ShowDirsOnly)
-        if not folder or not self._keep_or_lose('Import Licorne session'):
+        if not folder:
             return
         try:
             lic = load_licorne_session(folder)
