@@ -55,7 +55,10 @@ the Q range keeps part of the data (an X-ray scan to 4 A^-1 fitted to
 COST -- mean over all points of the squared residual, plus, for parameters
 with a prior from other measurements (fit.priors), -2 (log p - its maximum)
 / N of each: the DE optimum is then DREAM's MAP (zero when every such
-value sits at its expected one); residuals() never includes it:
+value sits at its expected one); residuals() never includes it, and
+chi2_per_point(x, cost) gives the data-only chi^2/N, cost minus the
+priors' share, without evaluating the model again (what the fit windows
+show beside the cost, and DREAM's chi^2/N):
   'chi2' : (R_model - R) / dR, i.e. the reduced chi^2 up to the number of
            free parameters.  Points with dR <= 0 use dR = R (relative
            residual) so data without errors can still be fitted.  An
@@ -702,3 +705,17 @@ class FitProblem:
         if any(self.priors):
             cost += self.prior_penalty(x) / self.npoints
         return cost
+
+    def chi2_per_point(self, x, cost=None):
+        """chi^2/N of physical x without the priors' penalty (see COST):
+        from `cost`, this problem's cost at x, when given (cost - penalty /
+        N: no model evaluation, the priors only), else from the residuals;
+        None for the 'log' cost, which has no chi^2."""
+        if self.cost != 'chi2':
+            return None
+        x = np.asarray(x, dtype=float)
+        if cost is None:
+            return float(np.mean(self.residuals(x)**2))
+        if not any(self.priors):
+            return float(cost)
+        return float(cost) - self.prior_penalty(x) / self.npoints

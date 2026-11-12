@@ -184,10 +184,10 @@ class PosteriorProblem:
 
     def chi2_per_point(self, x):
         """chi^2 / N of x (the DE 'chi2' cost without its priors), with the
-        measured dR."""
+        measured dR: the fit problem's chi2_per_point, the number the fit
+        windows show beside their cost."""
         x = np.asarray(x, dtype=float)[:len(self.fit.params)]
-        return float(np.mean(self.fit.residuals(
-            self.fit.to_x(self.fit.to_u(x)))**2))
+        return self.fit.chi2_per_point(self.fit.to_x(self.fit.to_u(x)))
 
     @property
     def n_extra(self):

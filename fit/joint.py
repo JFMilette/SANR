@@ -180,6 +180,7 @@ class JointProblem:
     to_u = FitProblem.to_u
     x0 = FitProblem.x0
     prior_penalty = FitProblem.prior_penalty
+    chi2_per_point = FitProblem.chi2_per_point
     __call__ = FitProblem.__call__
 
     def part_x(self, x, k):
