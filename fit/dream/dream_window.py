@@ -1018,21 +1018,17 @@ class DreamWindow(QtWidgets.QWidget):
         # state (chain_best), set by finish
         self.send_from = QtWidgets.QComboBox()
         self.send_from.setToolTip(
-            'MAP: the best state visited by any chain.  Chain k: the best '
-            'state chain k kept (after the discarded half),\nas drawn with '
+            'MAP: the best state visited by any chain.  Median: the posterior '
+            "median of every parameter (the Summary's); taken one by one,\n"
+            'the medians are not a state the chains visited: with correlated '
+            'parameters they can fit worse than the MAP.\nChain k: the best '
+            'state chain k kept (after the discarded half), as drawn with '
             '"chains" on the dataset tabs and in its Traces colour')
         self._send_states = []          # (label, x) of each entry
         self.btn_map = QtWidgets.QPushButton('Load into model')
         self.btn_map.setToolTip('Send the state chosen beside it to the '
                                 'Simulation tab')
         self.btn_map.clicked.connect(self._send_state)
-        self.btn_median = QtWidgets.QPushButton('Load median')
-        self.btn_median.setToolTip(
-            "Send the posterior median of every parameter (the Summary's) "
-            'to the Simulation tab.\nThe medians taken one by one are not a '
-            'state the chains visited: with correlated parameters they can '
-            'fit worse than the MAP (their χ²/N is in the list).')
-        self.btn_median.clicked.connect(self._send_median)
         self.bounds_k = QtWidgets.QDoubleSpinBox()
         self.bounds_k.setRange(0.1, 10.0)
         self.bounds_k.setSingleStep(0.5)
@@ -1060,7 +1056,6 @@ class DreamWindow(QtWidgets.QWidget):
         bottom.addStretch(1)
         bottom.addWidget(self.send_from)
         bottom.addWidget(self.btn_map)
-        bottom.addWidget(self.btn_median)
 
         v = QtWidgets.QVBoxLayout(self)
         v.addWidget(self.header)
@@ -1144,7 +1139,7 @@ class DreamWindow(QtWidgets.QWidget):
         self._drawn = set()
         self.tabs.setCurrentWidget(self.trace)
         self.btn_stop.setEnabled(True)
-        for b in (self.btn_save, self.btn_map, self.btn_median,
+        for b in (self.btn_save, self.btn_map,
                   self.btn_bounds,
                   self.btn_continue):
             b.setEnabled(False)
@@ -1171,7 +1166,7 @@ class DreamWindow(QtWidgets.QWidget):
         self._drawn = set()
         self._live, self._corner_t = None, 0.0
         self.btn_stop.setEnabled(True)
-        for b in (self.btn_save, self.btn_map, self.btn_median,
+        for b in (self.btn_save, self.btn_map,
                   self.btn_bounds,
                   self.btn_continue):
             b.setEnabled(False)
@@ -1310,7 +1305,6 @@ class DreamWindow(QtWidgets.QWidget):
             self.ready.emit()
             return
         self.btn_map.setEnabled(False)
-        self.btn_median.setEnabled(False)
         self.btn_bounds.setEnabled(False)
         for page in self._all_pages():
             page.widget(0).setText('Computing…')
@@ -1398,7 +1392,6 @@ class DreamWindow(QtWidgets.QWidget):
         self.converged.setText(text)
         self._fill_send_from(texts['send'])
         self.btn_map.setEnabled(True)
-        self.btn_median.setEnabled(True)
         self.btn_bounds.setEnabled(True)
         self._draw_tab(self.tabs.currentIndex())
         self.computing = False
@@ -1417,13 +1410,6 @@ class DreamWindow(QtWidgets.QWidget):
                 pm.fill(QtGui.QColor(CHAIN_COLOURS[j % len(CHAIN_COLOURS)]))
                 self.send_from.setItemIcon(k, QtGui.QIcon(pm))
         self.send_from.setCurrentIndex(0)
-
-    def _send_median(self):
-        """Load median: the posterior median, whatever the list shows."""
-        for label, x in self._send_states:
-            if label == 'median':
-                self.sendRequested.emit(np.array(x), label)
-                return
 
     def _send_state(self):
         k = self.send_from.currentIndex()

@@ -172,8 +172,7 @@ def test_chain_curves_over_the_bands(app):
     assert len(sa) == 8 and not any(it.isVisible() for it in sa)
     box.setChecked(True)
     assert all(it.isVisible() for it in sa)
-    # Load into model: the MAP, the median or one chain's best kept state;
-    # Load median: the median whatever the list shows
+    # Load into model: the MAP, the median or one chain's best kept state
     med = np.median(res.samples(), axis=0)
     assert win.send_from.count() == 10
     assert win.send_from.itemText(0).startswith('MAP — χ²/N')
@@ -187,8 +186,8 @@ def test_chain_curves_over_the_bands(app):
     win.btn_map.click()
     win.send_from.setCurrentIndex(4)
     win.btn_map.click()
-    assert win.btn_median.isEnabled()
-    win.btn_median.click()                  # chain 3 still shown
+    win.send_from.setCurrentIndex(1)
+    win.btn_map.click()
     assert np.array_equal(sent[0][0], res.best()[0]) and sent[0][1] == 'MAP'
     assert np.array_equal(sent[1][0], best[2]) and sent[1][1] == 'chain 3'
     assert np.array_equal(sent[2][0], med) and sent[2][1] == 'median'
