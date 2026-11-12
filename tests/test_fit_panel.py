@@ -583,3 +583,24 @@ def test_chi2_column(app):
     h = win.history
     assert not h.isColumnHidden(2) and h.topLevelItem(0).text(2) == '—'
     assert 'log R' in h.topLevelItem(0).toolTip(2)
+
+
+def test_chi2_in_the_status(app):
+    """The end of a fit gives the cost with its chi^2/N and priors' share,
+    and chi^2/nu = chi^2/N N / (N - k); without priors, chi^2/N alone."""
+    import re
+    exp = tab(QA, QA, licorne=False, prior=True)
+    win = lbfgs_fit(app, exp)
+    p = win.problem
+    _, cost, x = win.entries[-1]
+    c2 = p.chi2_per_point(x, cost)
+    text = win.status.text()
+    assert 'best cost %.6g (χ²/N %.6g + priors %.3g)' % (
+        cost, c2, cost - c2) in text
+    nu = float(re.search(r'χ²/ν ([0-9.e+-]+)', text).group(1))
+    n, k = p.npoints, len(p.params)
+    assert nu == pytest.approx(c2 * n / (n - k), rel=1e-5)
+    exp = tab(QA, QA, licorne=False)
+    win = lbfgs_fit(app, exp)
+    _, cost, _ = win.entries[-1]
+    assert 'best χ²/N %.6g, χ²/ν' % cost in win.status.text()

@@ -11,9 +11,11 @@ The history lists the best cost of every generation (and the polished
 result at the end) and, beside it, the data-only chi^2/N of the same
 entry (fit.problem chi2_per_point: the cost without the priors' share,
 the number DREAM reports; one column when there are no priors, as both
-are then the same, '—' under the log R cost); for a multistart, the
-distinct minima of the starts
-ended so far, updated as each one ends (the entry selected stays selected,
+are then the same, '—' under the log R cost; the status lines give
+both, "best cost 1.35068 (χ²/N 1.34276 + priors 0.00791)", and at the end
+chi^2 per degree of freedom, χ²/ν = χ²/N · N / (N - k)); for a multistart,
+the distinct minima of the starts ended so far, updated as each one ends
+(the entry selected stays selected,
 the best otherwise), best first, with how many starts reached each (✓:
 the current values' start among them).  Selecting an entry draws, in one tab per fitted
 dataset (several in a joint fit, fit.joint), its depth profile (with its
@@ -356,27 +358,29 @@ class DEWindow(QtWidgets.QWidget):
         """A fit.de.de_fit STATUS report of the running fit."""
         if not self.running:
             return
-        c = self.cost_label
+        c = self.cost_name
         if info['phase'] in ('lbfgs', 'lsq'):
-            self.progress.setText('%s iteration %d / %d — %s %.6g' % (
+            self.progress.setText('%s iteration %d / %d — %s' % (
                 'L-BFGS-B' if info['phase'] == 'lbfgs' else 'Least-squares',
-                info['iteration'], info['maxiter'], c, info['best']))
+                info['iteration'], info['maxiter'], self._costs(info['best'])))
             return
         if info['phase'] == 'global':
             step = '%s %d%s' % (self.unit, info['step'],
                                 ' / %d' % info['maxiter']
                                 if info['maxiter'] else '')
-            self.progress.setText('%s — %s%s — best %s %s' % (
+            self.progress.setText('%s — %s%s — best %s' % (
                 global_fit.LABELS[info['method']], step,
                 ', %d evaluations' % info['evals']
-                if info['evals'] is not None else '', c,
-                '%.6g' % info['best'] if info['best'] is not None else '…'))
+                if info['evals'] is not None else '',
+                self._costs(info['best']) if info['best'] is not None
+                else '%s …' % c))
             return
         if info['phase'] == 'polish':
             self.progress.setText(
-                'Polishing (L-BFGS-B)%s — %s %.6g' % (
+                'Polishing (L-BFGS-B)%s — %s' % (
                     ', iteration %d' % info['iteration']
-                    if info['iteration'] else '…', c, info['best']))
+                    if info['iteration'] else '…',
+                    self._costs(info['best'])))
             return
         t = self._gen_times
         t.append(time.monotonic())
@@ -384,10 +388,11 @@ class DEWindow(QtWidgets.QWidget):
         rate = ' — %.2g s per generation' % ((t[-1] - t[0]) / (len(t) - 1)) \
             if len(t) > 1 else ''
         self.progress.setText(
-            'Generation %d / %d — best %s %.6g, population median %.6g<br>'
+            'Generation %d / %d — best %s, population median %.6g<br>'
             'Spread of the population\'s %s %.2g (stops at ≤ tol %.2g)%s'
-            % (info['generation'], info['maxiter'], c, info['best'],
-               info['median'], c, info['spread'], info['tol'], rate))
+            % (info['generation'], info['maxiter'],
+               self._costs(info['best']), info['median'], c,
+               info['spread'], info['tol'], rate))
 
     def set_minima(self, minima):
         """The minima a fit ends with (fit.multistart rows, best first:
@@ -404,11 +409,12 @@ class DEWindow(QtWidgets.QWidget):
             self._fill_minima(m, lambda k, _: '%d — %s' % (
                 k + 1, 'global' if k == 0 else 'local'))
             self.status.setText(
-                '<b>Done</b> after %d %s(s) — %d minim%s: global %s %.6g%s'
+                '<b>Done</b> after %d %s(s) — %d minim%s: global %s%s%s'
                 '<br><i>%s</i><br>Select a minimum and send it to the '
                 'Simulation tab.' % (
                     gen, self.unit, len(m), 'um' if len(m) == 1 else 'a',
-                    self.cost_label, m[0]['chi2'],
+                    self._costs(m[0]['chi2'], m[0]['x']),
+                    self._nu(m[0]['chi2'], m[0]['x']),
                     ', %d local' % (len(m) - 1) if len(m) > 1 else '',
                     html_escape(msg)))
             self.btn_stop.setEnabled(False)
@@ -425,14 +431,15 @@ class DEWindow(QtWidgets.QWidget):
         note = ''
         if self.polish and not stopped:
             note = '<br>Polish: %s' % (
-                '%s %.6g → %.6g' % (self.cost_label, self.entries[-2][1], cost)
+                self._polish_text(self.entries[-2], (None, cost, x))
                 if new and len(self.entries) > 1 else
                 'no improvement on the last generation')
         self.status.setText(
-            '<b>%s</b> after %d %s(s) — best %.6g<br><i>%s</i>%s<br>'
+            '<b>%s</b> after %d %s(s) — best %s%s<br><i>%s</i>%s<br>'
             'Select an entry and send it to the Simulation tab.'
-            % ('Stopped' if stopped else 'Done', gen, self.unit, cost,
-               html_escape(msg), note))
+            % ('Stopped' if stopped else 'Done', gen, self.unit,
+               self._costs(cost, x), self._nu(cost, x), html_escape(msg),
+               note))
         self.btn_stop.setEnabled(False)
         self.btn_send.setEnabled(self.history.currentItem() is not None)
 
@@ -519,9 +526,9 @@ class DEWindow(QtWidgets.QWidget):
         is."""
         if not self.running:
             return
-        c = self.cost_label
+        c = self.cost_name
         lines = ['%d / %d starts done%s' % (self._ms_count + (
-            ' — best %s %.6g' % (c, min(self._ms_ended.values()))
+            ' — best %s' % self._costs(min(self._ms_ended.values()))
             if self._ms_ended else '',))]
         for k, i in sorted(self._ms_run.items()):
             what = {
@@ -553,11 +560,12 @@ class DEWindow(QtWidgets.QWidget):
         hits = sum(m['hits'] for m in minima)
         cut = sum(m.get('unfinished', 0) for m in minima)
         self.status.setText(
-            '<b>%s</b> — %d start(s) ended in %d distinct minim%s, best %s '
-            '%.6g%s<br>Select a minimum and send it to the Simulation tab.' % (
+            '<b>%s</b> — %d start(s) ended in %d distinct minim%s, best %s'
+            '%s%s<br>Select a minimum and send it to the Simulation tab.' % (
                 'Stopped' if stopped else 'Done', hits, len(minima),
-                'um' if len(minima) == 1 else 'a', self.cost_label,
-                minima[0]['chi2'],
+                'um' if len(minima) == 1 else 'a',
+                self._costs(minima[0]['chi2'], minima[0]['x']),
+                self._nu(minima[0]['chi2'], minima[0]['x']),
                 '<br>%d start(s) ended on their iteration limit, not '
                 'converged: where one was cut is not a minimum (fit on '
                 'from it)' % cut if cut else '') if minima else
@@ -616,6 +624,53 @@ class DEWindow(QtWidgets.QWidget):
         if follow:
             h.setCurrentItem(it)
             h.scrollToItem(it)
+
+    def _x_of(self, cost):
+        """The parameters of the newest entry with exactly this cost (the
+        best a progress report gives, without its x), or None."""
+        for _, c, x in reversed(self.entries):
+            if c == cost:
+                return x
+        return None
+
+    def _costs(self, cost, x=None):
+        """A cost as the status lines give it: 'cost 1.35068 (χ²/N 1.34276
+        + priors 0.00791)' with priors (x: its parameters, default those of
+        the entry with that cost; the cost alone if none), 'χ²/N 1.34276'
+        without, '<cost label> 0.0123' under the log R cost."""
+        p = self.problem
+        if p.cost != 'chi2':
+            return '%s %.6g' % (self.cost_label, cost)
+        if not any(p.priors):
+            return 'χ²/N %.6g' % cost
+        x = self._x_of(cost) if x is None else x
+        if x is None:
+            return 'cost %.6g' % cost
+        c2 = p.chi2_per_point(x, cost)
+        return 'cost %.6g (χ²/N %.6g + priors %.3g)' % (cost, c2, cost - c2)
+
+    def _nu(self, cost, x):
+        """', χ²/ν 1.3749': chi^2 per degree of freedom, chi^2/N times
+        N / (N - k) for N points and k parameters ('' under log R, or
+        with no degree of freedom left)."""
+        p = self.problem
+        c2 = p.chi2_per_point(x, cost)
+        n, k = p.npoints, len(p.params)
+        if c2 is None or n <= k:
+            return ''
+        return ', χ²/ν %.6g' % (c2 * n / (n - k))
+
+    def _polish_text(self, before, after):
+        """The polish note: the cost (and chi^2/N with priors) of the
+        last generation's best, entry `before`, then of the polished one,
+        `after` ((label, cost, x) both)."""
+        (_, c0, x0), (_, c1, x1) = before, after
+        p = self.problem
+        text = '%s %.6g → %.6g' % (self.cost_name, c0, c1)
+        if p.cost == 'chi2' and any(p.priors):
+            text += ' (χ²/N %.6g → %.6g)' % (p.chi2_per_point(x0, c0),
+                                             p.chi2_per_point(x1, c1))
+        return text
 
     def _item(self, label, cost, x):
         """The history row of an entry: its label, cost and data-only
