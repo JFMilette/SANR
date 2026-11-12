@@ -43,10 +43,14 @@ phase adapts the crossover at beta = 1.
 Archive pruning (DREAM(ZS), archive_keep, default 0.25): at the end of the
 adaptation phase the archive drops its M0 prior draws and the states
 archived before the last archive_keep of that phase (and before
-temper_until): far from the posterior, they made most jumps too long to be
+temper_until), keeping at least archive_min = 10 d: far from the posterior, they made most jumps too long to be
 accepted for the rest of the run (half the effective sample size on a
 10-d Gaussian).  States of z0 are kept.  The archive only grows after
-that, as in DREAM(ZS).
+that, as in DREAM(ZS), unless reprune extends the burn-in of a stopped
+run whose log p still rose after the adaptation phase.
+
+Sample window (discard): the last half of the generations (0.5, the
+default), or every generation after the adaptation phase (0).
 
 Convergence: rank-normalised split R-hat (Vehtari et al., Bayesian Anal.
 16, 667 (2021)), the larger of the bulk and tail values, over the samples
@@ -106,27 +110,33 @@ class DreamResult:
     n_evals: int = 0
     names: Optional[Sequence[str]] = None
     state: Optional[dict] = None  # sampler state for dream(resume=...)
+    # the run's sample window (kept_from): 0.5 the last half, 0 from the
+    # end of the adaptation phase on
+    discard: float = 0.5
 
-    def samples(self, discard: float | int = 0.5) -> np.ndarray:
+    def samples(self, discard: float | int | None = None) -> np.ndarray:
         """Flattened posterior sample (M, d).
 
-        discard: fraction (<1) or generation number (>=1) to drop.  Never
-        keeps anything from the adaptation phase.
+        discard: fraction (<1) or generation number (>=1) to drop (None:
+        the run's own, self.discard).  Never keeps anything from the
+        adaptation phase.
         """
         return self.chains[self.keep(discard)].reshape(
             -1, self.chains.shape[-1])
 
-    def keep(self, discard: float | int = 0.5) -> np.ndarray:
-        """Which stored generations are posterior samples (kept_from)."""
-        return self.generations >= kept_from(self.generations,
-                                             self.adapt_until, discard)
+    def keep(self, discard: float | int | None = None) -> np.ndarray:
+        """Which stored generations are posterior samples (kept_from;
+        discard None: the run's own)."""
+        return self.generations >= kept_from(
+            self.generations, self.adapt_until,
+            self.discard if discard is None else discard)
 
     def best(self) -> tuple[np.ndarray, float]:
         """Maximum-a-posteriori state visited (not a posterior summary)."""
         k = np.unravel_index(np.nanargmax(self.logp), self.logp.shape)
         return self.chains[k].copy(), float(self.logp[k])
 
-    def summary(self, discard: float | int = 0.5) -> str:
+    def summary(self, discard: float | int | None = None) -> str:
         s = self.samples(discard)
         q = np.percentile(s, [2.5, 16, 50, 84, 97.5], axis=0)
         rhat = self.rhat_history[-1][1] if self.rhat_history else np.full(s.shape[1], np.nan)
@@ -232,7 +242,8 @@ def _thinned(x: np.ndarray) -> np.ndarray:
     return x[::step] if step > 1 else x
 
 
-def ess(result: DreamResult, discard: float | int = 0.5) -> np.ndarray:
+def ess(result: DreamResult,
+        discard: float | int | None = None) -> np.ndarray:
     """Effective sample size of each parameter over the pooled chains kept
     by result.samples(discard): multi-chain autocorrelation (Gelman et al.,
     BDA3 Sec. 11.5) summed with Geyer's initial positive sequence."""
@@ -273,6 +284,50 @@ def _iqr_outliers(mean_logp: np.ndarray) -> np.ndarray:
         return ~finite
     q1, q3 = np.percentile(mean_logp[finite], [25, 75])
     return (~finite) | (mean_logp < q1 - 2.0 * (q3 - q1))
+
+
+def archive_min(d: int, delta: int = 3) -> int:
+    """Fewest archive states a pruning keeps: 10 d (at least 2 delta + 1,
+    what one proposal draws)."""
+    return max(10 * d, 2 * delta + 1)
+
+
+def _prune(Z: np.ndarray, m: int, z_head: int, first: int, need: int) -> int:
+    """Keep the archive rows Z[:z_head] (z0's) and Z[first:m], moved up
+    in place, at least `need` rows in all (the last ones archived); the
+    new number of rows."""
+    first = max(min(first, m - max(need - z_head, 0)), z_head)
+    kept = Z[first:m].copy()
+    Z[z_head:z_head + len(kept)] = kept
+    return z_head + len(kept)
+
+
+def reprune(state: dict, after: int, delta: int = 3) -> dict:
+    """A copy of a sampler state (DreamResult.state) whose burn-in goes on
+    to generation `after` (adapt_until, between the old one and the last
+    generation): no sample before it is kept, and the DREAM(ZS) archive
+    keeps z0's rows and only the states archived after it (at least
+    archive_min).  For a run whose log p still rose after the adaptation
+    phase: resumed, it samples as if that burn-in had been part of the
+    adaptation phase.  The archive only grows after that phase, so its
+    last rows are the ones archived after `after`."""
+    st = dict(state)
+    t, a = int(st['t']), int(st['adapt_until'])
+    after = int(after)
+    if not a <= after < t:
+        raise ValueError('the new end of the burn-in must lie between the '
+                         'adaptation phase (%d) and the last generation (%d)'
+                         % (a, t))
+    st['adapt_until'] = after
+    if st['archive']:
+        N, ae = st['N'], st['archive_every']
+        Z, m = np.array(st['Z'], float), int(st['m'])
+        z_head = int(st.get('z_head', 0))
+        rows_after = (t // ae - after // ae) * N
+        m = _prune(Z, m, z_head, max(m - rows_after, z_head),
+                   archive_min(st['d'], delta))
+        st['Z'], st['m'] = Z[:m].copy(), m
+    return st
 
 
 # ----------------------------------------------------------------------------
@@ -316,6 +371,7 @@ def dream(
     z0: Optional[np.ndarray] = None,
     archive_keep: Optional[float] = 0.25,
     ess_target: float = 0.0,
+    discard: float = 0.5,
 ) -> DreamResult:
     """Run DREAM.
 
@@ -352,6 +408,10 @@ def dream(
     rhat_target, min_gen_after_converged, ess_target : the stopping rule
              of stop_when_converged (module docstring); ess_target 0: no
              ESS condition.
+    discard : the sample window (kept_from) of R-hat, the stopping ESS and
+             the result's samples(): 0.5 the last half of the generations,
+             0 from the end of the adaptation phase on (more samples; for
+             chains started at the optimum, whose burn-in ends there).
     """
     if archive_keep is not None and not 0 < archive_keep <= 1:
         raise ValueError('archive_keep must lie in (0, 1], or be None')
@@ -382,6 +442,7 @@ def dream(
         temper_until = st.get('temper_until', 0)
         # states from before archive pruning: none
         archive_keep = st.get('archive_keep')
+        discard = st.get('discard', 0.5)
     if temper_until is None:
         temper_until = max(adapt_until // 2, 1)
     temper = beta_start < 1.0
@@ -577,16 +638,12 @@ def dream(
             # archive pruning (module docstring): keep z0's rows and those
             # archived after generation g_cut (event k, at generation
             # k * archive_every, wrote rows m0 + (k - 1) N .. m0 + k N),
-            # at least `need` rows in all
+            # at least archive_min rows in all
             g_cut = adapt_until - int(np.ceil(archive_keep * adapt_until))
             if temper:
                 g_cut = max(g_cut, temper_until)
-            need = max(2 * delta + 1, 2 * d)
-            first = m0 + (g_cut // archive_every) * N
-            first = max(min(first, m - need), z_head, 0)
-            kept = Z[first:m].copy()
-            Z[z_head:z_head + len(kept)] = kept
-            m = z_head + len(kept)
+            m = _prune(Z, m, z_head, m0 + (g_cut // archive_every) * N,
+                       archive_min(d, delta))
         if outlier and t <= adapt_until and t % outlier_every == 0:
             mean_lp = hist_logp[t // 2: t + 1].mean(axis=0)
             bad = _iqr_outliers(mean_lp)
@@ -605,7 +662,7 @@ def dream(
 
         # ---------- convergence ----------------------------------------------
         if t % rhat_every == 0 and t > adapt_until:
-            sel = gens[:k_store] >= kept_from(gens[:k_store], adapt_until)
+            sel = gens[:k_store] >= kept_from(gens[:k_store], adapt_until, discard)
             kept = _thinned(chains[:k_store][sel])
             R = split_rhat(kept)
             rhat_hist.append((t, R))
@@ -632,7 +689,7 @@ def dream(
         # the R-hat of the samples the run ends with (stopped, or at an
         # n_gen that is not a multiple of rhat_every), not of the last
         # multiple of rhat_every
-        sel = gens[:k_store] >= kept_from(gens[:k_store], adapt_until)
+        sel = gens[:k_store] >= kept_from(gens[:k_store], adapt_until, discard)
         rhat_hist.append((t, split_rhat(_thinned(chains[:k_store][sel]))))
 
     state = dict(
@@ -640,7 +697,7 @@ def dream(
         rhat_target=rhat_target, ess_target=ess_target,
         d=d, N=N, archive=archive, thin=thin, outlier=outlier,
         adapt_until=adapt_until, archive_every=archive_every,
-        archive_keep=archive_keep, m0=m0, z_head=z_head,
+        archive_keep=archive_keep, m0=m0, z_head=z_head, discard=discard,
         p_snooker=p_snooker, beta_start=beta_start, temper_until=temper_until,
         X=X.copy(), logp_X=logp_X.copy(), n_evals=n_evals,
         lp_X=None if lp_X is None else lp_X.copy(),
@@ -655,6 +712,7 @@ def dream(
         chains=chains[:k_store], logp=logps[:k_store], generations=gens[:k_store],
         acceptance=acc, rhat_history=rhat_hist, pCR=pCR,
         adapt_until=adapt_until, n_evals=n_evals, names=names, state=state,
+        discard=discard,
     )
 
 

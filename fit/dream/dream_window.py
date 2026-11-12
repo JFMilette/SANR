@@ -41,7 +41,11 @@ values as the dataset chosen beside them sees them.  "Save chains..."
 writes the run with fit.dream.dream_fit.save_result.  Continue (with the
 "+ gen." box beside it) runs that many more generations of an ended run
 (stopped, converged or done; not one reopened from a session), as if it
-had never stopped.
+had never stopped; "Prune & continue", offered when log p still rose
+after the adaptation phase (fit.dream.dream_fit.burn_in_end), first
+counts those generations as burn-in and drops them from the archive
+(fit.dream.dream.reprune).  The traces and corner keep the run's sample
+window (the last half, or everything after the adaptation phase).
 """
 
 import base64
@@ -59,7 +63,8 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 
 from fit.dream.dream import kept_from
 from session_file import sessions_dir
-from fit.dream.dream_fit import (FLOOR_NAME, SIGMA_NAME, chain_best,
+from fit.dream.dream_fit import (FLOOR_NAME, SIGMA_NAME, auto_adapt,
+                         burn_in_end, chain_best,
                          chain_chi2, chain_curves,
                          chains_split, format_summary, load_run,
                          posterior_warnings, predictive_bands, profile_bands,
@@ -310,6 +315,7 @@ class TracePanel(QtWidgets.QWidget):
         self.p.addItem(self.adapt)
         self.curves, self.bars = [], None
         self.chain_chi2 = None           # chi^2/N of each chain, last state
+        self.discard = 0.5               # the run's sample window
 
         v = QtWidgets.QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -383,8 +389,8 @@ class TracePanel(QtWidgets.QWidget):
             else:
                 c.setData([], [])
         self.p.setLabel('left', label)
-        # kept samples: after the adaptation phase and the first half
-        keep = g >= kept_from(g, self.adapt_until)
+        # kept samples: the run's window, after the adaptation phase
+        keep = g >= kept_from(g, self.adapt_until, self.discard)
         vals = Y[keep].ravel()
         vals = vals[np.isfinite(vals)]
         if self.bars is not None:
@@ -584,13 +590,15 @@ class CornerPanel(QtWidgets.QWidget):
         self.samples, self.infos = None, []
         self.note.setText('')
 
-    def set_result(self, result, infos, discard=0.5):
-        """The posterior samples of a finished run."""
+    def set_result(self, result, infos, discard=None):
+        """The posterior samples of a finished run (discard None: its own
+        window)."""
         s = result.samples(discard)
         self.set_samples(s, infos, 'Final: %d samples, from generation %d '
                          'on.' % (len(s), kept_from(
                              result.generations, result.adapt_until,
-                             discard)))
+                             result.discard if discard is None
+                             else discard)))
 
     def set_samples(self, s, infos, note):
         """Samples s (M, d) in stored units; `note` above the plots.  The
@@ -966,6 +974,9 @@ class DreamWindow(QtWidgets.QWidget):
     sendRequested = QtCore.pyqtSignal(object, str)
     boundsRequested = QtCore.pyqtSignal(object, object)   # min, max
     continueRequested = QtCore.pyqtSignal()
+    # Continue after reprune (fit.dream.dream): the burn-in that went on
+    # past the adaptation phase (burn_in) dropped
+    pruneContinueRequested = QtCore.pyqtSignal()
     # the end of a run is shown (finish), also when it was computed in the
     # background (finish(background=True): `computing` until then)
     ready = QtCore.pyqtSignal()
@@ -981,6 +992,7 @@ class DreamWindow(QtWidgets.QWidget):
         self.sources, self.datasets = [], []
         self._live, self._corner_t = None, 0.0   # chains so far, last redraw
         self._previous = None              # the run being continued
+        self.burn_in = None                # burn_in_end of the shown run
         self.may_stop_early = False        # stop when converged is on
         self._reset_clock()
 
@@ -1007,8 +1019,17 @@ class DreamWindow(QtWidgets.QWidget):
         self.btn_continue.setEnabled(False)
         top = QtWidgets.QHBoxLayout()
         top.addWidget(self.bar, 1)
+        self.btn_prune = QtWidgets.QPushButton('Prune && continue')
+        self.btn_prune.setToolTip(
+            'Offered when log p still rose after the adaptation phase: count '
+            'those generations as burn-in (no sample before its end)\nand '
+            'drop the states the archive took during it, then continue for '
+            'the generations set beside it')
+        self.btn_prune.clicked.connect(self.pruneContinueRequested)
+        self.btn_prune.setEnabled(False)
         top.addWidget(self.continue_gen)
         top.addWidget(self.btn_continue)
+        top.addWidget(self.btn_prune)
         top.addWidget(self.btn_stop)
 
         self.converged = QtWidgets.QLabel()
@@ -1133,9 +1154,12 @@ class DreamWindow(QtWidgets.QWidget):
     def _all_pages(self):
         return list(self.pages.values()) + [p for p, *_ in self.part_pages]
 
-    def start(self, problem, n_gen, header, sources=(), datasets=()):
+    def start(self, problem, n_gen, header, sources=(), datasets=(),
+              adapt_until=None, discard=0.5):
         """A new run of problem (a PosteriorProblem); datasets: the name
-        of each dataset fitted (a joint fit's are its own)."""
+        of each dataset fitted (a joint fit's are its own); adapt_until
+        (None: auto_adapt) and discard, the run's adaptation phase and
+        sample window, for the live traces."""
         self.problem, self.result, self.sources = problem, None, list(sources)
         self.datasets = list(getattr(problem.fit, 'part_names', None)
                              or datasets or ['Data'])
@@ -1151,7 +1175,10 @@ class DreamWindow(QtWidgets.QWidget):
         self.converged.setText('')
         self.summary.setPlainText('')
         self.trace.clear()
-        self.trace.set_parameters(self.infos, max(n_gen // 10, 1))
+        self.trace.set_parameters(
+            self.infos, auto_adapt(n_gen) if adapt_until is None
+            else adapt_until)
+        self.trace.discard = discard
         self.rhat.clear()
         self.corner.clear()
         self._live, self._corner_t = None, 0.0
@@ -1163,16 +1190,21 @@ class DreamWindow(QtWidgets.QWidget):
         self.btn_stop.setEnabled(True)
         for b in (self.btn_save, self.btn_map,
                   self.btn_bounds,
-                  self.btn_continue, self.continue_gen):
+                  self.btn_continue, self.continue_gen, self.btn_prune):
             b.setEnabled(False)
+        self.burn_in = None
         self.send_from.clear()
         self._send_states = []
         self._previous = None
 
-    def continue_start(self, n_gen):
+    def continue_start(self, n_gen, adapt_until=None):
         """The shown run goes on up to generation n_gen: back to the
-        running state, keeping its traces (extended live) and summary."""
+        running state, keeping its traces (extended live) and summary;
+        adapt_until: the burn-in's new end (Prune & continue)."""
         self._previous, self.result = self.result, None
+        if adapt_until is not None:
+            self.trace.adapt_until = adapt_until
+            self.trace.adapt.setRegion((0, adapt_until))
         last = int(self._previous.generations[-1])
         self.bar.setRange(0, n_gen)
         self.bar.setValue(last)
@@ -1190,7 +1222,7 @@ class DreamWindow(QtWidgets.QWidget):
         self.btn_stop.setEnabled(True)
         for b in (self.btn_save, self.btn_map,
                   self.btn_bounds,
-                  self.btn_continue, self.continue_gen):
+                  self.btn_continue, self.continue_gen, self.btn_prune):
             b.setEnabled(False)
 
     def show_loaded(self, result, problem, header, sources=(), datasets=(),
@@ -1232,6 +1264,7 @@ class DreamWindow(QtWidgets.QWidget):
         self.tab_name = d['tab_name']
         self.btn_continue.setEnabled(False)
         self.continue_gen.setEnabled(False)
+        self.btn_prune.setEnabled(False)
         self.btn_continue.setToolTip('A run reopened from a session cannot '
                                      'be continued')
 
@@ -1268,12 +1301,12 @@ class DreamWindow(QtWidgets.QWidget):
 
     def _live_corner(self):
         """Provisional corner of the thinned chains so far: generations
-        after the adaptation phase and in the second half, as at the end."""
+        in the run's window after the adaptation phase, as at the end."""
         if self._live is None or self.result is not None:
             return
         gens, X = self._live
         adapt = self.trace.adapt_until
-        keep = gens >= kept_from(gens, adapt)
+        keep = gens >= kept_from(gens, adapt, self.trace.discard)
         page = self.pages['Corner']
         if keep.sum() < 2 or gens[-1] <= adapt:
             page.widget(0).setText(
@@ -1303,6 +1336,7 @@ class DreamWindow(QtWidgets.QWidget):
                                 time.monotonic() - self._t_start)))
         rhat = result.rhat_history[-1][1] if result.rhat_history else None
         self.trace.adapt_until = result.adapt_until
+        self.trace.discard = result.discard
         self.trace.adapt.setRegion((0, result.adapt_until))
         self._chain_chi2(result.chains[-1], result.logp[-1])
         self.trace.set_data(result.generations, result.chains, result.logp,
@@ -1395,6 +1429,7 @@ class DreamWindow(QtWidgets.QWidget):
             ('chain %d' % (j + 1), x, c)
             for j, (x, c) in enumerate(zip(best, chi2))]
         return dict(target=target, warn=warn, send=send,
+                    burn=burn_in_end(result),
                     summary=format_summary(
                         result, problem,
                         units=[(scale, unit) for _, scale, unit
@@ -1420,6 +1455,10 @@ class DreamWindow(QtWidgets.QWidget):
                      '— see Summary</span>'
                      % (BAD, len(warn), '' if len(warn) == 1 else 's'))
         self.converged.setText(text)
+        self.burn_in = texts['burn']
+        # what Continue can do, Prune & continue can after a burn-in
+        self.btn_prune.setEnabled(self.burn_in is not None
+                                  and self.btn_continue.isEnabled())
         self._fill_send_from(texts['send'])
         self.btn_map.setEnabled(True)
         self.btn_bounds.setEnabled(True)

@@ -156,21 +156,62 @@ def test_split_rhat_sees_drift():
 
 def test_archive_pruned_at_end_of_adaptation():
     """At adapt_until the archive keeps only the states archived in the
-    last archive_keep of the adaptation phase (no prior draws); z0's rows
-    stay; archive_keep None keeps everything."""
-    kw = dict(n_gen=200, n_chains=4, vectorized=True, seed=1,
-              adapt_until=200, archive_every=10)
-    r = dream(two_modes, [(0, 1)] * 10, **kw)
+    last archive_keep of the adaptation phase (no prior draws), at least
+    10 d of them; z0's rows stay; archive_keep None keeps everything."""
+    kw = dict(n_chains=4, vectorized=True, seed=1, archive_every=10)
+    r = dream(two_modes, [(0, 1)] * 10, n_gen=1000, adapt_until=1000, **kw)
     st = r.state
-    # events after generation 150: 160 .. 200, 4 rows each
-    assert st['m'] == 20 and st['archive_keep'] == 0.25
+    # events after generation 750: 760 .. 1000, 4 rows each = 100 = 10 d
+    assert st['m'] == 100 and st['archive_keep'] == 0.25
     assert np.array_equal(st['Z'], np.concatenate(
-        [r.chains[r.generations == g][0] for g in range(160, 201, 10)]))
+        [r.chains[r.generations == g][0] for g in range(760, 1001, 10)]))
+    # a short adaptation phase: the 10 d minimum keeps older rows too
+    kw.update(n_gen=200, adapt_until=200)
+    short = dream(two_modes, [(0, 1)] * 10, **kw)
+    assert short.state['m'] == 100
     full = dream(two_modes, [(0, 1)] * 10, archive_keep=None, **kw)
     assert full.state['m'] == 100 + 20 * 4
+    assert np.array_equal(short.state['Z'], full.state['Z'][-100:])
     z0 = np.random.default_rng(2).uniform(0.2, 0.8, (30, 10))
     zr = dream(two_modes, [(0, 1)] * 10, z0=z0, **kw)
-    assert zr.state['m'] == 30 + 20 and np.array_equal(zr.state['Z'][:30], z0)
+    assert zr.state['m'] == 100 and np.array_equal(zr.state['Z'][:30], z0)
+
+
+def test_reprune_extends_the_burn_in():
+    """reprune: the burn-in goes on to `after`, the archive keeps only
+    what was archived after it (at least 10 d); resumed, nothing before
+    it is a sample."""
+    from dream import reprune
+    kw = dict(n_chains=4, vectorized=True, seed=3, archive_every=10,
+              adapt_until=200)
+    r = dream(two_modes, [(0, 1)] * 10, n_gen=1000, **kw)
+    st = reprune(r.state, 600)
+    assert st['adapt_until'] == 600 and r.state['adapt_until'] == 200
+    # 40 events after 600, 4 rows each: 160 rows, the last ones
+    assert st['m'] == 160
+    assert np.array_equal(st['Z'], r.state['Z'][-160:])
+    late = reprune(r.state, 980)               # 8 rows: 10 d = 100 kept
+    assert late['m'] == 100
+    with pytest.raises(ValueError):
+        reprune(r.state, 100)
+    more = dream(two_modes, [(0, 1)] * 10, n_gen=1400, resume=st, **kw)
+    assert more.adapt_until == 600
+    assert more.generations[more.keep()].min() == 700        # last half
+    assert more.generations[more.keep(0.0)].min() == 601
+
+
+def test_window_from_end_of_adaptation():
+    """discard 0: R-hat and samples() from the end of the adaptation
+    phase on; the window is kept in the state and on resume."""
+    kw = dict(n_chains=4, vectorized=True, seed=3, adapt_until=200)
+    r = dream(two_modes, [(0, 1)] * 10, n_gen=1000, discard=0.0, **kw)
+    assert r.discard == 0.0 and r.state['discard'] == 0.0
+    assert r.generations[r.keep()].min() == 201
+    assert len(r.samples()) == 800 * 4
+    half = dream(two_modes, [(0, 1)] * 10, n_gen=500, discard=0.0, **kw)
+    more = dream(two_modes, [(0, 1)] * 10, n_gen=1000, resume=half.state,
+                 **kw)
+    assert more.discard == 0.0 and np.array_equal(more.chains, r.chains)
 
 
 def test_stop_needs_ess():

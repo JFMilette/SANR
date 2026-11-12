@@ -24,8 +24,10 @@ updates with p_snooker 0.1 and a tempered burn-in from beta_start 1e-3, see
 fit.dream.dream) or classic DREAM in the normalised coordinates u in
 [0, 1]^d of FitProblem (so SLDs ~1e-6 and thicknesses ~100 are on one
 footing), and returns the chains in physical units.  The first 10 % of the
-generations (dream adapt_until) are the adaptation phase and are never used
-as posterior samples, also when x0 starts the chains from the DE optimum's
+generations, at least 5000 and at most half (auto_adapt, or adapt_until),
+are the adaptation phase and are never used as posterior samples
+(the sample window, discard: the last half, or all the generations after
+that phase), also when x0 starts the chains from the DE optimum's
 final population ('de') or around the current values ('current').  Three
 plain chains (the defaults before) can all settle in one of two modes with
 R-hat ~ 1 (tests/test_dream_sampler.py TWO_MODES); chains in different
@@ -59,7 +61,8 @@ import numpy as np
 
 from fit.de.de_fit import run_de
 from fit.priors import tension
-from fit.dream.dream import DreamResult, dream, ess, make_gaussian_loglike
+from fit.dream.dream import (DreamResult, dream, ess, kept_from,
+                             make_gaussian_loglike)
 from fit.joint import JointProblem, part_x, parts
 from fit.problem import FitProblem, parameter_names  # noqa: F401 (API)
 from fit.saved import problem_from_state, problem_state
@@ -74,6 +77,20 @@ FLOOR_BOUNDS = (-4.0, -0.5)
 # where the extra parameters start (jittered_start, the DE start): the
 # measured dR, a 1 % floor
 EXTRA_START = {SIGMA_NAME: 0.0, FLOOR_NAME: -2.0}
+# automatic adaptation phase (auto_adapt): 10 % of the generations, at
+# least ADAPT_MIN, at most half of them
+ADAPT_FRACTION, ADAPT_MIN = 0.1, 5000
+# sample windows (DreamResult.discard): the last half, or every generation
+# after the adaptation phase
+WINDOWS = {'last half': 0.5, 'after adaptation': 0.0}
+
+
+def auto_adapt(n_gen):
+    """Generations of the adaptation phase of an n_gen run: 10 %, at
+    least ADAPT_MIN (a short phase leaves burn-in states in the archive),
+    at most half of them."""
+    return max(1, min(max(int(ADAPT_FRACTION * n_gen), ADAPT_MIN),
+                      n_gen // 2))
 
 
 class PosteriorProblem:
@@ -267,7 +284,7 @@ def sample(problem, *, n_gen=30000, archive=True, n_chains=None, x0=None,
            min_gen_after_converged=5000, callback=None, de_options=None,
            resume=None, rhat_target=1.05, p_snooker=0.1, beta_start=1e-3,
            temper_until=None, z0=None, cancelled=None, ess_target=400,
-           archive_keep=0.25):
+           archive_keep=0.25, adapt_until=None, discard=0.5):
     """DREAM posterior sample of `problem` (a PosteriorProblem), chains in
     physical units.  cancelled() True stops the DE fit of x0 = 'de'
     (RuntimeError); the sampling itself is stopped by callback.
@@ -298,6 +315,10 @@ def sample(problem, *, n_gen=30000, archive=True, n_chains=None, x0=None,
         gives stable 2.5 / 97.5 % percentiles.
     archive_keep: the archive pruning of fit.dream.dream at the end of the
         adaptation phase (None: none).
+    adapt_until: generations of the adaptation phase (None: auto_adapt);
+        ignored with resume.
+    discard: the sample window, 0.5 (the last half) or 0 (from the end of
+        the adaptation phase on; WINDOWS); kept on resume.
     resume: a result of sample() on the same problem (or load_run of it):
         go on from its last generation up to n_gen generations in all, as
         if it had never stopped; its chains, archive and settings are kept
@@ -316,6 +337,11 @@ def sample(problem, *, n_gen=30000, archive=True, n_chains=None, x0=None,
         n_chains, archive, x0 = state['N'], state['archive'], None
     if n_chains is None:
         n_chains = 8 if archive else max(7, problem.ndim + 1)
+    if adapt_until is None:
+        adapt_until = auto_adapt(n_gen)
+    if resume is None and not 1 <= adapt_until < n_gen:
+        raise ValueError('the adaptation phase (%d generations) must be '
+                         'shorter than the run (%d)' % (adapt_until, n_gen))
     if not archive:
         p_snooker = 0.0
     if isinstance(x0, str):
@@ -353,7 +379,8 @@ def sample(problem, *, n_gen=30000, archive=True, n_chains=None, x0=None,
                     resume=state, rhat_target=rhat_target,
                     p_snooker=p_snooker, beta_start=beta_start,
                     temper_until=temper_until, logpdf_split=unit.split,
-                    z0=uz, ess_target=ess_target, archive_keep=archive_keep)
+                    z0=uz, ess_target=ess_target, archive_keep=archive_keep,
+                    adapt_until=adapt_until, discard=discard)
     finally:
         if pool is not None:
             stop_pool(pool, unit.token)
@@ -389,7 +416,7 @@ _STATE_SCALARS = ('t', 'n_gen', 'cancelled', 'rhat_target', 'd', 'N',
                   'archive', 'thin',
                   'outlier', 'adapt_until', 'archive_every', 'n_evals', 'm',
                   'rng', 'p_snooker', 'beta_start', 'temper_until',
-                  'ess_target', 'archive_keep', 'm0', 'z_head')
+                  'ess_target', 'archive_keep', 'm0', 'z_head', 'discard')
 _STATE_ARRAYS = ('X', 'logp_X', 'Z', 'pCR', 'J', 'n_id', 'hist_logp', 'acc',
                  'chains', 'logps', 'gens', 'lp_X', 'll_X')
 
@@ -415,7 +442,7 @@ def save_result(path, result, problem, sources=(), datasets=()):
     meta = dict(names=list(problem.names), bounds=problem.bounds,
                 sigma_free=problem.sigma_free, floor_free=problem.floor_free,
                 error_floor=problem.fit.error_floor,
-                adapt_until=result.adapt_until,
+                adapt_until=result.adapt_until, discard=result.discard,
                 n_evals=result.n_evals, data_hash=data_hash(problem),
                 sources=list(sources), git=_git_hash(),
                 roughness_scheme=st.roughness_scheme,
@@ -481,7 +508,8 @@ def load_result(path):
             rhat_history=list(zip(f['rhat_generations'].tolist(),
                                   list(f['rhat']))),
             pCR=f['pCR'], adapt_until=meta['adapt_until'],
-            n_evals=meta['n_evals'], names=meta['names'])
+            n_evals=meta['n_evals'], names=meta['names'],
+            discard=meta.get('discard', 0.5))
         if 'state' in meta:
             st = dict(meta['state'])
             for k in _STATE_ARRAYS:
@@ -551,7 +579,7 @@ def load_run(path):
     return res, problem, meta
 
 
-def summary_table(result, problem=None, discard=0.5):
+def summary_table(result, problem=None, discard=None):
     """One dict per parameter: name, median, minus / plus (16 / 84 %
     distance from the median), lo95 / hi95, rhat (last), ess; plus the MAP
     state {'x', 'logp', 'chi2' (chi^2/N, with problem)}."""
@@ -572,7 +600,7 @@ def summary_table(result, problem=None, discard=0.5):
     return rows, best
 
 
-def format_summary(result, problem=None, discard=0.5, units=None):
+def format_summary(result, problem=None, discard=None, units=None):
     """summary_table as text.  units: [(scale, unit)] per parameter (e.g.
     the GUI's display_info): the values shown times scale, with a unit
     column ('' where a parameter has none); None: as stored, no unit."""
@@ -605,7 +633,7 @@ def format_summary(result, problem=None, discard=0.5, units=None):
     return '\n'.join(out)
 
 
-def stitch_summary(result, problem, discard=0.5):
+def stitch_summary(result, problem, discard=None):
     """Lines: per dataset with a stitch factor sampled, the cumulative
     factor a_k of each of its angles (model.stack ANGLE (STITCH) FACTORS),
     median and 95 % interval over the samples; [] without any."""
@@ -642,13 +670,13 @@ def stitch_summary(result, problem, discard=0.5):
     return out
 
 
-def derived(result, func, discard=0.5):
+def derived(result, func, discard=None):
     """func(x) on every posterior sample x: array of its values (e.g. the
     total moment, or rho cos(phi) of one layer)."""
     return np.array([func(x) for x in result.samples(discard)])
 
 
-def chains_split(result, discard=0.5, split_nats=10):
+def chains_split(result, discard=None, split_nats=10):
     """True when the chains' mean log posteriors over the kept samples
     differ by more than split_nats: they sit in different minima, which
     R-hat can miss.  Chains all in one wrong minimum are not detected
@@ -662,7 +690,7 @@ def chains_split(result, discard=0.5, split_nats=10):
     return m.size > 1 and np.ptp(m) > split_nats
 
 
-def chain_best(result, discard=0.5):
+def chain_best(result, discard=None):
     """Each chain's best kept state (highest log posterior after `discard`
     and the adaptation phase), (N, d) in physical units."""
     keep = result.keep(discard)
@@ -672,19 +700,20 @@ def chain_best(result, discard=0.5):
     return np.array([X[k, j] for j, k in enumerate(best)])
 
 
-def chain_chi2(result, problem, discard=0.5):
+def chain_chi2(result, problem, discard=None):
     """chi^2 / N of each chain's best kept state."""
     return [problem.chi2_per_point(x) for x in chain_best(result, discard)]
 
 
-def posterior_warnings(result, bounds=None, discard=0.5, rhat_max=1.1,
+def posterior_warnings(result, bounds=None, discard=None, rhat_max=1.1,
                        acc_min=0.05, edge=0.01, edge_frac=0.05,
                        problem=None, split_nats=10, chi2=None, ess_min=0):
     """Texts for: R-hat above rhat_max at the end, an effective sample
     size below ess_min (0: not checked), chains in different
     minima (chains_split; chi^2/N of each with `problem`, or `chi2` when
     chain_chi2 was already computed), acceptance below
-    acc_min after adaptation, a parameter with more than edge_frac of its
+    acc_min after adaptation, a burn-in that went on past the adaptation
+    phase (burn_in_end), a parameter with more than edge_frac of its
     samples within `edge` x its bound width of a bound (the bound cuts into
     the posterior; only with `bounds`, e.g. PosteriorProblem.bounds), and
     with `problem` a MAP value in tension with its prior (fit.priors)."""
@@ -715,6 +744,19 @@ def posterior_warnings(result, bounds=None, discard=0.5, rhat_max=1.1,
     acc = result.acceptance[result.adapt_until:]
     if acc.size and acc.mean() < acc_min:
         out.append('Low acceptance after adaptation: %.3f' % acc.mean())
+    g_b = burn_in_end(result)
+    if g_b is not None:
+        start = kept_from(result.generations, result.adapt_until,
+                          result.discard if discard is None else discard)
+        text = ('Burn-in continued past adaptation: log p still rose until '
+                'generation %d (adaptation ended at %d)'
+                % (g_b, result.adapt_until))
+        if (result.state or {}).get('archive', True):
+            text += '; the archive contains burn-in states'
+        if g_b >= start:
+            text += '; the kept samples (from generation %d) include them'                 % start
+        out.append(text + '.  Prune & continue drops them and goes on; a '
+                   'longer adaptation phase avoids it')
     if problem is not None:
         out += prior_tension(problem.fit, result.best()[0], problem.names)
     if bounds is not None and result.generations[-1] > result.adapt_until:
@@ -727,6 +769,37 @@ def posterior_warnings(result, bounds=None, discard=0.5, rhat_max=1.1,
                     out.append('%s hugs its %s bound: widen it?'
                                % (names[j], side))
     return out
+
+
+def burn_in_end(result, blocks=50):
+    """The generation where a burn-in that went on past the adaptation
+    phase ended, or None when there was none: the chains' mean log p
+    (over the chains) still rose clearly after that phase.  Its level is
+    the mean over the last half of the post-adaptation generations, tol =
+    sqrt(d / 2) the standard deviation of log p about its mean in a
+    d-parameter posterior.  Clearly: the first tenth of those generations
+    lies more than 2 tol below the level.  It ended after the last of
+    `blocks` equal blocks of those generations whose mean is more than tol
+    below the level."""
+    a = result.adapt_until
+    post = result.generations > a
+    if post.sum() < 2 * blocks:
+        return None
+    lp = result.logp[post]
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)  # all -inf rows
+        m = np.nanmean(np.where(np.isfinite(lp), lp, np.nan), axis=1)
+    ok = np.isfinite(m)
+    if ok.sum() < 2 * blocks:
+        return None
+    g, m = result.generations[post][ok], m[ok]
+    tol = math.sqrt(result.chains.shape[2] / 2)
+    level = m[len(m) // 2:].mean()
+    if m[:max(len(m) // 10, 1)].mean() >= level - 2 * tol:
+        return None
+    idx = np.array_split(np.arange(len(m)), blocks)
+    low = [k for k, i in enumerate(idx) if m[i].mean() < level - tol]
+    return int(g[idx[low[-1]][-1]])
 
 
 def prior_tension(fit_problem, x, names=None):
@@ -750,7 +823,7 @@ def posterior_problem(stack, data, qmin=-np.inf, qmax=np.inf, grid=None,
 
 
 # -- bands ---------------------------------------------------------------------
-def draws(result, n=200, discard=0.5, seed=0):
+def draws(result, n=200, discard=None, seed=0):
     """n random posterior samples (fewer if there are fewer), (n, d)."""
     s = result.samples(discard)
     if len(s) == 0:
@@ -780,7 +853,7 @@ def _asymmetry_pair(names):
     return None
 
 
-def predictive_bands(result, problem, n=200, discard=0.5, seed=0,
+def predictive_bands(result, problem, n=200, discard=None, seed=0,
                      replicates=20, part=0):
     """Model R of n posterior draws at the fitted points:
     {'channels': [{'name', 'Q', 'R', 'dR', 'bands', 'predictive'}],
@@ -845,7 +918,7 @@ def predictive_bands(result, problem, n=200, discard=0.5, seed=0,
     return dict(channels=channels, asymmetry=asym)
 
 
-def chain_curves(result, problem, z, discard=0.5, part=0):
+def chain_curves(result, problem, z, discard=None, part=0):
     """The curves of each chain's best kept state (chain_best) for dataset
     `part`: [{'chain' (its index), 'chi2' (chi^2 / N, every dataset),
     'R' [the model R of each channel at its points, as predictive_bands'
@@ -900,7 +973,7 @@ def profile_layers(result, problem, part=0):
         [l.name for l in st.layers]
 
 
-def profile_bands(result, problem, n=200, discard=0.5, seed=0, npts=1500,
+def profile_bands(result, problem, n=200, discard=None, seed=0, npts=1500,
                   part=0):
     """(z, nuclear bands, magnetic bands): the slab NSLD and in-plane MSLD
     of n posterior draws on a common depth grid around the MAP stack, bands

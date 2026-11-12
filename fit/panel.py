@@ -74,8 +74,9 @@ from fit.problem import FitProblem, parameter_names
 from fit.de.de_fit import STRATEGIES
 from fit.de.de_window import DEThread, DEWindow
 from fit.de import global_fit
-from fit.dream.dream_fit import (PosteriorProblem, load_run,
-                                 prior_tension)
+from fit.dream.dream import reprune
+from fit.dream.dream_fit import (ADAPT_MIN, WINDOWS, PosteriorProblem,
+                                 auto_adapt, load_run, prior_tension)
 from fit.dream.dream_window import SESSIONS_DIR, DreamThread, DreamWindow
 from fit.joint import (JointProblem, default_mode, part_index, part_x,
                        parts)
@@ -682,6 +683,7 @@ class FitPanel:
                 rhat_target=self.dream_rhat, ess_target=self.dream_ess,
                 snooker=self.dream_snooker,
                 beta_start=self.dream_beta, start=self.dream_start,
+                adaptation=self.dream_adapt, window=self.dream_window_box,
                 sigma_free=self.dream_sigma, floor_free=self.dream_floor,
                 stop_when_converged=self.dream_stop,
                 tempered=self.dream_temper)
@@ -837,8 +839,28 @@ class FitPanel:
         self.dream_gen.setSingleStep(1000)
         self.dream_gen.setValue(30000)
         self.dream_gen.setToolTip(
-            'Maximum number of generations; the first 10 % adapt the sampler '
-            'and are discarded')
+            'Maximum number of generations, the adaptation phase (discarded) '
+            'included')
+        self.dream_adapt = QtWidgets.QSpinBox()
+        self.dream_adapt.setRange(0, 1_000_000)
+        self.dream_adapt.setSingleStep(1000)
+        self.dream_adapt.setValue(0)
+        self.dream_adapt.setSpecialValueText('auto')
+        self.dream_adapt.setToolTip(
+            'Generations of the adaptation phase: the sampler tunes itself and '
+            'the chains burn in; never kept as samples.\nauto: 10 %% of the '
+            'generations, at least %d (at most half of them).  Too short a '
+            'phase leaves\nburn-in states in the archive (a warning says so, '
+            'with Prune & continue).' % ADAPT_MIN)
+        self.dream_window_box = QtWidgets.QComboBox()
+        for label, discard in WINDOWS.items():
+            self.dream_window_box.addItem(label, discard)
+        self.dream_window_box.setToolTip(
+            'Which generations are posterior samples (summary, bands, R̂, '
+            'ESS):\nlast half: the second half of the run (safe: a burn-in '
+            'that went on past the adaptation phase is left out);\nafter '
+            'adaptation: every generation after the adaptation phase (more '
+            'samples; for chains started at the optimum).')
         self.dream_chains = QtWidgets.QSpinBox()
         self.dream_chains.setRange(2, 200)
         self.dream_chains.setValue(8)
@@ -942,6 +964,8 @@ class FitPanel:
                              ('Snooker', self.dream_snooker),
                              ('β start', self.dream_beta)]))
         f.addRow('Start', self.dream_start)
+        f.addRow(self._grid([('Adaptation', self.dream_adapt),
+                             ('Samples', self.dream_window_box)]))
         opts = QtWidgets.QGridLayout()
         opts.setContentsMargins(0, 0, 0, 0)
         for k, w in enumerate((self.dream_archive, self.dream_sigma,
@@ -2096,8 +2120,15 @@ class FitPanel:
             self.dream_report.setText(self._error(exc))
             return
         n_gen = self.dream_gen.value()
+        adapt = self.dream_adapt.value() or auto_adapt(n_gen)
+        if adapt >= n_gen:
+            self.dream_report.setText(self._error(
+                'The adaptation phase (%d generations) must be shorter than '
+                'the run (%d).' % (adapt, n_gen)))
+            return
         options = dict(
             n_gen=n_gen, archive=self.dream_archive.isChecked(),
+            adapt_until=adapt, discard=self.dream_window_box.currentData(),
             n_chains=self.dream_chains.value(),
             seed=None if self.dream_seed.value() < 0
             else self.dream_seed.value(),
@@ -2142,7 +2173,9 @@ class FitPanel:
         self.dream_window.start(problem, n_gen, note + html_escape(header),
                                 [d['path'] for s, *_ in inputs
                                  for d in s['channels'].values()],
-                                [s['name'] for s, *_ in inputs])
+                                [s['name'] for s, *_ in inputs],
+                                adapt_until=adapt,
+                                discard=options['discard'])
         self._show_dream_window()
         self._launch_dream(problem, options,
                            note + 'Sampling ' + html_escape(header) + '…')
@@ -2165,25 +2198,37 @@ class FitPanel:
         self.dream_report.setText(report)
         self._dream.start()
 
-    def continue_dream(self):
+    def continue_dream(self, prune=False):
         """Go on with the ended run shown in the DREAM window (stopped,
         converged or done) for the generations of its "+ gen." box, all of
-        them, as if it had never stopped."""
+        them, as if it had never stopped.  prune (Prune & continue): first
+        extend its burn-in to where log p stopped rising (the window's
+        burn_in; fit.dream.dream.reprune)."""
         w = self.dream_window
         prev = w.result
         if self.busy() or prev is None or prev.state is None or \
                 self._dream_problem is None:
             return
+        t = int(prev.state['t'])
+        adapt = None
+        if prune:
+            if w.burn_in is None:
+                return
+            prev = copy.copy(prev)
+            prev.state = reprune(prev.state, min(w.burn_in, t - 1))
+            adapt = prev.state['adapt_until']
         n_more = w.continue_gen.value()
-        n_gen = int(prev.state['t']) + n_more
+        n_gen = t + n_more
         options = dict(n_gen=n_gen, resume=prev,
                        n_workers=self.fit_workers.value(),
                        stop_when_converged=False,
                        rhat_target=self.dream_rhat.value(),
                        ess_target=self.dream_ess.value())
-        self.dream_window.continue_start(n_gen)
+        self.dream_window.continue_start(n_gen, adapt)
         self._launch_dream(self._dream_problem, options,
-                           'Continuing to generation %d…' % n_gen)
+                           ('Burn-in extended to generation %d; ' % adapt
+                            if prune else '')
+                           + 'Continuing to generation %d…' % n_gen)
 
     def _make_dream_window(self, names):
         """The DREAM window of a run of datasets `names` (or of a loaded
@@ -2193,6 +2238,8 @@ class FitPanel:
             w = self.dream_window = DreamWindow(self)
             w.stopRequested.connect(self.stop_dream)
             w.continueRequested.connect(self.continue_dream)
+            w.pruneContinueRequested.connect(
+                lambda: self.continue_dream(prune=True))
             w.sendRequested.connect(
                 lambda x, label, w=w: self._send_dream(x, w, label))
             w.boundsRequested.connect(
@@ -2316,6 +2363,8 @@ class FitPanel:
                                   'continued')
         if hasattr(w, 'continue_gen'):          # a DREAM window's
             w.continue_gen.setEnabled(False)
+            w.btn_prune.setEnabled(False)
+            w.pruneContinueRequested.disconnect()
 
     def load_dream(self):
         """Show a run saved with "Save chains..." in the DREAM window.  Its

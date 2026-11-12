@@ -73,10 +73,11 @@ def test_rhat_tab(app):
     live thread hands the same curve as it goes."""
     from fit.dream.dream_window import DreamThread, rhat_curve
     pp = small_problem()
+    # a 10 % adaptation phase (auto_adapt would take half of 600)
     res = sample(pp, n_gen=600, seed=0, stop_when_converged=False,
-                 rhat_target=1.2)
+                 adapt_until=60, rhat_target=1.2)
     win = DreamWindow()
-    win.start(pp, 600, 'test')
+    win.start(pp, 600, 'test', adapt_until=60)
     assert win.tabs.tabText(2) == 'R̂' and win.tabs.widget(2) is win.rhat
     assert len(win.rhat.gens) == 0
     win.finish(res)
@@ -92,7 +93,7 @@ def test_rhat_tab(app):
     # live: the thread's curve ends as the result's
     got = []
     th = DreamThread(pp, n_gen=600, seed=0, stop_when_converged=False,
-                     rhat_target=1.2)
+                     adapt_until=60, rhat_target=1.2)
     th.rhat.connect(lambda gg, rr, t: got.append((gg, rr, t)))
     th.run()                                  # in this thread
     app.processEvents()
@@ -286,4 +287,51 @@ def test_continue_any_ended_run(app, monkeypatch):
                      callback=lambda t, *a: t >= 200)
     win.finish(stopped)
     assert win.continue_gen.value() == 800 and win.btn_continue.isEnabled()
+    win.close()
+
+
+def test_prune_and_continue(app, monkeypatch):
+    """The page's adaptation phase (auto) and sample window reach
+    sample(); Prune & continue, offered after a burn-in that went on past
+    the adaptation phase, continues a repruned copy of the run."""
+    import fit.dream.dream_window as dw
+    sim = SimulationTab()
+    sim.stack.layers[1].fit_entry('thickness')['vary'] = True
+    exp = ExperimentalTab(simulation=sim)
+    Q = np.linspace(0.01, 0.1, 40)
+    one = np.ones_like(Q)
+    exp.sets = [dict(name='d', visible=True, channels={
+        '+': dict(Q=Q, R=0.1 * one, dR=0.01 * one, dQ=0 * one,
+                  theta=np.nan * one, path='x.dat')})]
+    exp.refresh_tree()
+    exp.fit_set.setCurrentIndex(0)
+    opts = exp.page_options('dream')
+    assert opts['adaptation'] == 0 and opts['window'] == 0.5
+    seen = {}
+    monkeypatch.setattr(exp, '_launch_dream',
+                        lambda problem, options, report: seen.update(options))
+    exp.start_dream()
+    assert seen['adapt_until'] == 5000 and seen['discard'] == 0.5
+    exp.dream_adapt.setValue(1000)
+    exp.dream_window_box.setCurrentIndex(
+        exp.dream_window_box.findData(0.0))
+    exp.start_dream()
+    assert seen['adapt_until'] == 1000 and seen['discard'] == 0.0
+    win, pp = exp.dream_window, exp._dream_problem
+    assert win.trace.adapt_until == 1000 and win.trace.discard == 0.0
+    res = sample(pp, n_gen=600, seed=0, stop_when_converged=False,
+                 adapt_until=60)
+    monkeypatch.setattr(dw, 'burn_in_end', lambda r: None)
+    win.finish(res)
+    assert win.btn_continue.isEnabled() and not win.btn_prune.isEnabled()
+    monkeypatch.setattr(dw, 'burn_in_end', lambda r: 300)
+    win.finish(res)
+    assert win.burn_in == 300 and win.btn_prune.isEnabled()
+    win.continue_gen.setValue(400)
+    seen.clear()
+    win.btn_prune.click()
+    assert seen['n_gen'] == 1000 and seen['resume'] is not res
+    assert seen['resume'].state['adapt_until'] == 300
+    assert res.state['adapt_until'] == 60          # the run itself kept
+    assert win.trace.adapt_until == 300 and not win.btn_prune.isEnabled()
     win.close()

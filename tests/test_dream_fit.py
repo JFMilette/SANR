@@ -442,3 +442,55 @@ def test_asymmetry_with_shifted_q_grids():
     assert np.allclose(off['A'], same['A'], atol=1e-3, equal_nan=True)
     assert np.allclose(off['bands'], same['bands'], atol=1e-2,
                        equal_nan=True)
+
+
+def test_auto_adapt():
+    """10 % of the generations, at least 5000, at most half."""
+    from fit.dream.dream_fit import auto_adapt
+    assert auto_adapt(30000) == 5000 and auto_adapt(100000) == 10000
+    assert auto_adapt(600) == 300 and auto_adapt(3) == 1
+    pp = small_problem()
+    assert sample(pp, n_gen=400, seed=0,
+                  stop_when_converged=False).adapt_until == 200
+    with pytest.raises(ValueError, match='adaptation phase'):
+        sample(pp, n_gen=400, adapt_until=400)
+
+
+def _fake_run(logp, adapt_until, d=4):
+    from fit.dream.dream import DreamResult
+    n, N = logp.shape
+    return DreamResult(chains=np.zeros((n, N, d)), logp=logp,
+                       generations=np.arange(n), acceptance=np.zeros(n),
+                       adapt_until=adapt_until, names=list('abcd'))
+
+
+def test_burn_in_end():
+    """A log p still rising after the adaptation phase is found, with
+    where it levels off (within sqrt(d / 2) of its final level); a
+    stationary one is not."""
+    from fit.dream.dream_fit import burn_in_end
+    rng = np.random.default_rng(0)
+    g = np.arange(10001)[:, None]
+    noise = rng.normal(0.0, np.sqrt(2.0), (10001, 4))
+    assert burn_in_end(_fake_run(noise, 1000)) is None
+    # -200 exp(-x / 800) reaches -sqrt(2) at x = 800 ln(141) ~ 3960
+    rising = noise - 200.0 * np.exp(-np.clip(g - 1000, 0, None) / 800.0)
+    r = _fake_run(rising, 1000)
+    end = burn_in_end(r)
+    assert 4000 < end < 6000, end
+    warn = posterior_warnings(r)
+    assert any(w.startswith('Burn-in continued past adaptation') and
+               'archive contains burn-in states' in w for w in warn), warn
+
+
+def test_sample_window_saved(tmp_path):
+    """The sample window (discard 0: from the end of the adaptation
+    phase) is the result's default and survives save / load."""
+    pp = small_problem()
+    res = sample(pp, n_gen=400, seed=0, stop_when_converged=False,
+                 adapt_until=100, discard=0.0)
+    assert res.discard == 0.0
+    assert len(res.samples()) == 300 * res.chains.shape[1]
+    save_result(tmp_path / 'r.npz', res, pp)
+    back, _ = load_result(tmp_path / 'r.npz')
+    assert back.discard == 0.0 and len(back.samples()) == len(res.samples())
