@@ -640,3 +640,32 @@ def test_multistart_reports_chi2(app):
     assert h.topLevelItemCount() == 2
     assert h.topLevelItem(0).text(1) == '%.6g' % cost
     assert h.topLevelItem(0).text(2) == '%.6g' % c2
+
+
+def test_residuals_chi2_line(app):
+    """Under the residuals, the dataset's chi^2/N at the entry drawn: the
+    mean square of the residuals drawn (chi^2 cost), with the error floor
+    noted; under log R, the residuals' with dR, said to be no cost."""
+    from fit.de.de_window import RESIDUALS
+    exp = tab(QA, QB, licorne=False)
+    exp.fit_floor.setValue(2.0)
+    win = lbfgs_fit(app, exp)
+    win.history.setCurrentItem(win.history.topLevelItem(
+        len(win.entries) - 1))
+    view = win.views[0]
+    assert not view.chi2_note.isVisibleTo(view)
+    view.quantity.setCurrentText(RESIDUALS)
+    assert view.chi2_note.isVisibleTo(view)
+    r = np.concatenate([r for *_, r in view.residuals()])
+    text = view.chi2_note.text()
+    assert text.startswith('χ²/N of this dataset %.5g' % np.mean(r**2))
+    assert '(error floor 2 % included)' in text and 'all datasets' not in text
+    view.quantity.setCurrentIndex(0)
+    assert not view.chi2_note.isVisibleTo(view)
+    exp = tab(QA, QA, licorne=False)
+    exp.fit_cost.setCurrentIndex(1)
+    win = lbfgs_fit(app, exp)
+    view = win.views[0]
+    view.quantity.setCurrentText(RESIDUALS)
+    assert view.chi2_note.text().startswith('χ²/N with dR of this dataset')
+    assert 'log R cost has no χ²' in view.chi2_note.text()

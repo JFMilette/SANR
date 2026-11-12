@@ -651,3 +651,33 @@ def test_file_reference_on_another_drive(monkeypatch):
     ref = E.file_ref(here, os.path.dirname(here))
     assert ref == {'path': here, 'relative': here}
     assert E.find_file(ref, 'elsewhere') == here
+
+
+def test_residuals_give_the_joint_chi2():
+    """A joint fit's residuals view gives its dataset's chi^2/N and every
+    dataset's together, the entry's chi2_per_point: the datasets' values
+    weighted by their points (plan chi2_column C5)."""
+    import time
+    from fit.de.de_window import RESIDUALS
+    sim, exp = gui()
+    choose_joint(exp, {})
+    exp.fit_workers.setValue(1)
+    exp.lb_maxiter.setValue(5)
+    exp.start_lbfgs()
+    t0 = time.monotonic()
+    while exp._fit is not None and time.monotonic() - t0 < 60:
+        APP[0].processEvents()
+    win = exp.fit_window
+    p = win.problem
+    win.history.setCurrentItem(win.history.topLevelItem(
+        len(win.entries) - 1))
+    _, cost, x = win.entries[-1]
+    total = p.chi2_per_point(x, cost)
+    each = []
+    for k, view in enumerate(win.views):
+        win.tabs.setCurrentIndex(k)
+        view.quantity.setCurrentText(RESIDUALS)
+        assert 'all datasets %.5g' % total in view.chi2_note.text()
+        each.append(view._chi2)
+    n = [part.npoints for part in p.parts]
+    assert np.dot(each, n) / sum(n) == pytest.approx(total, rel=1e-9)

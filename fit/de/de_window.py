@@ -25,7 +25,9 @@ asymmetries; the model's channels outside the fit use the Simulation tab's
 pairs), or the residuals (R_data - R_model) / sigma of every fitted point,
 with the fit's own points and sigma (error floor included; dR, or |R|
 without it, under the log R cost), so their mean square per channel is
-the chi^2/N it adds; once the fit is done or stopped, "Send to Simulation" writes that
+the chi^2/N it adds (in the legend), with the dataset's chi^2/N under the
+plot, and in a joint fit every dataset's together; once the fit is done
+or stopped, "Send to Simulation" writes that
 entry's parameters, as the dataset of the tab shown sees them, into the
 Simulation tab.  Nothing reaches the Simulation tab otherwise.
 
@@ -158,6 +160,9 @@ class DEWindow(QtWidgets.QWidget):
         self.running = False
         self.method, self.unit = 'de', 'generation'     # set by start()
         self._x = None                 # parameters currently drawn
+        # chi^2/N of every dataset at the entry drawn (a joint fit's
+        # residuals views give it beside their own), None if unknown
+        self._total = None
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_side())
@@ -703,7 +708,7 @@ class DEWindow(QtWidgets.QWidget):
         e = self._selected()
         self.btn_send.setEnabled(e is not None and not self.running)
         if e is not None:
-            self._draw(e[2])
+            self._draw(e[2], e[1])
 
     def _send(self):
         e = self._selected()
@@ -717,8 +722,12 @@ class DEWindow(QtWidgets.QWidget):
         ev.ignore()
 
     # -- drawing ------------------------------------------------------------
-    def _draw(self, x):
+    def _draw(self, x, cost=None):
+        """Draw parameters x; cost: theirs, when known (an entry's), for
+        the whole fit's chi^2/N without evaluating the model."""
         self._x = np.asarray(x, dtype=float)
+        self._total = None if cost is None or len(self.views) < 2 else \
+            self.problem.chi2_per_point(self._x, cost)
         self._fill_params()
         self._draw_view()
 
@@ -728,6 +737,7 @@ class DEWindow(QtWidgets.QWidget):
         if self._x is None or not 0 <= k < len(self.views) or \
                 self.views[k].drawn is self._x:
             return
+        self.views[k].total = self._total
         try:
             self.views[k].draw(self._x, lambda x, st: parts(
                 self.problem)[k].apply(part_x(self.problem, x, k), st),
@@ -810,6 +820,10 @@ class DatasetView(QtWidgets.QSplitter):
         self.drawn = None              # parameters drawn last
         self._xp = None                # the fit's parameters drawn
         self._resid = None             # residuals of _xp, when first shown
+        self._chi2 = None              # the dataset's chi^2/N at _xp, same
+        # chi^2/N of every dataset of a joint fit at the entry drawn (set by
+        # the window), None for one dataset
+        self.total = None
         self._profile = None           # profile_data of the drawn stack
         self.addWidget(self._build_profile_plot())
         self.addWidget(self._build_reflectance_plot())
@@ -820,7 +834,7 @@ class DatasetView(QtWidgets.QSplitter):
         into the view's stack by apply(values, stack); part_values: those
         of the view's fit problem, for the residuals."""
         self.drawn = values
-        self._xp, self._resid = part_values, None
+        self._xp, self._resid, self._chi2 = part_values, None, None
         apply(values, self.stack)
         self.stack.build_sublayers()
         self._draw_profile()
@@ -954,6 +968,11 @@ class DatasetView(QtWidgets.QSplitter):
         self.refl_note = QtWidgets.QLabel()
         self.refl_note.setStyleSheet('color: %s' % style.ERROR)
         v.addWidget(self.refl_note)
+        # under the residuals: the dataset's chi^2/N (and a joint fit's)
+        self.chi2_note = QtWidgets.QLabel()
+        self.chi2_note.setProperty('role', 'muted')
+        self.chi2_note.hide()
+        v.addWidget(self.chi2_note)
         return box
 
     def _draw_profile(self):
@@ -1009,6 +1028,7 @@ class DatasetView(QtWidgets.QSplitter):
         if self._model is None:
             return
         k = self.quantity.currentIndex()
+        self.chi2_note.setVisible(k == len(REFL_QUANTITIES))
         if k == len(REFL_QUANTITIES):
             self._draw_residuals()
             return
@@ -1104,7 +1124,32 @@ class DatasetView(QtWidgets.QSplitter):
                                'No residuals: this fit has no fitted points '
                                'here.')
         self.refl_note.setVisible(not res)
+        self.chi2_note.setText(self.chi2_text() if res else '')
         p.enableAutoRange()
+
+    def chi2_text(self):
+        """The line under the residuals: this dataset's chi^2/N at the
+        entry drawn (its fit problem's chi2_per_point, as the history
+        column; under the log R cost, which has none, the mean square of
+        the residuals drawn, with dR), a joint fit's over every dataset
+        (`total`), and the error floor when one is set."""
+        f = self.fit
+        if self._chi2 is None:
+            self._chi2 = f.chi2_per_point(self._xp)
+            if self._chi2 is None:
+                r = np.concatenate([r for *_, r in self.residuals()])
+                r = r[np.isfinite(r)]
+                self._chi2 = float(np.mean(r**2)) if r.size else np.nan
+        log = f.cost != 'chi2'
+        text = '%s of this dataset %.5g' % (
+            'χ²/N with dR' if log else 'χ²/N', self._chi2)
+        if self.total is not None:
+            text += ' — all datasets %.5g' % self.total
+        if f.error_floor > 0:
+            text += ' (error floor %g %% included)' % (100 * f.error_floor)
+        if log:
+            text += ' — the log R cost has no χ²'
+        return text
 
     def _add_data(self, name, col, Q, y, dy, log):
         """Markers with error bars, as in the Experimental tab."""
