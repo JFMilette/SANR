@@ -447,7 +447,6 @@ def test_windows_have_a_tab_per_dataset():
     dw.start(pp, 120, 'joint')
     assert [dw.tabs.tabText(k) for k in range(dw.tabs.count())] == \
         ['Summary', 'Traces', 'Corner', 'A', 'B']
-    assert not dw.part_box.isHidden()
     dw.finish(res)
     dw.tabs.setCurrentIndex(4)
     page, pred, prof, view, _ = dw.part_pages[1]
@@ -465,9 +464,8 @@ def test_windows_have_a_tab_per_dataset():
         assert plots.currentWidget() is pred and pred.which == 'SA'
     got = []
     dw.boundsRequested.connect(lambda *a: got.append(a))
-    dw.part_box.setCurrentIndex(1)
-    dw._apply_bounds()
-    assert got[0][2] == 1 and len(got[0][0]) == 3
+    dw._apply_bounds()                  # no dataset to choose: each its own
+    assert len(got[0]) == 2 and len(got[0][0]) == 3
     dw.close()
 
 
@@ -489,6 +487,30 @@ def test_each_dataset_its_own_dq_table():
     assert b.resolution_sigma(np.array([0.05]))[0] == pytest.approx(5e-4)
     # the Simulation tab keeps A's
     assert sim.stack.resolution['data_set'] == 'A'
+
+
+def test_dream_bounds_to_every_model():
+    """DREAM's "Apply ±σ to bounds" of a joint run, no dataset chosen: the
+    model of each dataset gets the bounds of its own parameters (B its own
+    thickness), the shared one the same in both."""
+    from types import SimpleNamespace
+    sim, exp = gui()
+    pn = parameter_names_of(sim)
+    choose_joint(exp, {'B': {pn[0]: 'own'}})
+    problem, *_ = exp._problem(exp.fit_report, 'chi2')
+    exp._set_fit_start(problem)
+    lo, hi = [80.0, 85.0, 1e-6], [100.0, 105.0, 3e-6]
+    w = SimpleNamespace(problem=SimpleNamespace(fit=problem))
+    exp._bounds_dream(lo, hi, w)
+    assert sim.model_names() == ['Model 1', 'A', 'B']
+    a, b = (sim.model_stack(m).layers[1] for m in 'AB')
+    assert (a.fit_entry('thickness')['min'],
+            a.fit_entry('thickness')['max']) == (80.0, 100.0)
+    assert (b.fit_entry('thickness')['min'],
+            b.fit_entry('thickness')['max']) == (85.0, 105.0)
+    for layer in (a, b):
+        assert (layer.fit_entry('MSLD_rho')['min'],
+                layer.fit_entry('MSLD_rho')['max']) == (1e-6, 3e-6)
 
 
 def test_send_to_a_model_per_dataset():

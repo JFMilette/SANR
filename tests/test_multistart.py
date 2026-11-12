@@ -127,8 +127,9 @@ def test_de_restarts():
     assert sum(m['hits'] for m in merge(p, ends)) == 3
 
 
-def test_panel_table_apply_and_dream(monkeypatch):
-    """The table's rows go to the Simulation tab and start DREAM."""
+def test_panel_multistart_done():
+    """The end of a multistart: a line in the page's report; the DREAM
+    error scale is left as it was, whatever chi^2/N."""
     import os
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     from PyQt6 import QtWidgets
@@ -148,23 +149,13 @@ def test_panel_table_apply_and_dream(monkeypatch):
     s, vec, data, qmin, qmax, grid = exp._fit_inputs(exp.ms_report)
     fp = FitProblem(sim.stack, data, 'chi2', qmin, qmax, grid)
     m = run_multistart(fp, n_starts=4, seed=0)
-    exp._ms_note = ''
-    exp._ms_show(fp, m, 'multistart')
-    assert exp.ms_table.rowCount() == len(m)
-    exp.ms_table.selectRow(len(m) - 1)
-    exp._ms_apply()
-    assert sim.stack.layers[1].thickness == pytest.approx(m[-1]['x'][0])
-    seen = {}
-    monkeypatch.setattr(exp, '_launch_dream',
-                        lambda problem, options, report: seen.update(options))
-    # this flat data leaves chi^2/N > 2: the error scale is fitted too,
-    # starting at the measured dR (log10 s = 0)
-    assert exp.dream_sigma.isChecked()
-    exp._ms_dream()
-    assert seen['x0'].shape == (8, 2)
-    assert np.allclose(seen['x0'][:, 0], m[-1]['x'][0],
-                       atol=0.01 * (fp.hi[0] - fp.lo[0]))
-    assert np.allclose(seen['x0'][:, 1], 0.0, atol=0.02)
+    exp._ms_note, exp._ms_problem = '', fp
+    exp.dream_sigma.setChecked(False)
+    exp._ms_done(m)
+    assert exp.ms_report.text().startswith(
+        'Multistart: 5 end(s) in %d distinct' % len(m))
+    # this flat data leaves chi^2/N > 2: still not ticked for the user
+    assert not exp.dream_sigma.isChecked()
 
 
 @pytest.mark.slow

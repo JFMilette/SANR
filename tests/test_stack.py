@@ -224,10 +224,19 @@ def test_to_dict_round_trip():
     assert back.to_dict() == st.to_dict()
 
 
-@pytest.mark.parametrize('f', ['session_Cr2Te3.json', 'session_Cr2Te3_2.json'])
+@pytest.mark.parametrize('f', ['show_mistake.json', 'session_Cr2Te3'])
 def test_example_models_load(f):
-    with open(HERE.parent / 'sessions' / f) as fh:
-        st = S.Stack.from_dict(json.load(fh))
+    """Saved models of real samples load and give finite R: show_mistake
+    and the Cr2Te3 example (its file left the repo in SANR 0.4; its model
+    is kept in the interface-order reference)."""
+    data = HERE / 'data'
+    if f.endswith('.json'):
+        with open(data / f) as fh:
+            d = json.load(fh)
+    else:
+        ref = np.load(data / 'rms_additive_reference.npz')
+        d = json.loads(str(ref['%s/stack' % f]))
+    st = S.Stack.from_dict(d)
     st.build_sublayers()
     assert np.all(np.isfinite(st.reflectivities(Q, pairs(LAB))))
 

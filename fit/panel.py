@@ -2,17 +2,15 @@
 The Fit box of the Experimental tab: the settings every method shares
 (dataset, cost, target, worker processes, error floor, Revert) and a Method
 box, below which only the chosen method's options and buttons are shown
-(_show_method): differential evolution (fit.de, with restarts), scipy's
+(_show_method): differential evolution (fit.de), scipy's
 basin hopping, dual annealing, SHGO and DIRECT (fit.de.global_fit, followed
 in the same fit window as DE), local
 L-BFGS-B (fit.de.de_fit.run_lbfgs: L-BFGS-B alone from the current values,
 followed in the same fit window as DE), least squares
 (fit.de.de_fit.run_lsq: trust-region least squares on the residuals from the
 current values, likewise), multistart (fit.multistart: local fits from many
-starts, followed in the fit window, which lists the minima they reach as
-does the multistart table, both updated as each start ends; DE restarts
-fill the table too), Bayesian DREAM (fit.dream, which can start around a
-minimum of that table) and neural posterior estimation (fit.npe: a network
+starts, followed in the fit window, which lists the minima they reach,
+updated as each start ends), Bayesian DREAM (fit.dream) and neural posterior estimation (fit.npe: a network
 trained on simulations proposes the regions compatible with the data,
 followed in its NPE tab, whose seeds DREAM can start from: the DREAM start
 'NPE seeds'), with everything they do: building the fit problem
@@ -43,7 +41,7 @@ matches the parameters across the models by name; a shared one takes its
 bounds and start from the model chosen in its From box (fit.joint
 `sources`), the others from each dataset's own model.  Fitting one dataset
 alone first shows its model in the Simulation tab.  A result (an entry of a
-fit window, a DREAM state or bounds, a multistart minimum) is written, for
+fit window, a DREAM state or bounds) is written, for
 every dataset at once, into the model named after that dataset: its values
 overwritten if it exists, else made as a copy of the model the dataset was
 fitted with (_send_values); each dataset is then linked to its model, so
@@ -76,12 +74,12 @@ from fit.problem import FitProblem, parameter_names
 from fit.de.de_fit import STRATEGIES
 from fit.de.de_window import DEThread, DEWindow
 from fit.de import global_fit
-from fit.dream.dream_fit import (PosteriorProblem, jittered_start, load_run,
+from fit.dream.dream_fit import (PosteriorProblem, load_run,
                                  prior_tension)
 from fit.dream.dream_window import SESSIONS_DIR, DreamThread, DreamWindow
 from fit.joint import (JointProblem, default_mode, part_index, part_x,
                        parts)
-from fit.multistart import merge, run_multistart
+from fit.multistart import run_multistart
 from fit.npe import missing as npe_missing
 from fit.npe.npe_window import NPERun, NPEThread, NPEWindow
 
@@ -92,11 +90,9 @@ FIT_COSTS = [('chi2', 'χ² (weighted by dR)'), ('log', 'log R (per decade)')]
 FIT_TARGETS = [('channels', 'R per channel', ''),
                ('sum', '(R+ + R−)/2', ' of (R+ + R−)/2'),
                ('asym', 'spin asymmetry SA', ' of SA')]
-# DREAM start (dream_fit.sample x0): label, key; 'multistart': around the
-# minimum selected in the multistart table
+# DREAM start (dream_fit.sample x0): label, key
 DREAM_STARTS = [('Latin hypercube', None), ('DE population', 'de'),
                 ('current values', 'current'),
-                ('multistart minimum', 'multistart'),
                 ('NPE seeds', 'npe')]
 # the Method box: key, label
 FIT_METHODS = [('de', 'Differential evolution'),
@@ -113,8 +109,6 @@ MS_METHODS = [('L-BFGS-B', 'lbfgs'), ('least squares', 'lsq'),
 # height (px) the fit box keeps however short the window; taller content
 # scrolls
 FIT_PAGE_MIN = 160
-# chi^2/N of an optimum above which DREAM's error scale is ticked
-SIGMA_SUGGEST = 2.0
 JOINT = 'joint'           # data of the Dataset box's joint-fit entry
 # tab names (_tab_name): the method, a number, the dataset (cut to
 # TAB_NAME_MAX characters) or how many datasets a joint fit has
@@ -127,6 +121,55 @@ TAB_NAME_MAX = 18
 # parameter name of each stitch factor -> the angle it joins (the Fit tab
 # lists a dataset's up to its number of angles)
 STITCH_NAMES = {'stack.' + a: stitch_index(a) for a in STITCH_PARAMS}
+
+
+def suggest_grid(grids, denser=1.5):
+    """The channel whose Q points {channel: Q} suggest themselves as the
+    Licorne resolution grid: of those covering every channel's Q range,
+    the one with the most points; if none covers them all, the widest,
+    unless another has `denser` times its points per unit Q (a coarse grid
+    blurs sharp features for the others more than a few end points cost)."""
+    lo = min(q.min() for q in grids.values())
+    hi = max(q.max() for q in grids.values())
+    cover = [ch for ch, q in grids.items() if q.min() <= lo and q.max() >= hi]
+    if cover:
+        return max(cover, key=lambda ch: len(grids[ch]))
+
+    def density(ch):
+        q = grids[ch]
+        return len(q) / max(q.max() - q.min(), 1e-300)
+    wide = max(grids, key=lambda ch: grids[ch].max() - grids[ch].min())
+    dense = max(grids, key=density)
+    return dense if density(dense) >= denser * density(wide) else wide
+
+
+def read_widgets(widgets):
+    """{name: value} of option boxes {name: widget}: a check box's state,
+    a combo box's data, a spin box's value."""
+    out = {}
+    for key, w in widgets.items():
+        if isinstance(w, QtWidgets.QCheckBox):
+            out[key] = w.isChecked()
+        elif isinstance(w, QtWidgets.QComboBox):
+            out[key] = w.currentData()
+        else:
+            out[key] = w.value()
+    return out
+
+
+def set_widgets(widgets, saved):
+    """Inverse of read_widgets, in the order of `widgets`; names not in
+    `saved` keep their value, names not in `widgets` are skipped."""
+    for key, w in widgets.items():
+        if key not in saved:
+            continue
+        v = saved[key]
+        if isinstance(w, QtWidgets.QCheckBox):
+            w.setChecked(bool(v))
+        elif isinstance(w, QtWidgets.QComboBox):
+            w.setCurrentIndex(max(0, w.findData(v)))
+        else:
+            w.setValue(0 if v is None else v)
 
 
 class MultistartThread(QtCore.QThread):
@@ -245,13 +288,6 @@ class FitPanel:
             'Stop when the spread of the population\'s cost falls below '
             'tol × its mean.\nA large tol (1e-3) can stop "successfully" '
             'far from the minimum; 1e-6 runs to Max iter in practice.')
-        self.fit_restarts = QtWidgets.QSpinBox()
-        self.fit_restarts.setRange(1, 20)
-        self.fit_restarts.setValue(1)
-        self.fit_restarts.setToolTip(
-            'Run the fit this many times (new random population each time) '
-            'and keep the best;\nthe distinct minima they end in are listed '
-            'in the multistart table.')
         # mutation F: a random value in [min, max] each generation (dithering,
         # scipy's default 0.5 – 1); min = max is a constant F
         self.fit_mut_lo = dspin(0, 1.99, 2, 0.05)
@@ -353,8 +389,7 @@ class FitPanel:
         # -- differential evolution
         page, f = self._page()
         f.addRow(self._grid([('Max iter', self.fit_maxiter),
-                             ('Pop', self.fit_pop), ('Tol', self.fit_tol),
-                             ('Restarts', self.fit_restarts)]))
+                             ('Pop', self.fit_pop), ('Tol', self.fit_tol)]))
         mrow = QtWidgets.QHBoxLayout()
         mrow.addWidget(self.fit_mut_lo, 1)
         mrow.addSpacing(6)
@@ -572,7 +607,7 @@ class FitPanel:
                 'Simplicial homology global optimisation: samples the '
                 'bounds, then runs L-BFGS-B from each candidate minimum.  '
                 'Ends with the global and every local minimum found, in '
-                'the fit window and the multistart table.  The sampling '
+                'the fit window.  The sampling '
                 'uses the workers.'),
             'direct': (
                 [('Max evals', 'maxfun', spin(
@@ -621,14 +656,7 @@ class FitPanel:
 
     def _global_options(self, method):
         """run_global's options of `method` from its page."""
-        out = {}
-        for key, w in self._global_widgets[method].items():
-            if isinstance(w, QtWidgets.QCheckBox):
-                out[key] = w.isChecked()
-            elif isinstance(w, QtWidgets.QComboBox):
-                out[key] = w.currentData()
-            else:
-                out[key] = w.value()
+        out = read_widgets(self._global_widgets[method])
         if method == 'direct' and not out['maxfun']:
             out['maxfun'] = None                    # auto
         return out
@@ -637,21 +665,43 @@ class FitPanel:
         """Inverse of _global_options for every method: saved {method:
         options} from a session (missing ones keep their value)."""
         for method, opts in (saved or {}).items():
-            for key, v in opts.items():
-                w = self._global_widgets.get(method, {}).get(key)
-                if w is None:
-                    continue
-                if isinstance(w, QtWidgets.QCheckBox):
-                    w.setChecked(bool(v))
-                elif isinstance(w, QtWidgets.QComboBox):
-                    w.setCurrentIndex(max(0, w.findData(v)))
-                else:
-                    w.setValue(0 if v is None else v)
+            set_widgets(self._global_widgets.get(method, {}), opts)
+
+    def _page_widgets(self, page):
+        """The option boxes of the multistart, DREAM or NPE page by name, as
+        a session keeps them (page_options).  The archive comes first: it
+        sets the Chains and Seeds boxes' minimum."""
+        if page == 'multistart':
+            return dict(starts=self.ms_starts, method=self.ms_method)
+        if page == 'dream':
+            return dict(
+                archive=self.dream_archive, generations=self.dream_gen,
+                chains=self.dream_chains, seed=self.dream_seed,
+                rhat_target=self.dream_rhat, snooker=self.dream_snooker,
+                beta_start=self.dream_beta, start=self.dream_start,
+                sigma_free=self.dream_sigma, floor_free=self.dream_floor,
+                stop_when_converged=self.dream_stop,
+                tempered=self.dream_temper)
+        return dict(
+            rounds=self.npe_rounds, simulations=self.npe_sims,
+            samples=self.npe_samples, seeds=self.npe_chains,
+            seed=self.npe_seed, coarse=self.npe_coarse,
+            threshold=self.npe_threshold, calibrate=self.npe_calibrate)
+
+    def page_options(self, page):
+        """The multistart, DREAM ('dream') or NPE ('npe') page's settings,
+        plain JSON."""
+        return read_widgets(self._page_widgets(page))
+
+    def set_page_options(self, page, saved):
+        """Inverse of page_options (missing ones keep their value; a start
+        no longer offered falls back to the first)."""
+        set_widgets(self._page_widgets(page), saved or {})
 
     def _build_multistart_page(self):
         """The multistart page: local fits from the current values and
-        from points spread over the bounds (fit.multistart), and the table
-        of the distinct minima they (or DE restarts) end in."""
+        from points spread over the bounds (fit.multistart); the distinct
+        minima they end in are the entries of its fit tab."""
         page, f = self._page()
         self.ms_starts = QtWidgets.QSpinBox()
         self.ms_starts.setRange(1, 1000)
@@ -688,40 +738,9 @@ class FitPanel:
         self.btn_ms_run.clicked.connect(self.start_multistart)
         self.btn_ms_stop.clicked.connect(self.stop_multistart)
         self.btn_ms_window.clicked.connect(self._show_fit_window)
-        self.ms_table = QtWidgets.QTableWidget(0, 0)
-        self.ms_table.setSelectionBehavior(
-            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self.ms_table.setSelectionMode(
-            QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
-        self.ms_table.setEditTriggers(
-            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.ms_table.verticalHeader().setVisible(False)
-        self.ms_table.setMinimumHeight(90)
-        self.ms_table.setToolTip(
-            'Distinct minima, best first: cost, how many starts ended there, '
-            'whether the current values did, the parameters held by a '
-            'bound, then the values')
-        f.addRow(self.ms_table)
-        row = QtWidgets.QHBoxLayout()
-        self.btn_ms_apply = QtWidgets.QPushButton('Apply to model')
-        self.btn_ms_apply.setToolTip('Send the selected minimum to the '
-                                     'Simulation tab (Revert undoes it)')
-        self.btn_ms_dream = QtWidgets.QPushButton('Start DREAM here')
-        self.btn_ms_dream.setToolTip(
-            'Sample with DREAM from jittered copies of the selected minimum '
-            '(the DREAM options)')
-        for b in (self.btn_ms_apply, self.btn_ms_dream):
-            b.setEnabled(False)
-            row.addWidget(b)
-        f.addRow(row)
-        self.btn_ms_apply.clicked.connect(self._ms_apply)
-        self.btn_ms_dream.clicked.connect(self._ms_dream)
         self.ms_report = QtWidgets.QLabel(wordWrap=True)
         f.addRow(self.ms_report)
         self._ms = None                 # running MultistartThread
-        self._ms_minima = []            # rows of the table
-        self._ms_shown = None           # the problem they belong to
-        self._ms_names = []             # and its parameter names
         return page
 
     def start_multistart(self):
@@ -749,11 +768,8 @@ class FitPanel:
         self._ms.progress.connect(self._ms_progress)
         self._ms.progress.connect(self.fit_window.set_starts)
         self._ms.status.connect(self.fit_window.set_start_status)
-        self._ms_ends = []              # (start, u, cost) of the ended starts
-        self._ms.status.connect(self._ms_status)
         self.fit_window.set_starts(0, self.ms_starts.value() + 1)
-        self._ms.done.connect(
-            lambda m: self._ms_show(self._ms_problem, m, 'multistart'))
+        self._ms.done.connect(self._ms_done)
         self._ms.done.connect(lambda m, t=self._ms: self.fit_window.show_minima(
             m, stopped=t._stop))
         self._ms.failed.connect(lambda msg: self.ms_report.setText(
@@ -763,8 +779,7 @@ class FitPanel:
         sim.set_locked(True)
         for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
                   *self._global_buttons, self.btn_sample, self.btn_npe_train,
-                  self.btn_revert, self.btn_ms_run, self.btn_ms_apply,
-                  self.btn_ms_dream):
+                  self.btn_revert, self.btn_ms_run):
             b.setEnabled(False)
         self.btn_ms_stop.setEnabled(True)
         self.ms_report.setText(self._ms_note + 'Fitting from %d starts…'
@@ -781,16 +796,6 @@ class FitPanel:
         self.ms_report.setText(self._ms_note + '%d / %d starts done…'
                                % (done, total))
 
-    def _ms_status(self, info):
-        """A start of the running multistart ended: the table as the ended
-        starts give it so far (its buttons wait for the end)."""
-        if info['phase'] != 'done' or info.get('u') is None:
-            return
-        self._ms_ends.append((info['start'], np.asarray(info['u']),
-                              info['best']))
-        self._ms_fill(self._ms_problem,
-                      merge(self._ms_problem, self._ms_ends))
-
     def _ms_cleanup(self):
         self._ms.deleteLater()
         self._ms = None
@@ -801,104 +806,17 @@ class FitPanel:
             b.setEnabled(True)
         self.btn_ms_stop.setEnabled(False)
 
-    def _ms_show(self, problem, minima, source):
-        """Fill the table with `minima` (fit.multistart rows) of problem's
-        parameters, from `source` (multistart, DE restarts)."""
-        self._ms_fill(problem, minima)
-        for b in (self.btn_ms_apply, self.btn_ms_dream):
-            b.setEnabled(bool(minima))
-        self._ms_start_item(bool(minima))
-        if minima:
-            self._suggest_sigma(problem, minima[0]['x'])
+    def _ms_done(self, minima):
+        """The end of a multistart: a line in the report (the minima are the
+        entries of its fit tab)."""
         hits = sum(m['hits'] for m in minima)
-        cost = 'χ²/N' if problem.cost == 'chi2' else 'cost'
-        note = self._ms_note if source == 'multistart' else ''
+        cost = 'χ²/N' if self._ms_problem.cost == 'chi2' else 'cost'
         self.ms_report.setText(
-            note + '%s: %d end(s) in %d distinct minim%s, best %s %.5g.'
-            % (source, hits, len(minima), 'um' if len(minima) == 1 else 'a',
-               cost, minima[0]['chi2']) if minima
-            else '%s: stopped before any start ended.' % source)
-
-    def _ms_fill(self, problem, minima):
-        """The table's rows: `minima` of problem's parameters, the row
-        selected before kept selected (by its parameters), else the
-        best."""
-        old = self._ms_selected()
-        keep = None if old is None or old is self._ms_minima[0] \
-            else old['x']
-        self._ms_minima = list(minima)
-        self._ms_shown = problem        # the problem of the table's minima
-        self._ms_names = list(problem.names)
-        t = self.ms_table
-        cost = 'χ²/N' if problem.cost == 'chi2' else 'cost'
-        heads = [cost, 'hits', 'current', 'on a bound'] + self._ms_names
-        t.clear()
-        t.setColumnCount(len(heads))
-        t.setHorizontalHeaderLabels(heads)
-        t.setRowCount(len(minima))
-        for r, m in enumerate(minima):
-            bound = [n for n, b in zip(self._ms_names, m['at_bound']) if b]
-            cells = ['%.5g' % m['chi2'], '%d' % m['hits'],
-                     '✓' if m['from_current'] else '',
-                     ', '.join(bound)] + ['%.5g' % v for v in m['x']]
-            for c, text in enumerate(cells):
-                t.setItem(r, c, QtWidgets.QTableWidgetItem(text))
-        t.resizeColumnsToContents()
-        if minima:
-            t.selectRow(next((r for r, m in enumerate(minima)
-                              if keep is not None
-                              and np.array_equal(m['x'], keep)), 0))
-
-    def _suggest_sigma(self, problem, x):
-        """After an optimum with chi^2/N > 2: tick "fit error scale" on the
-        DREAM options and say why (the user can untick it)."""
-        if problem.cost != 'chi2' or problem.target != 'channels':
-            return
-        c = float(np.mean(problem.residuals(x)**2))
-        if not c > SIGMA_SUGGEST:
-            return
-        self.dream_sigma.setChecked(True)
-        self.dream_note.setText(
-            '<i>χ²/N = %.3g at the optimum: the error bars underestimate the '
-            'misfit by ×%.2g; the error scale is fitted.</i>'
-            % (c, np.sqrt(c)))
-
-    def _ms_start_item(self, on):
-        """Enable the DREAM start 'multistart minimum'."""
-        item = self.dream_start.model().item(
-            self.dream_start.findData('multistart'))
-        item.setEnabled(on)
-
-    def _ms_selected(self):
-        rows = self.ms_table.selectionModel().selectedRows() \
-            if self.ms_table.selectionModel() else []
-        if not rows or rows[0].row() >= len(self._ms_minima):
-            return None
-        return self._ms_minima[rows[0].row()]
-
-    def _ms_apply(self):
-        """Send the selected minimum to the models of its datasets (a model
-        several datasets share: the first one's values)."""
-        m = self._ms_selected()
-        if m is None or self.busy():
-            return
-        sent = self._send_values(self._ms_shown, m['x'], 0, self,
-                                 'Multistart')
-        if sent is None:
-            self.ms_report.setText(self._error(
-                'The layers of a model changed since these minima were '
-                'found.'))
-            return
-        self.ms_report.setText('Minimum %.5g sent to %s.' % (
-            m['chi2'], self._to_models(sent)))
-        self.btn_revert.setEnabled(True)
-
-    def _ms_dream(self):
-        """Start DREAM around the selected minimum."""
-        self.dream_start.setCurrentIndex(
-            self.dream_start.findData('multistart'))
-        self.fit_method.setCurrentIndex(self.fit_method.findData('dream'))
-        self.start_dream()
+            self._ms_note + 'Multistart: %d end(s) in %d distinct minim%s, '
+            'best %s %.5g; the minima are in its fit tab.'
+            % (hits, len(minima), 'um' if len(minima) == 1 else 'a', cost,
+               minima[0]['chi2']) if minima
+            else 'Multistart: stopped before any start ended.')
 
     def _build_dream_page(self):
         """The DREAM options of the fit box."""
@@ -911,11 +829,13 @@ class FitPanel:
             'Maximum number of generations; the first 10 % adapt the sampler '
             'and are discarded')
         self.dream_chains = QtWidgets.QSpinBox()
-        self.dream_chains.setRange(0, 200)
-        self.dream_chains.setSpecialValueText('auto')
+        self.dream_chains.setRange(2, 200)
+        self.dream_chains.setValue(8)
+        # the value is taken once typing is done: 16 can be typed through 1
+        self.dream_chains.setKeyboardTracking(False)
         self.dream_chains.setToolTip(
-            'Number of chains; auto = 8 with the archive, otherwise '
-            'max(7, d + 1).\nWith the archive any number from 2 works (R-hat '
+            'Number of chains (8 by default).\n'
+            'With the archive any number from 2 works (R-hat '
             'compares chains, so 1 can never converge), but 3 chains can all '
             'settle in one of two minima and look converged; without it at '
             'least 7 (2δ + 1).')
@@ -933,8 +853,6 @@ class FitPanel:
             'chain has visited.\n'
             'Unchecked: classic DREAM with the outlier-chain test, at least 7 '
             'chains.')
-        self._chains_last = 0
-        self.dream_chains.valueChanged.connect(self._check_chains)
         self.dream_archive.toggled.connect(self._check_chains)
         self.dream_sigma = QtWidgets.QCheckBox('fit error scale')
         self.dream_sigma.setToolTip(
@@ -945,7 +863,6 @@ class FitPanel:
             'Sample a relative error floor f, log10 f in [-4, -0.5]: errors '
             'sqrt((s dR)² + (f R)²) (log10_error_floor);\nthe general '
             'fixed floor is then not used')
-        self.dream_note = QtWidgets.QLabel(wordWrap=True)
         self.dream_stop = QtWidgets.QCheckBox('stop when converged')
         self.dream_stop.setChecked(True)
         self.dream_stop.setToolTip(
@@ -990,14 +907,12 @@ class FitPanel:
         self.dream_start = QtWidgets.QComboBox()
         for label, key in DREAM_STARTS:
             self.dream_start.addItem(label, key)
-        self._ms_start_item(False)
         self.dream_start.setToolTip(
             'Where the chains start: spread over the bounds (Latin '
             'hypercube), the final population of a DE fit with the Fit '
             'page\'s settings,\nor jittered copies of the current values '
-            '(e.g. a fitted optimum)\nor of the minimum selected in the '
-            'multistart table.  The adaptation phase is discarded either '
-            'way.')
+            '(e.g. a fitted optimum or a multistart minimum sent from its '
+            'fit tab).\nThe adaptation phase is discarded either way.')
         f.addRow(self._grid([('Generations', self.dream_gen),
                              ('Chains', self.dream_chains),
                              ('Seed', self.dream_seed),
@@ -1012,9 +927,6 @@ class FitPanel:
                                self.dream_floor)):
             opts.addWidget(w, k // 2, k % 2)
         f.addRow(opts)
-        f.addRow(self.dream_note)
-        self.dream_sigma.toggled.connect(
-            lambda on: None if on else self.dream_note.setText(''))
         self.dream_archive.toggled.connect(self.dream_snooker.setEnabled)
         f.addRow(QtWidgets.QLabel(
             '<i>χ² likelihood with the measured dR, whatever the DE '
@@ -1070,11 +982,12 @@ class FitPanel:
             'Network samples whose exact posterior is computed to choose '
             'the DREAM seeds (one model evaluation each)')
         self.npe_chains = QtWidgets.QSpinBox()
-        self.npe_chains.setRange(0, 200)
-        self.npe_chains.setSpecialValueText('auto')
+        self.npe_chains.setRange(self.min_chains(), 200)
+        self.npe_chains.setValue(8)
+        self.npe_chains.setKeyboardTracking(False)
         self.npe_chains.setToolTip(
-            'Seeds, i.e. DREAM chains; auto as the DREAM page (8 with the '
-            'archive, otherwise max(7, d + 1))')
+            'Seeds, i.e. DREAM chains (8 by default; at least 2 with the '
+            'archive, 7 without, as the DREAM page)')
         self.npe_seed = QtWidgets.QSpinBox()
         self.npe_seed.setRange(-1, 999_999)
         self.npe_seed.setValue(-1)
@@ -1186,9 +1099,7 @@ class FitPanel:
                 self.npe_report.setText(self._error(exc))
                 return
         self._set_fit_start(problem.fit)
-        n = self.npe_chains.value() or (
-            8 if self.dream_archive.isChecked()
-            else max(7, problem.ndim + 1))
+        n = self.npe_chains.value()
         seed = None if self.npe_seed.value() < 0 else self.npe_seed.value()
         rounds, sims = self.npe_rounds.value(), self.npe_sims.value()
         names = [s['name'] for s, *_ in inputs]
@@ -1961,16 +1872,21 @@ class FitPanel:
                for q in grids.values()):
             return first
         names = list(grids)
-        items = ['R%s — %d points, %.4g – %.4g Å⁻¹'
-                 % (ch, len(q), q.min(), q.max()) for ch, q in grids.items()]
+        best = suggest_grid(grids)
+        items = ['R%s — %d points, %.4g – %.4g Å⁻¹%s'
+                 % (ch, len(q), q.min(), q.max(),
+                    '  (suggested)' if ch == best else '')
+                 for ch, q in grids.items()]
         last = self._grid_choice.get(s['name'])
         item, ok = QtWidgets.QInputDialog.getItem(
             self, 'Q grid for the Licorne resolution',
             'The channels of %s are not on the same Q points.\n'
             'Licorne\'s resolution is computed on one Q grid: whose?\n'
-            'The other channels take the model interpolated at their points.'
-            % s['name'], items,
-            names.index(last) if last in names else 0, False)
+            'The other channels take the model interpolated at their points;'
+            '\nthose outside the grid take its end value.  Suggested: the '
+            'channel covering\nthe others\' Q range, unless another is much '
+            'denser.' % s['name'], items,
+            names.index(last if last in names else best), False)
         if not ok:
             return None
         ch = names[items.index(item)]
@@ -2102,12 +2018,8 @@ class FitPanel:
                                  mutation=mut[0] if mut[0] == mut[1] else mut,
                                  polish=self.fit_polish.isChecked(),
                                  workers=self.fit_workers.value(),
-                                 restarts=self.fit_restarts.value(),
                                  atol=0.0, init='sobol', resume=resume,
                                  strategy=self.fit_strategy.currentData())
-        self._fit.minima.connect(
-            lambda m, p=problem: self._ms_show(
-                p, m, global_fit.LABELS.get(method, 'DE restarts')))
         if method in global_fit.METHODS:
             self._fit.minima.connect(self.fit_window.set_minima)
         self._fit.progress.connect(self._fit_progress)
@@ -2137,17 +2049,11 @@ class FitPanel:
         return 2 if self.dream_archive.isChecked() else 7
 
     def _check_chains(self, *_):
-        """Keep the Chains box at auto (0) or at least min_chains(): a value
-        in between snaps up to the minimum when it was reached going up, back
-        to auto when going down."""
-        box, lo = self.dream_chains, self.min_chains()
-        k = box.value()
-        if 0 < k < lo:
-            box.blockSignals(True)
-            box.setValue(0 if self._chains_last >= lo and k < self._chains_last
-                         else lo)
-            box.blockSignals(False)
-        self._chains_last = box.value()
+        """The Chains and Seeds boxes start at min_chains() (a value below
+        goes up to it when the archive is unticked)."""
+        for box in (self.dream_chains, getattr(self, 'npe_chains', None)):
+            if box is not None:
+                box.setMinimum(self.min_chains())
 
     def start_dream(self):
         sim = self.simulation
@@ -2169,7 +2075,7 @@ class FitPanel:
         n_gen = self.dream_gen.value()
         options = dict(
             n_gen=n_gen, archive=self.dream_archive.isChecked(),
-            n_chains=self.dream_chains.value() or None,
+            n_chains=self.dream_chains.value(),
             seed=None if self.dream_seed.value() < 0
             else self.dream_seed.value(),
             n_workers=self.fit_workers.value(),
@@ -2185,17 +2091,6 @@ class FitPanel:
                 maxiter=self.fit_maxiter.value(),
                 popsize=self.fit_pop.value(), tol=self.fit_tol.value(),
                 strategy=self.fit_strategy.currentData())
-        elif options['x0'] == 'multistart':
-            row = self._ms_selected()
-            if row is None or self._ms_names != problem.fit.names:
-                self.dream_report.setText(self._error(
-                    'Select a minimum in the multistart table of these '
-                    'parameters first.'))
-                return
-            n = options['n_chains'] or (8 if options['archive']
-                                        else max(7, problem.ndim + 1))
-            options['x0'] = jittered_start(problem, n, options['seed'],
-                                           row['x'])
         elif options['x0'] == 'npe':
             seeds = self._npe_seeds
             if seeds is None or seeds[0] != problem.names:
@@ -2272,23 +2167,56 @@ class FitPanel:
             w.stopRequested.connect(self.stop_dream)
             w.continueRequested.connect(self.continue_dream)
             w.sendRequested.connect(
-                lambda x, part, label, w=w: self._send_dream(x, part, w,
-                                                             label))
+                lambda x, label, w=w: self._send_dream(x, w, label))
             w.boundsRequested.connect(
-                lambda lo, hi, part, w=w: self._bounds_dream(lo, hi, part, w))
+                lambda lo, hi, w=w: self._bounds_dream(lo, hi, w))
         self.dream_window.tab_name = self._tab_name('dream', names)
         self.dream_window.setWindowTitle('Bayesian sampling (DREAM) — '
                                          + ' + '.join(names))
         self.btn_dream_window.setEnabled(True)
 
     def _tab_name(self, method, names):
-        """Short name of a new fit or DREAM tab: e.g. 'DE 3 · film_5K' or
-        'DREAM 4 · 3 datasets' (the full title is its tool tip)."""
-        self._n_tabs += 1
+        """Short name of a new fit, DREAM or NPE tab: e.g. 'DE 3 · film_5K'
+        or 'DREAM 4 · 3 datasets' (the full title is its tool tip).  The
+        number is the tab's place among those open (_renumber keeps it so
+        when one closes)."""
+        if self.page_tabs is None:
+            self._n_tabs += 1
+            n = self._n_tabs
+        else:
+            n = len(self._run_pages()) + 1
         what = names[0] if len(names) == 1 else '%d datasets' % len(names)
         if len(what) > TAB_NAME_MAX:
             what = what[:TAB_NAME_MAX - 1].rstrip() + '…'
-        return '%s %d · %s' % (TAB_METHODS[method], self._n_tabs, what)
+        return '%s %d · %s' % (TAB_METHODS[method], n, what)
+
+    def _run_pages(self):
+        """(index, window) of the fit, DREAM and NPE tabs of page_tabs."""
+        tabs = self.page_tabs
+        return [(i, tabs.widget(i)) for i in range(tabs.count())
+                if isinstance(tabs.widget(i),
+                              (DEWindow, DreamWindow, NPEWindow))]
+
+    def computing_tabs(self):
+        """The DREAM tabs still computing their end (DreamWindow.finish in
+        the background, e.g. reopened from a session)."""
+        if self.page_tabs is None:
+            return []
+        return [w for _, w in self._run_pages()
+                if getattr(w, 'computing', False)]
+
+    def _renumber(self):
+        """Number the fit, DREAM and NPE tabs 1, 2, … in their order."""
+        if self.page_tabs is None:
+            return
+        for n, (i, w) in enumerate(self._run_pages(), 1):
+            name = getattr(w, 'tab_name', None)
+            if not name:
+                continue
+            w.tab_name = re.sub(r'^(\S+) \d+ · ',
+                                lambda m: '%s %d · ' % (m.group(1), n),
+                                name, count=1)
+            self.page_tabs.setTabText(i, w.tab_name)
 
     # -- session -----------------------------------------------------------
     def fit_tabs_state(self):
@@ -2337,16 +2265,10 @@ class FitPanel:
                                                                part, w))
             else:
                 w.sendRequested.connect(
-                    lambda x, part, label, w=w: self._send_dream(x, part, w,
-                                                                 label))
+                    lambda x, label, w=w: self._send_dream(x, w, label))
                 w.boundsRequested.connect(
-                    lambda lo, hi, part, w=w: self._bounds_dream(lo, hi,
-                                                                 part, w))
+                    lambda lo, hi, w=w: self._bounds_dream(lo, hi, w))
             w.tab_name = w.tab_name or w.windowTitle()
-            # new tabs are numbered after the session's
-            m = re.match(r'\S+ (\d+) · ', w.tab_name)
-            if m:
-                self._n_tabs = max(self._n_tabs, int(m.group(1)))
             tabs = self.page_tabs
             shown = tabs.currentIndex() if tabs is not None else -1
             self._reveal(w)
@@ -2427,6 +2349,7 @@ class FitPanel:
             i = tabs.addTab(w, '')
         tabs.setTabText(i, getattr(w, 'tab_name', w.windowTitle()))
         tabs.setTabToolTip(i, w.windowTitle())
+        self._renumber()
         tabs.setCurrentIndex(i)
 
     def close_page(self, w):
@@ -2464,6 +2387,7 @@ class FitPanel:
             b.setEnabled(False)
         self.page_tabs.removeTab(self.page_tabs.indexOf(w))
         w.deleteLater()
+        self._renumber()
 
     def _dream_done(self, result):
         self.dream_window.finish(result)
@@ -2485,27 +2409,26 @@ class FitPanel:
                   self.btn_dream_load, self.btn_ms_run):
             b.setEnabled(True)
 
-    def _send_dream(self, x, part=0, w=None, label='MAP'):
+    def _send_dream(self, x, w=None, label='MAP'):
         """Write a DREAM state of window w (default: the newest) into the
-        models of its datasets (_send_values; a model several datasets
-        share: the values of dataset `part`); label says which state
-        ('MAP', 'chain 3')."""
+        model of each of its datasets (_send_values); label says which
+        state ('MAP', 'chain 3')."""
         w = w or self.dream_window
         if self.busy():
             return
-        sent = self._send_values(w.problem.fit, x, part, w, 'Load into model')
+        sent = self._send_values(w.problem.fit, x, 0, w, 'Load into model')
         if sent is not None:
             self.dream_report.setText('%s sent to %s.' % (
                 label, self._to_models(sent)))
             self.btn_revert.setEnabled(True)
 
-    def _bounds_dream(self, lo, hi, part=0, w=None):
+    def _bounds_dream(self, lo, hi, w=None):
         """Write posterior-based fit bounds of window w (default: the
-        newest) into the models of its datasets, as _send_dream."""
+        newest) into the model of each of its datasets, as _send_dream."""
         w = w or self.dream_window
         if self.busy():
             return
-        sent = self._send_values(w.problem.fit, None, part, w,
+        sent = self._send_values(w.problem.fit, None, 0, w,
                                  'Apply ±σ to bounds', bounds=(lo, hi))
         if sent is not None:
             self.dream_report.setText('Posterior bounds sent to %s.'
@@ -2584,7 +2507,6 @@ class FitPanel:
 
     def _fit_done(self, x, cost, gen, msg):
         self.fit_window.finish(x, cost, gen, msg)
-        self._suggest_sigma(self._fit_problem, x)
         tension = ''.join(self._error(t) + '<br>' for t in prior_tension(
             self._fit_problem, x))
         self._fit_out.setText(self._fit_header(

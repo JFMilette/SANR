@@ -66,27 +66,6 @@ def test_window_chain_chi2(app):
     win.close()
 
 
-def test_error_scale_suggested(app):
-    """After an optimum with chi^2/N > 2 the DREAM page fits the error
-    scale and says why; below, it is left alone."""
-    from fit.problem import FitProblem
-    sim = SimulationTab()
-    sim.stack.layers[1].fit_entry('thickness')['vary'] = True
-    exp = ExperimentalTab(simulation=sim)
-    Q = np.linspace(0.01, 0.1, 40)
-    R = sim.stack.reflectivities(Q, [(np.array([1.0, 0, 0]), None)])[:, 0]
-    x = [p[2] for p in sim.stack.free_parameters()]
-    for k, ticked in ((3.0, True), (1.0, False)):
-        exp.dream_sigma.setChecked(False)
-        p = FitProblem(sim.stack, [dict(Q=Q, R=R * (1 + 0.05 * (-1) ** np.arange(40)),
-                                        dR=0.05 * R / k, P0=np.array([1.0, 0, 0]),
-                                        P=None)])
-        exp._suggest_sigma(p, x)
-        assert exp.dream_sigma.isChecked() == ticked
-        assert ('underestimate the misfit by ×3' in exp.dream_note.text()) \
-            == ticked
-
-
 def test_error_floor_reaches_the_problems(app, monkeypatch):
     sim = SimulationTab()
     sim.stack.layers[1].fit_entry('thickness')['vary'] = True
@@ -166,8 +145,8 @@ def test_chain_curves_over_the_bands(app):
     win.btn_map.click()
     win.send_from.setCurrentIndex(3)
     win.btn_map.click()
-    assert np.array_equal(sent[0][0], res.best()[0]) and sent[0][2] == 'MAP'
-    assert np.array_equal(sent[1][0], best[2]) and sent[1][1:] == (0, 'chain 3')
+    assert np.array_equal(sent[0][0], res.best()[0]) and sent[0][1] == 'MAP'
+    assert np.array_equal(sent[1][0], best[2]) and sent[1][1] == 'chain 3'
     win.close()
 
 

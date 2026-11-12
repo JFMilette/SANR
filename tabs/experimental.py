@@ -1926,6 +1926,9 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                      method=self.fit_method.currentData(),
                      global_methods={m: self._global_options(m)
                                      for m in self._global_widgets},
+                     multistart=self.page_options('multistart'),
+                     dream=self.page_options('dream'),
+                     npe=self.page_options('npe'),
                      workers=self.fit_workers.value()))
 
     def restore_state(self, state, base):
@@ -2006,6 +2009,9 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
             self.lb_maxiter.setValue(fit.get('lbfgs_maxiter', 1000))
             self.lsq_maxiter.setValue(fit.get('lsq_maxiter', 1000))
             self._set_global_options(fit.get('global_methods'))
+            self.set_page_options('multistart', fit.get('multistart'))
+            self.set_page_options('dream', fit.get('dream'))
+            self.set_page_options('npe', fit.get('npe'))
             self.fit_method.setCurrentIndex(max(0, self.fit_method.findData(
                 fit.get('method', 'de'))))
             self.fit_workers.setValue(fit.get('workers',

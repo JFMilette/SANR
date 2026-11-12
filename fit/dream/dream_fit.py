@@ -660,9 +660,10 @@ def chain_chi2(result, problem, discard=0.5):
 
 def posterior_warnings(result, bounds=None, discard=0.5, rhat_max=1.1,
                        acc_min=0.05, edge=0.01, edge_frac=0.05,
-                       problem=None, split_nats=10):
+                       problem=None, split_nats=10, chi2=None):
     """Texts for: R-hat above rhat_max at the end, chains in different
-    minima (chains_split; chi^2/N of each with `problem`), acceptance below
+    minima (chains_split; chi^2/N of each with `problem`, or `chi2` when
+    chain_chi2 was already computed), acceptance below
     acc_min after adaptation, a parameter with more than edge_frac of its
     samples within `edge` x its bound width of a bound (the bound cuts into
     the posterior; only with `bounds`, e.g. PosteriorProblem.bounds), and
@@ -678,8 +679,10 @@ def posterior_warnings(result, bounds=None, discard=0.5, rhat_max=1.1,
     else:
         out.append('No R̂ yet: the run ended within the adaptation phase.')
     if chains_split(result, discard, split_nats):
-        per = '' if problem is None else ' (χ²/N per chain: %s)' % ', '.join(
-            '%.4g' % c for c in chain_chi2(result, problem, discard))
+        if chi2 is None and problem is not None:
+            chi2 = chain_chi2(result, problem, discard)
+        per = '' if chi2 is None else ' (χ²/N per chain: %s)' % ', '.join(
+            '%.4g' % c for c in chi2)
         out.append('Chains sit in different minima%s: not converged, '
                    'whatever R̂ says' % per)
     acc = result.acceptance[result.adapt_until:]

@@ -8,6 +8,10 @@ settings under 'simulation' and the Experimental tab's under 'experimental'
 (datasets by file path, display and fit settings), and the ended fit and
 DREAM tabs under 'fit_tabs' (fit.panel SESSION), reopened after the tabs
 already open.  Opening a plain model file only replaces the model.
+Sessions are saved as .zip by default: that JSON and a copy of every
+data file it reads again (session_file), so it opens without the
+data's folders; a .json session (data files by path) is still read and
+written.
 
 Settings -> Dark mode switches between the dark and light themes (style.py);
 the choice is remembered for the next launch.  Settings -> Line colours (or
@@ -46,6 +50,7 @@ import numpy as np
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 import line_colours
+import session_file
 import style
 from model.licorne_io import load_licorne_session
 from model.polarisation import default_vectors
@@ -68,7 +73,9 @@ if getattr(sys, 'frozen', False):
 else:
     SESSIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 'sessions')
-MODEL_FILTER = 'Session / model files (*.json);;All files (*)'
+MODEL_FILTER = 'Sessions (*.zip *.json);;All files (*)'
+SAVE_FILTER = ('Session with its data (*.zip);;'
+               'Session, data files by path (*.json)')
 # The native macOS dialog greys out *.json files with this filter; use Qt's own.
 DIALOG_OPTIONS = QtWidgets.QFileDialog.Option.DontUseNativeDialog
 
@@ -148,16 +155,28 @@ class MainWindow(QtWidgets.QMainWindow):
         if not path:
             return
         self.session_dir = os.path.dirname(os.path.abspath(path))
+        popup = self._opening_popup(path)
         try:
-            with open(path, encoding='utf-8') as f:
-                d = json.load(f)
-            missing = self._restore(d, os.path.dirname(path))
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(
-                self, 'Open session', 'Could not load %s:\n%s' % (path, exc))
-            return
-        self.setWindowTitle('SANR — %s' % os.path.basename(path))
-        lost = self.experimental.restore_fit_tabs(d.get('fit_tabs', []))
+            try:
+                if session_file.is_zip_session(path):
+                    d, base = session_file.read_session(path)
+                else:
+                    with open(path, encoding='utf-8') as f:
+                        d = json.load(f)
+                    base = os.path.dirname(path)
+                missing = self._restore(d, base)
+            except Exception as exc:
+                popup.close()
+                QtWidgets.QMessageBox.critical(
+                    self, 'Open session',
+                    'Could not load %s:\n%s' % (path, exc))
+                return
+            self.setWindowTitle('SANR — %s' % os.path.basename(path))
+            QtWidgets.QApplication.processEvents()
+            lost = self.experimental.restore_fit_tabs(d.get('fit_tabs', []))
+            self._wait_for_tabs()
+        finally:
+            popup.close()
         if missing:
             QtWidgets.QMessageBox.warning(
                 self, 'Open session', 'These channels could not be read '
@@ -166,6 +185,38 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(
                 self, 'Open session', 'These fit tabs could not be opened '
                 'again:\n\n' + '\n'.join(lost))
+
+    def _opening_popup(self, path):
+        """'Opening session…', shown (no button) until the session is
+        ready, the DREAM tabs' summaries included."""
+        popup = QtWidgets.QProgressDialog(
+            'Opening session %s…' % os.path.basename(path), None, 0, 0, self)
+        popup.setWindowTitle('Open session')
+        popup.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+        popup.setMinimumDuration(0)
+        popup.setCancelButton(None)
+        popup.setAutoClose(False)
+        popup.setAutoReset(False)
+        popup.show()
+        QtWidgets.QApplication.processEvents()
+        return popup
+
+    def _wait_for_tabs(self):
+        """Let the window run (the popup turning) until the reopened DREAM
+        tabs have computed their summaries in the background."""
+        pending = self.experimental.computing_tabs()
+        if not pending:
+            return
+        loop = QtCore.QEventLoop()
+
+        def check():
+            if not any(w.computing for w in pending):
+                loop.quit()
+        for w in pending:
+            w.ready.connect(check)
+            w.destroyed.connect(loop.quit)
+        if any(w.computing for w in pending):
+            loop.exec()
 
     def _restore(self, d, base):
         """Load session dict d (files relative to folder `base`); returns the
@@ -282,17 +333,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.experimental.import_data()
 
     def save_session(self):
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+        path, chosen = QtWidgets.QFileDialog.getSaveFileName(
             self, 'Save session',
-            os.path.join(self.session_dir, 'session.json'), MODEL_FILTER,
+            os.path.join(self.session_dir, 'session.zip'), SAVE_FILTER,
             options=DIALOG_OPTIONS)
         if not path:
             return
         self.session_dir = os.path.dirname(os.path.abspath(path))
-        # a name typed without .json gets it (the dialog only asked about
-        # overwriting the name as typed)
-        if not path.lower().endswith('.json'):
-            path += '.json'
+        # a name typed without .zip / .json gets the chosen filter's (the
+        # dialog only asked about overwriting the name as typed)
+        ext = '.json' if '*.json' in chosen else '.zip'
+        if not path.lower().endswith(('.zip', '.json')):
+            path += ext
             if os.path.exists(path) and QtWidgets.QMessageBox.question(
                     self, 'Save session', '%s already exists.\nReplace it?'
                     % os.path.basename(path)) != \
@@ -303,9 +355,20 @@ class MainWindow(QtWidgets.QMainWindow):
             d['experimental'] = self.experimental.session_state(
                 os.path.dirname(os.path.abspath(path)))
             d['fit_tabs'], running = self.experimental.fit_tabs_state()
-            text = json.dumps(d, indent=2, default=_plain)
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(text)
+            if path.lower().endswith('.json'):
+                lost = session_file.only_in_session(d)
+                if lost and QtWidgets.QMessageBox.question(
+                        self, 'Save session', 'These data files exist only '
+                        'inside the .zip session they were opened from, and '
+                        'a .json session would not find them again:\n\n'
+                        + '\n'.join(lost) + '\n\nSave as .json anyway?') != \
+                        QtWidgets.QMessageBox.StandardButton.Yes:
+                    return
+                text = json.dumps(d, indent=2, default=_plain)
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(text)
+            else:
+                session_file.write_session(path, d, default=_plain)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(
                 self, 'Save session', 'Could not save %s:\n%s' % (path, exc))

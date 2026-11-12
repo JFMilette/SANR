@@ -158,3 +158,14 @@ def test_dream_tab_round_trip(app):
     assert back.problem(x) == pp(x)              # dQ and all, as it ran
     assert not back.btn_continue.isEnabled() and back.btn_save.isEnabled()
     assert back is not other.dream_window
+    # its summary and chain chi^2 come from a thread, then `ready`; the
+    # same as the run's own window shows
+    t0 = time.monotonic()
+    while other.computing_tabs() and time.monotonic() - t0 < 60:
+        app.processEvents()
+    assert not back.computing and other.computing_tabs() == []
+    assert back.summary.toPlainText() == win.summary.toPlainText()
+    assert [back.send_from.itemText(k) for k in range(back.send_from.count())] \
+        == [win.send_from.itemText(k) for k in range(win.send_from.count())]
+    assert back.send_from.count() == 1 + res.chains.shape[1]
+    assert back.btn_map.isEnabled()

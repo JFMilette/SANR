@@ -67,7 +67,8 @@ The installed program keeps its sessions in `Documents/SANR`.
 
 | Path | What it holds |
 |------|---------------|
-| `main.py` | Main window, menus and session files (File → Save / Open session: model, settings and the imported data files; File → Import Licorne session: a Licorne session folder) |
+| `main.py` | Main window, menus and session files (File → Save / Open session: model, settings, the imported data files and the fit tabs; File → Import Licorne session: a Licorne session folder) |
+| `session_file.py` | Sessions as a `.zip`: `session.json`, a copy of every data file under `data/`, and a file per fit or DREAM tab under `tabs/` (named after its algorithm); a `.json` session (data by path) is still read and written |
 | `style.py`, `icons/` | The dark theme and its icons; `icons/app.png` is the app icon |
 | **`model/`** | **The physics, no GUI** |
 | `model/stack.py` | `Layer`, `Stack`: roughness profile (additive, ordered or independent interfaces, `Stack.interface_crossing`), slicing, transfer matrix, `Stack.reflectivities(Q, pairs)`; fittable `scale` and `background`. The module docstring explains the physics and its conventions. |
@@ -99,4 +100,4 @@ The installed program keeps its sessions in `Documents/SANR`.
 | `make_app.py` | Builds `SANR.app` (macOS launcher with the app's name and icon; machine-specific, not in git) |
 | `make_windows_installer.py`, `make_mac_installer.py`, `installer/`, `.github/workflows/windows-installer.yml` | The installers: PyInstaller, then Inno Setup (Windows x64 and ARM64) or a disk image (macOS), on GitHub's machines; `installer/release-notes.md` is a release's text |
 | `selftest.py` | `SANR --self-test <file>`: checks a built program (kernel, a reflectivity, the worker pool) |
-| `sessions/` | Sessions and saved DREAM chains (File → Open session); `session_Cr2Te3*.json` are the examples in git, the rest stay local |
+| `sessions/` | Sessions and saved DREAM chains (File → Open session); local, not in git (the tests use `tests/data/show_mistake.json` and the Cr2Te3 model kept in `tests/data/rms_additive_reference.npz`) |

@@ -44,6 +44,7 @@ writes the run with fit.dream.dream_fit.save_result.
 import base64
 import io
 import os
+import threading
 import time
 import warnings
 from collections import deque
@@ -53,7 +54,7 @@ import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 from fit.dream.dream_fit import (FLOOR_NAME, SIGMA_NAME, chain_best,
-                         chain_curves,
+                         chain_chi2, chain_curves,
                          chains_split, format_summary, load_run,
                          posterior_warnings, predictive_bands, profile_bands,
                          profile_layers,
@@ -868,17 +869,23 @@ class DreamWindow(QtWidgets.QWidget):
     """One DREAM run: progress while it samples, its results after."""
 
     stopRequested = QtCore.pyqtSignal()
-    # state x, dataset whose values are sent, what it is ('MAP',
-    # 'chain 3')
-    sendRequested = QtCore.pyqtSignal(object, int, str)
-    boundsRequested = QtCore.pyqtSignal(object, object, int)   # min, max
+    # state x, what it is ('MAP', 'chain 3'); written into every dataset's
+    # model
+    sendRequested = QtCore.pyqtSignal(object, str)
+    boundsRequested = QtCore.pyqtSignal(object, object)   # min, max
     continueRequested = QtCore.pyqtSignal()
+    # the end of a run is shown (finish), also when it was computed in the
+    # background (finish(background=True): `computing` until then)
+    ready = QtCore.pyqtSignal()
+    _ended = QtCore.pyqtSignal(object)    # (result, texts) from the thread
 
     def __init__(self, parent=None):
         super().__init__(parent, QtCore.Qt.WindowType.Window)
         self.setWindowTitle('Bayesian sampling (DREAM)')
         self.resize(1100, 820)
         self.problem = self.result = None
+        self.computing = False
+        self._ended.connect(self._background_ended)
         self.sources, self.datasets = [], []
         self._live, self._corner_t = None, 0.0   # chains so far, last redraw
         self._previous = None              # the run being continued
@@ -946,18 +953,12 @@ class DreamWindow(QtWidgets.QWidget):
         self.btn_bounds = QtWidgets.QPushButton('Apply ±σ to bounds')
         self.btn_bounds.setToolTip(
             'Set Min / Max of every sampled parameter in the Simulation tab '
-            'to median − k·(−σ) and median + k·(+σ) (16 / 84 % widths); '
-            'Revert restores the bounds from before the run')
+            'to median − k·(−σ) and median + k·(+σ) (16 / 84 % widths), in '
+            'the model of every dataset of the run;\nRevert restores the '
+            'bounds from before the run')
         self.btn_bounds.clicked.connect(self._apply_bounds)
-        self.part_box = QtWidgets.QComboBox()
-        self.part_box.setToolTip('Joint fit: the dataset whose values "Apply '
-                                 '±σ to bounds" and "Load into model" '
-                                 'write')
-        self.part_label = QtWidgets.QLabel('Dataset')
         bottom = QtWidgets.QHBoxLayout()
         bottom.addWidget(self.converged, 1)
-        bottom.addWidget(self.part_label)
-        bottom.addWidget(self.part_box)
         bottom.addWidget(self.bounds_k)
         bottom.addWidget(self.btn_bounds)
         bottom.addSpacing(12)
@@ -1014,10 +1015,6 @@ class DreamWindow(QtWidgets.QWidget):
             page = self._page(box)
             self.part_pages.append((page, pred, prof, view, chains))
             self.tabs.addTab(page, name)
-        self.part_box.clear()
-        self.part_box.addItems(names)
-        for w in (self.part_box, self.part_label):
-            w.setVisible(len(names) > 1)
 
     def _all_pages(self):
         return list(self.pages.values()) + [p for p, *_ in self.part_pages]
@@ -1079,11 +1076,13 @@ class DreamWindow(QtWidgets.QWidget):
                   self.btn_continue):
             b.setEnabled(False)
 
-    def show_loaded(self, result, problem, header, sources=(), datasets=()):
-        """A saved run (fit.dream.dream_fit.load_run), shown as a finished one."""
+    def show_loaded(self, result, problem, header, sources=(), datasets=(),
+                    background=False):
+        """A saved run (fit.dream.dream_fit.load_run), shown as a finished
+        one (see finish for `background`)."""
         self.start(problem, int(result.generations[-1]), header, sources,
                    datasets)
-        self.finish(result)
+        self.finish(result, background)
         self.status.setText('Saved run: %d generation(s), %d evaluations.'
                             % (result.generations[-1], result.n_evals))
 
@@ -1103,12 +1102,14 @@ class DreamWindow(QtWidgets.QWidget):
 
     def show_saved(self, d):
         """A run of a session (saved_state), shown ended: it can be looked
-        at and sent, not continued."""
+        at and sent, not continued.  Its summary and chain chi^2 are
+        computed in the background (`computing` until `ready`)."""
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')     # said when it ran
             result, problem, meta = load_run(base64.b64decode(d['npz']))
         self.show_loaded(result, problem, d['header'],
-                         meta.get('sources', []), meta.get('datasets', []))
+                         meta.get('sources', []), meta.get('datasets', []),
+                         background=True)
         self.status.setText(d['status'])
         self.setWindowTitle(d['title'])
         self.tab_name = d['tab_name']
@@ -1170,7 +1171,11 @@ class DreamWindow(QtWidgets.QWidget):
             'end.' % (gens[-1], len(s)))
         page.setCurrentIndex(1)
 
-    def finish(self, result):
+    def finish(self, result, background=False):
+        """Show the ended run: the traces at once; the summary, warnings
+        and the chains' chi^2/N (the slow part, model evaluations) here, or
+        with `background` in a thread, the window responsive meanwhile
+        (`computing` until `ready`)."""
         self.result, self._previous = result, None
         self.btn_stop.setEnabled(False)
         last = int(result.generations[-1])
@@ -1198,18 +1203,74 @@ class DreamWindow(QtWidgets.QWidget):
             self.summary.setPlainText(msg)
             for page in self._all_pages():
                 page.widget(0).setText(msg)
+            self.computing = False
+            self.ready.emit()
             return
-        # warnings in the Summary, not above the tabs: a long list would
-        # shrink the plots
+        self.btn_map.setEnabled(False)
+        self.btn_bounds.setEnabled(False)
+        for page in self._all_pages():
+            page.widget(0).setText('Computing…')
+        if not background:
+            self._show_end(result, self._end_texts(result, self.problem))
+            return
+        self.computing = True
+        self.summary.setPlainText('Computing…')
+        self.converged.setText('Computing…')
+        self.send_from.clear()
+        threading.Thread(target=self._end_in_background,
+                         args=(result, self.problem), daemon=True).start()
+
+    def _end_in_background(self, result, problem):
+        """_end_texts off the GUI thread, handed back by _ended."""
+        try:
+            texts = self._end_texts(result, problem)
+        except Exception as exc:
+            texts = exc
+        try:
+            self._ended.emit((result, texts))
+        except RuntimeError:                # the window is gone
+            pass
+
+    def _background_ended(self, payload):
+        result, texts = payload
+        if result is not self.result:       # another run shown since
+            return
+        if isinstance(texts, Exception):
+            self.summary.setPlainText('Could not compute the summary: %s'
+                                      % texts)
+            self.converged.setText('')
+            self.computing = False
+            self.ready.emit()
+            return
+        self._show_end(result, texts)
+
+    def _end_texts(self, result, problem):
+        """The slow part of the end, without touching a widget: warnings,
+        summary, convergence, and the MAP and each chain's best kept state
+        with its chi^2/N (computed once for the warnings and Send from)."""
         # the run's own convergence target (1.2 for runs saved without one)
         target = float((result.state or {}).get('rhat_target', 1.2))
-        warn = posterior_warnings(result, self.problem.bounds,
-                                  rhat_max=target, problem=self.problem)
+        best = chain_best(result)
+        chi2 = chain_chi2(result, problem)
+        warn = posterior_warnings(result, problem.bounds, rhat_max=target,
+                                  problem=problem, chi2=chi2)
+        x_map = result.best()[0]
+        send = [('MAP', x_map, problem.chi2_per_point(x_map))] + [
+            ('chain %d' % (j + 1), x, c)
+            for j, (x, c) in enumerate(zip(best, chi2))]
+        return dict(target=target, warn=warn, send=send,
+                    summary=format_summary(result, problem),
+                    split=chains_split(result))
+
+    def _show_end(self, result, texts):
+        """The end of a run in the widgets, from _end_texts."""
+        rhat = result.rhat_history[-1][1] if result.rhat_history else None
+        target, warn, split = texts['target'], texts['warn'], texts['split']
+        # warnings in the Summary, not above the tabs: a long list would
+        # shrink the plots
         head = ''.join(['Warnings:\n'] + ['  • %s\n' % w for w in warn]
                        + ['\n']) if warn else ''
-        self.summary.setPlainText(
-            shown_names(head + format_summary(result, self.problem)))
-        split = chains_split(result)
+        self.summary.setPlainText(shown_names(head + texts['summary']))
         ok = rhat is not None and bool(np.all(rhat < target)) and not split
         text = '<span style="color:%s">● %s</span>' % (
             (OK, 'Converged: R̂ &lt; %g for every parameter' % target) if ok
@@ -1220,22 +1281,20 @@ class DreamWindow(QtWidgets.QWidget):
                      '— see Summary</span>'
                      % (BAD, len(warn), '' if len(warn) == 1 else 's'))
         self.converged.setText(text)
-        self._fill_send_from(result)
+        self._fill_send_from(texts['send'])
         self.btn_map.setEnabled(True)
         self.btn_bounds.setEnabled(True)
-        for page in self._all_pages():
-            page.widget(0).setText('Computing…')
         self._draw_tab(self.tabs.currentIndex())
+        self.computing = False
+        self.ready.emit()
 
-    def _fill_send_from(self, result):
-        """The MAP, then each chain's best kept state with its chi^2/N."""
-        self._send_states = [('MAP', result.best()[0])]
-        for j, x in enumerate(chain_best(result)):
-            self._send_states.append(('chain %d' % (j + 1), x))
+    def _fill_send_from(self, send):
+        """The MAP, then each chain's best kept state, with its chi^2/N:
+        (label, x, chi2) of _end_texts."""
+        self._send_states = [(label, x) for label, x, _ in send]
         self.send_from.clear()
-        for k, (label, x) in enumerate(self._send_states):
-            self.send_from.addItem(
-                '%s — χ²/N %.4g' % (label, self.problem.chi2_per_point(x)))
+        for k, (label, x, c) in enumerate(send):
+            self.send_from.addItem('%s — χ²/N %.4g' % (label, c))
             if k:
                 pm = QtGui.QPixmap(10, 10)
                 pm.fill(QtGui.QColor(CHAIN_COLOURS[(k - 1)
@@ -1248,8 +1307,7 @@ class DreamWindow(QtWidgets.QWidget):
         if not 0 <= k < len(self._send_states):
             return
         label, x = self._send_states[k]
-        self.sendRequested.emit(np.array(x), max(self.part_box.currentIndex(),
-                                                 0), label)
+        self.sendRequested.emit(np.array(x), label)
 
     def _chain_chi2(self, X, logp):
         """Each chain's chi^2/N at states X (N, d) for the trace page."""
@@ -1323,8 +1381,7 @@ class DreamWindow(QtWidgets.QWidget):
         n = len(self.problem.fit.params)
         self.boundsRequested.emit(
             [r['median'] - k * r['minus'] for r in rows[:n]],
-            [r['median'] + k * r['plus'] for r in rows[:n]],
-            max(self.part_box.currentIndex(), 0))
+            [r['median'] + k * r['plus'] for r in rows[:n]])
 
     # -- saving -------------------------------------------------------------
     def _save(self):

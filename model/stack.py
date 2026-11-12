@@ -796,16 +796,27 @@ def _steps(z, Z, sigmas, models, order):
     """F_j(z) of every interface (see PROFILE), shape (len(Z),) + z.shape:
     the steps f_j themselves for 'additive', their running max from the
     backing up for 'ordered', 1 - their running product of (1 - f) from the
-    backing up for 'independent' (as sums of log1p, so that a far tail
-    keeps its digits)."""
+    backing up for 'independent' (_rest)."""
     z = np.asarray(z, dtype=float)
+    if order == 'independent':
+        g = np.stack([_rest(z - Zj, s, m)
+                      for Zj, s, m in zip(Z, sigmas, models)])
+        return 1.0 - np.cumprod(g[::-1], axis=0)[::-1]
     f = np.stack([_step(z - Zj, s, m) for Zj, s, m in zip(Z, sigmas, models)])
     if order == 'ordered':
         f = np.maximum.accumulate(f[::-1], axis=0)[::-1]
-    elif order == 'independent':
-        with np.errstate(divide='ignore'):
-            f = -np.expm1(np.cumsum(np.log1p(-f)[::-1], axis=0)[::-1])
     return f
+
+
+def _rest(u, sigma, model):
+    """1 - _step(u, sigma, model), as the mirrored step (both are odd about
+    1/2), so it keeps its digits where the step is near 1.  'independent'
+    multiplies these: one transcendental per point, as 'additive' (F keeps
+    its absolute digits, not those of a far tail below 1e-16)."""
+    u = np.asarray(u, dtype=float)
+    if sigma <= 0.0 or model == 'none':
+        return np.where(u < 0.0, 1.0, 0.0)
+    return _step(-u, sigma, model)
 
 
 def _combine(F, vals):

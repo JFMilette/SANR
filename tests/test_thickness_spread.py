@@ -10,6 +10,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 import warnings
 
 import numpy as np
@@ -79,7 +80,7 @@ def base_stack_module():
                              check=True).stdout
     except (OSError, subprocess.CalledProcessError):
         pytest.skip('needs git and commit %s' % BASE_COMMIT)
-    path = pathlib.Path(os.environ.get('TMPDIR', '/tmp')) / 'stack_base.py'
+    path = pathlib.Path(tempfile.gettempdir()) / 'stack_base.py'
     path.write_text(src)
     spec = importlib.util.spec_from_file_location('stack_base', path)
     mod = importlib.util.module_from_spec(spec)
@@ -431,7 +432,7 @@ def stack_module_at(commit):
                              check=True).stdout
     except (OSError, subprocess.CalledProcessError):
         pytest.skip('needs git and commit %s' % commit)
-    path = pathlib.Path(os.environ.get('TMPDIR', '/tmp')) / (
+    path = pathlib.Path(tempfile.gettempdir()) / (
         'stack_%s.py' % commit)
     path.write_text(src)
     spec = importlib.util.spec_from_file_location('stack_' + commit, path)

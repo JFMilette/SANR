@@ -52,10 +52,13 @@ def crossing(order, mode='vector', model='tanh', s=(2.0, 15.0), fe_img=-1e-8):
 
 
 def session(name):
-    path = DATA / 'show_mistake.json' if name == 'show_mistake' else \
-        HERE.parent / 'sessions' / 'session_Cr2Te3.json'
-    with open(path) as f:
-        return S.Stack.from_dict(json.load(f))
+    """The stack of a session saved before interface_order existed:
+    show_mistake.json, or the Cr2Te3 example (its file left the repo in
+    SANR 0.4; its model as loaded then is kept in the reference)."""
+    if name == 'show_mistake':
+        with open(DATA / 'show_mistake.json') as f:
+            return S.Stack.from_dict(json.load(f))
+    return S.Stack.from_dict(json.loads(str(REF['%s/stack' % name])))
 
 
 def outputs(st, z):
@@ -108,11 +111,14 @@ def test_additive_matches_reference(case, monkeypatch):
     assert same_m([[getattr(s, 'MSLD_' + k) for s in slabs]
                    for k in ('rho', 'theta', 'phi')],
                   [g('slab_' + k) for k in ('rho', 'theta', 'phi')])
+    # R to rounding: the faster resolution and transfer code since moved
+    # it by <= 6e-12 relative; atol for the spin-flip channels that are
+    # zero to rounding (~1e-32)
     assert np.allclose(st.reflectivities(g('Q'), PAIRS, warn=False),
-                       g('R_res_on'), rtol=1e-14, atol=0, equal_nan=True)
+                       g('R_res_on'), rtol=1e-10, atol=1e-20, equal_nan=True)
     st.resolution['enabled'] = False
     assert np.allclose(st.reflectivities(g('Q'), PAIRS, warn=False),
-                       g('R_res_off'), rtol=1e-14, atol=0, equal_nan=True)
+                       g('R_res_off'), rtol=1e-10, atol=1e-20, equal_nan=True)
 
 
 @pytest.mark.parametrize('name', ['session_Cr2Te3', 'show_mistake'])

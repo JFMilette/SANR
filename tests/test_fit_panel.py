@@ -77,6 +77,33 @@ def test_choose_the_grid(app, monkeypatch):
     assert len(fp.groups) == 1 and np.array_equal(fp.groups[0][0], QB)
 
 
+def test_suggested_grid(app, monkeypatch):
+    """The dialog starts on the suggested channel (marked so) the first
+    time; a choice made before for the dataset comes first."""
+    from fit.panel import suggest_grid
+    exp = tab(QB, QA)                     # R- (QA) covers R+'s range
+    calls = answer(monkeypatch, 'R+')
+    exp._fit_inputs(exp.fit_report)
+    items, current = calls[0]
+    assert items[current].startswith('R-') and \
+        items[current].endswith('(suggested)')
+    assert not items[0].endswith('(suggested)')
+    exp._fit_inputs(exp.fit_report)       # R+ chosen: remembered
+    assert calls[1][0][calls[1][1]].startswith('R+')
+    # the rule
+    cover = np.linspace(0.01, 0.2, 50)
+    assert suggest_grid({'+': cover, '-': np.linspace(0.02, 0.15, 200)}) \
+        == '+'                            # covers all: no end value needed
+    assert suggest_grid({'+': cover, '-': cover[5:-5].copy(),
+                         'x': np.linspace(0.01, 0.2, 80)}) == 'x'
+    # neither covers the other: the widest, unless the other is much denser
+    wide = np.linspace(0.002, 0.19, 40)
+    assert suggest_grid({'+': wide, '-': np.linspace(0.01, 0.195, 45)}) \
+        == '+'
+    assert suggest_grid({'+': wide, '-': np.linspace(0.01, 0.195, 200)}) \
+        == '-'
+
+
 def test_cancel_starts_nothing(app, monkeypatch):
     exp = tab(QA, QB)
     answer(monkeypatch, None)
@@ -102,7 +129,6 @@ def test_stop_and_continue(app):
     exp.fit_maxiter.setValue(10000)
     exp.fit_tol.setValue(exp.fit_tol.minimum())
     exp.fit_polish.setChecked(False)
-    exp.fit_restarts.setValue(1)
 
     def run_until(n):
         t0 = time.monotonic()
@@ -248,9 +274,9 @@ def test_global_methods(app):
     assert exp._global_options('basinhopping')['niter'] == 3
 
 
-def test_shgo_minima_in_window_and_table(app):
+def test_shgo_minima_in_window(app):
     """At its end, SHGO's global and local minima are the fit window's
-    entries (global first) and fill the multistart table."""
+    entries (global first)."""
     import time
     exp = tab(QA, QA, licorne=False)
     exp.fit_workers.setValue(1)
@@ -266,15 +292,12 @@ def test_shgo_minima_in_window_and_table(app):
     costs = [e[1] for e in win.entries]
     assert costs == sorted(costs)
     assert 'global' in win.status.text()
-    assert exp.ms_table.rowCount() == len(labels)
-    assert exp.ms_report.text().startswith('SHGO:')
     assert win.btn_send.isEnabled()
 
 
 def test_method_box_shows_its_options(app):
-    """The Method box shows only the chosen method's options; Start DREAM
-    from the multistart table switches it to DREAM; it is restored from
-    the session."""
+    """The Method box shows only the chosen method's options; it is
+    restored from the session."""
     exp = tab(QA, QA, licorne=False)
     keys = [exp.fit_method.itemData(k) for k in range(exp.fit_method.count())]
     assert keys == ['de', 'basinhopping', 'dual_annealing', 'shgo',
@@ -287,16 +310,12 @@ def test_method_box_shows_its_options(app):
     exp.fit_method.setCurrentIndex(0)
     exp.restore_state(state, '.')
     assert exp.fit_method.currentData() == 'npe'
-    exp.fit_method.setCurrentIndex(0)
-    exp.start_dream = lambda: None
-    exp._ms_dream()
-    assert exp.fit_method.currentData() == 'dream'
 
 
 def test_multistart_in_fit_window(app, monkeypatch):
     """The multistart page's Run follows the starts in the fit window and
-    lists the minima there, as in its table; one is sent to the Simulation
-    tab from the window."""
+    lists the minima there; one is sent to the Simulation tab from the
+    window."""
     import time
     exp = tab(QA, QA, licorne=False)
     exp.fit_workers.setValue(1)
@@ -309,15 +328,6 @@ def test_multistart_in_fit_window(app, monkeypatch):
         fill(self, minima)
         fills.append((self.running, sum(m['hits'] for m in minima)))
     monkeypatch.setattr(DEWindow, '_fill_minima', record)
-    rows = []           # starts in the page's table, Apply enabled
-    status = type(exp)._ms_status
-
-    def record_table(self, info):
-        status(self, info)
-        if info['phase'] == 'done':
-            rows.append((sum(m['hits'] for m in self._ms_minima),
-                         self.btn_ms_apply.isEnabled()))
-    monkeypatch.setattr(type(exp), '_ms_status', record_table)
     exp.start_multistart()
     win = exp.fit_window
     assert win.isVisible() and win.running and win.unit == 'minimum'
@@ -327,12 +337,10 @@ def test_multistart_in_fit_window(app, monkeypatch):
         app.processEvents()
     # the list grew start by start while it ran, not only at the end
     assert [n for running, n in fills if running] == [1, 2, 3, 4, 5]
-    # and so did the page's table, its buttons waiting for the end
-    assert rows == [(n, False) for n in range(1, 6)]
     assert exp._ms is None and not win.running
-    m = exp._ms_minima
-    assert len(win.entries) == len(m) == exp.ms_table.rowCount()
-    assert [e[1] for e in win.entries] == [r['chi2'] for r in m]
+    m = [dict(chi2=e[1], x=e[2]) for e in win.entries]
+    assert [r['chi2'] for r in m] == sorted(r['chi2'] for r in m)
+    assert 'Multistart: 5 end(s) in %d distinct' % len(m) in         exp.ms_report.text()
     assert win.entries[0][0].startswith('1 — ')
     assert win.history.currentItem() is win.history.topLevelItem(0)
     assert 'Done</b>' in win.status.text()
@@ -381,6 +389,12 @@ def test_each_fit_a_tab(app):
         pytest.approx(first.entries[0][2][0])
     exp.close_page(first)
     assert tabs.count() == 2 and exp.fit_window is second
+    # the numbers follow the tabs open: the second becomes 1, a new one 2
+    assert tabs.tabText(1).startswith('L-BFGS-B 1 · ')
+    assert second.tab_name == tabs.tabText(1)
+    third = fit()
+    assert tabs.tabText(2).startswith('L-BFGS-B 2 · ')
+    exp.close_page(third)
     exp.close_page(second)
     assert tabs.count() == 1 and exp.fit_window is None
     assert not exp.btn_lbfgs_window.isEnabled()

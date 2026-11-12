@@ -1,13 +1,19 @@
-## What's new in 0.5.1
+## What's new in 0.6
 
-- **Export datasets as CSV:** a new **Export…** button in the Experimental tab saves one or more datasets (measured, simulated or frozen copies) as CSV files in a folder you choose. For each dataset you can save:
-  - the **SLD profile** of its model: depth z, NSLD (real and imaginary), MSLD ρ, φ and θ, and the layer at each depth, followed by a table of the interfaces with their roughness σ and magnetic roughness σ_M;
-  - any of the **plotted quantities**: polarized, half-polarized and non-polarized reflectivity, SA NSF, SF fraction, SA SF and SA half-polarized;
-  - the reflectivities as **R, log₁₀ R and/or R·Q⁴**, with the errors scaled to match.
+### Sessions in one file
+- **Sessions are saved as a `.zip`** that holds everything: the session itself, a copy of every imported data file, and a file for each open fit or DREAM tab, named after its algorithm (e.g. `tabs/1_L-BFGS-B.json`, `tabs/2_DREAM.npz`). A session now opens on any computer, without the folders the data came from. A `.zip` session is an ordinary zip file: any unzip tool opens it.
+- `.json` sessions still open, and **Save session** still offers `.json` (data files by path) if you prefer it.
+- **Opening a session shows an "Opening session…" window** until everything is ready. A session with a large DREAM run no longer freezes the program ("Not responding"): the run's summary is computed in the background.
+- Sessions now also keep the settings of the **DREAM**, **NPE** and **multistart** pages.
 
-  Each curve gets its own Q, value, error and dQ columns. The model's curve can be written beside the data, and the export can keep only the points within the model's Q range, as plotted. Files open in Excel with Å and ⁻¹ shown correctly. When you export several datasets, each one goes in its own sub-folder.
+### Fitting
+- **DREAM:** the Chains box (and NPE's Seeds) starts at 8 and can be typed into freely; "auto" is gone. **Apply ±σ to bounds** and **Load into model** apply to every dataset of a joint run, each in its own model: the Dataset box is gone. The error scale is no longer ticked automatically after a fit.
+- **Multistart:** the minima are listed in the multistart's fit tab, where you select one and send it to the Simulation tab. The table on the multistart page, its buttons and the DREAM start "multistart minimum" are gone: to start DREAM there, send the minimum and use **Start = current values**. DE's **Restarts** box is gone too.
+- **Licorne resolution:** when the channels are not on the same Q points, the Q-grid dialog now suggests a channel (the one covering the others' Q range, unless another is much denser).
+- Fit and DREAM tabs are numbered by their place among the tabs open (1, 2, 3…), renumbered when one is closed.
+- The **independent** interface order computes profiles about 25 % faster.
 
-Everything in 0.5 (a Q range per model, monochromator resolution, faster fits with the Licorne resolution), 0.4.1 (larger NSLD range, fit-window curves within the fitted Q range, session folder remembered) and 0.4 (a model per dataset, Copy to…, stitch factors, the three installers) is included.
+Everything in 0.5.1 (export datasets as CSV), 0.5 (a Q range per model, monochromator resolution, faster fits with the Licorne resolution), 0.4.1 and 0.4 is included.
 
 ## Downloads
 
