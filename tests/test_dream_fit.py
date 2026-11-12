@@ -95,6 +95,28 @@ def test_noise_free_recovers_truth(noise_free):
     assert best['chi2'] < 1e-3
     assert posterior_warnings(res, pp.bounds, rhat_max=1.2) == []
     assert 'Fe.thickness' in format_summary(res, pp)
+    # with units: a unit column, the values shown times their scale
+    plain = format_summary(res, pp).splitlines()
+    assert 'unit' not in plain[0]
+    units = [(1.0, 'Å'), (1e6, '10⁻⁶ Å⁻²'), (1.0, 'Å'), (1.0, '')]
+    text = format_summary(res, pp, units=units).splitlines()
+    assert text[0].split()[:3] == ['parameter', 'unit', 'median']
+    rho = text[2].split()
+    assert rho[:3] == ['Fe.MSLD_rho', '10⁻⁶', 'Å⁻²']
+    assert float(rho[3]) == pytest.approx(rows[1]['median'] * 1e6, rel=1e-5)
+    bg = text[4].split()                        # no unit: blank, as stored
+    assert bg[0] == 'stack.background' and float(bg[1]) == pytest.approx(
+        rows[3]['median'], rel=1e-5)
+    # the 68 % interval: 16 % and 84 %, after -1σ / +1σ
+    heads = text[0].split()
+    i16, i84 = heads.index('16%'), heads.index('84%')
+    assert heads.index('+1σ') < i16 < i84 < heads.index('2.5%')
+    # rows: parameter, unit (two words for rho), then the head's columns
+    k = 1                                       # rho's extra unit word
+    assert float(rho[i16 + k]) == pytest.approx(
+        (rows[1]['median'] - rows[1]['minus']) * 1e6, rel=1e-5)
+    assert float(rho[i84 + k]) == pytest.approx(
+        (rows[1]['median'] + rows[1]['plus']) * 1e6, rel=1e-5)
 
 
 # -- 3, 4, 5. noisy half-polarised data, scale and background free ------------

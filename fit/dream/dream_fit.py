@@ -561,17 +561,29 @@ def summary_table(result, problem=None, discard=0.5):
     return rows, best
 
 
-def format_summary(result, problem=None, discard=0.5):
-    """summary_table as text."""
+def format_summary(result, problem=None, discard=0.5, units=None):
+    """summary_table as text.  units: [(scale, unit)] per parameter (e.g.
+    the GUI's display_info): the values shown times scale, with a unit
+    column ('' where a parameter has none); None: as stored, no unit."""
     rows, best = summary_table(result, problem, discard)
     w = max(len(r['name']) for r in rows)
-    out = ['%-*s  %12s %11s %11s %12s %12s %6s %7s'
-           % (w, 'parameter', 'median', '-1σ', '+1σ', '2.5%', '97.5%',
-              'R̂', 'ESS')]
-    for r, xb in zip(rows, best['x']):
-        out.append('%-*s  %12.6g %11.4g %11.4g %12.6g %12.6g %6.3f %7.0f'
-                   % (w, r['name'], r['median'], r['minus'], r['plus'],
-                      r['lo95'], r['hi95'], r['rhat'], r['ess']))
+    if units is None:
+        units = [(1.0, None)] * len(rows)
+    has = any(u is not None for _, u in units)
+    uw = max([len('unit')] + [len(u or '') for _, u in units])
+    # the 68 % interval (16 / 84 %) beside its half-widths, then the 95 %
+    head = '%-*s  %s%12s %11s %11s %12s %12s %12s %12s %6s %7s' % (
+        w, 'parameter', '%-*s  ' % (uw, 'unit') if has else '',
+        'median', '-1σ', '+1σ', '16%', '84%', '2.5%', '97.5%', 'R̂', 'ESS')
+    out = [head]
+    for r, (scale, unit) in zip(rows, units):
+        out.append('%-*s  %s%12.6g %11.4g %11.4g %12.6g %12.6g %12.6g %12.6g '
+                   '%6.3f %7.0f'
+                   % (w, r['name'], '%-*s  ' % (uw, unit or '') if has
+                      else '', r['median'] * scale, r['minus'] * scale,
+                      r['plus'] * scale, (r['median'] - r['minus']) * scale,
+                      (r['median'] + r['plus']) * scale, r['lo95'] * scale,
+                      r['hi95'] * scale, r['rhat'], r['ess']))
     out.append('MAP: log p = %.6g, χ²/N = %.5g'
                % (best['logp'], best['chi2']))
     if problem is not None:

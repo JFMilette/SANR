@@ -172,17 +172,26 @@ def test_chain_curves_over_the_bands(app):
     assert len(sa) == 8 and not any(it.isVisible() for it in sa)
     box.setChecked(True)
     assert all(it.isVisible() for it in sa)
-    # Load into model: the MAP, or one chain's best kept state
-    assert win.send_from.count() == 9
+    # Load into model: the MAP, the median or one chain's best kept state;
+    # Load median: the median whatever the list shows
+    med = np.median(res.samples(), axis=0)
+    assert win.send_from.count() == 10
     assert win.send_from.itemText(0).startswith('MAP — χ²/N')
-    assert win.send_from.itemText(3).startswith('chain 3 — χ²/N')
+    assert win.send_from.itemText(1) == 'median — χ²/N %.4g' %         pp.chi2_per_point(med)
+    assert win.send_from.itemText(4).startswith('chain 3 — χ²/N')
+    assert win.send_from.itemIcon(1).isNull()           # no chain colour
+    assert win.send_from.itemIcon(4).pixmap(10, 10).toImage().pixelColor(
+        5, 5).name() == CHAIN_COLOURS[2]
     sent = []
     win.sendRequested.connect(lambda *a: sent.append(a))
     win.btn_map.click()
-    win.send_from.setCurrentIndex(3)
+    win.send_from.setCurrentIndex(4)
     win.btn_map.click()
+    assert win.btn_median.isEnabled()
+    win.btn_median.click()                  # chain 3 still shown
     assert np.array_equal(sent[0][0], res.best()[0]) and sent[0][1] == 'MAP'
     assert np.array_equal(sent[1][0], best[2]) and sent[1][1] == 'chain 3'
+    assert np.array_equal(sent[2][0], med) and sent[2][1] == 'median'
     win.close()
 
 

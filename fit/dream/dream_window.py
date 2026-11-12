@@ -1026,6 +1026,13 @@ class DreamWindow(QtWidgets.QWidget):
         self.btn_map.setToolTip('Send the state chosen beside it to the '
                                 'Simulation tab')
         self.btn_map.clicked.connect(self._send_state)
+        self.btn_median = QtWidgets.QPushButton('Load median')
+        self.btn_median.setToolTip(
+            "Send the posterior median of every parameter (the Summary's) "
+            'to the Simulation tab.\nThe medians taken one by one are not a '
+            'state the chains visited: with correlated parameters they can '
+            'fit worse than the MAP (their χ²/N is in the list).')
+        self.btn_median.clicked.connect(self._send_median)
         self.bounds_k = QtWidgets.QDoubleSpinBox()
         self.bounds_k.setRange(0.1, 10.0)
         self.bounds_k.setSingleStep(0.5)
@@ -1042,20 +1049,25 @@ class DreamWindow(QtWidgets.QWidget):
             'the model of every dataset of the run;\nRevert restores the '
             'bounds from before the run')
         self.btn_bounds.clicked.connect(self._apply_bounds)
+        # two rows, so that the window fits a laptop screen: the verdict and
+        # Save chains, then what goes to the model
+        verdict = QtWidgets.QHBoxLayout()
+        verdict.addWidget(self.converged, 1)
+        verdict.addWidget(self.btn_save)
         bottom = QtWidgets.QHBoxLayout()
-        bottom.addWidget(self.converged, 1)
         bottom.addWidget(self.bounds_k)
         bottom.addWidget(self.btn_bounds)
-        bottom.addSpacing(12)
-        bottom.addWidget(self.btn_save)
+        bottom.addStretch(1)
         bottom.addWidget(self.send_from)
         bottom.addWidget(self.btn_map)
+        bottom.addWidget(self.btn_median)
 
         v = QtWidgets.QVBoxLayout(self)
         v.addWidget(self.header)
         v.addLayout(top)
         v.addWidget(self.status)
         v.addWidget(self.tabs, 1)
+        v.addLayout(verdict)
         v.addLayout(bottom)
 
     @staticmethod
@@ -1132,7 +1144,8 @@ class DreamWindow(QtWidgets.QWidget):
         self._drawn = set()
         self.tabs.setCurrentWidget(self.trace)
         self.btn_stop.setEnabled(True)
-        for b in (self.btn_save, self.btn_map, self.btn_bounds,
+        for b in (self.btn_save, self.btn_map, self.btn_median,
+                  self.btn_bounds,
                   self.btn_continue):
             b.setEnabled(False)
         self.send_from.clear()
@@ -1158,7 +1171,8 @@ class DreamWindow(QtWidgets.QWidget):
         self._drawn = set()
         self._live, self._corner_t = None, 0.0
         self.btn_stop.setEnabled(True)
-        for b in (self.btn_save, self.btn_map, self.btn_bounds,
+        for b in (self.btn_save, self.btn_map, self.btn_median,
+                  self.btn_bounds,
                   self.btn_continue):
             b.setEnabled(False)
 
@@ -1296,6 +1310,7 @@ class DreamWindow(QtWidgets.QWidget):
             self.ready.emit()
             return
         self.btn_map.setEnabled(False)
+        self.btn_median.setEnabled(False)
         self.btn_bounds.setEnabled(False)
         for page in self._all_pages():
             page.widget(0).setText('Computing…')
@@ -1349,11 +1364,17 @@ class DreamWindow(QtWidgets.QWidget):
         warn = posterior_warnings(result, problem.bounds, rhat_max=target,
                                   problem=problem, chi2=chi2)
         x_map = result.best()[0]
-        send = [('MAP', x_map, problem.chi2_per_point(x_map))] + [
+        # each parameter's median over the kept samples, as in the Summary
+        x_med = np.median(result.samples(), axis=0)
+        send = [('MAP', x_map, problem.chi2_per_point(x_map)),
+                ('median', x_med, problem.chi2_per_point(x_med))] + [
             ('chain %d' % (j + 1), x, c)
             for j, (x, c) in enumerate(zip(best, chi2))]
         return dict(target=target, warn=warn, send=send,
-                    summary=format_summary(result, problem),
+                    summary=format_summary(
+                        result, problem,
+                        units=[(scale, unit) for _, scale, unit
+                               in display_info(problem)]),
                     split=chains_split(result))
 
     def _show_end(self, result, texts):
@@ -1377,24 +1398,32 @@ class DreamWindow(QtWidgets.QWidget):
         self.converged.setText(text)
         self._fill_send_from(texts['send'])
         self.btn_map.setEnabled(True)
+        self.btn_median.setEnabled(True)
         self.btn_bounds.setEnabled(True)
         self._draw_tab(self.tabs.currentIndex())
         self.computing = False
         self.ready.emit()
 
     def _fill_send_from(self, send):
-        """The MAP, then each chain's best kept state, with its chi^2/N:
-        (label, x, chi2) of _end_texts."""
+        """The MAP, the median, then each chain's best kept state, with its
+        chi^2/N: (label, x, chi2) of _end_texts; a chain in its colour."""
         self._send_states = [(label, x) for label, x, _ in send]
         self.send_from.clear()
         for k, (label, x, c) in enumerate(send):
             self.send_from.addItem('%s — χ²/N %.4g' % (label, c))
-            if k:
+            if label.startswith('chain '):
+                j = int(label.split()[1]) - 1
                 pm = QtGui.QPixmap(10, 10)
-                pm.fill(QtGui.QColor(CHAIN_COLOURS[(k - 1)
-                                                   % len(CHAIN_COLOURS)]))
+                pm.fill(QtGui.QColor(CHAIN_COLOURS[j % len(CHAIN_COLOURS)]))
                 self.send_from.setItemIcon(k, QtGui.QIcon(pm))
         self.send_from.setCurrentIndex(0)
+
+    def _send_median(self):
+        """Load median: the posterior median, whatever the list shows."""
+        for label, x in self._send_states:
+            if label == 'median':
+                self.sendRequested.emit(np.array(x), label)
+                return
 
     def _send_state(self):
         k = self.send_from.currentIndex()

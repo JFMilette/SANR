@@ -178,7 +178,7 @@ def test_dream_tab_round_trip(app, monkeypatch):
     assert back.summary.toPlainText() == win.summary.toPlainText()
     assert [back.send_from.itemText(k) for k in range(back.send_from.count())] \
         == [win.send_from.itemText(k) for k in range(win.send_from.count())]
-    assert back.send_from.count() == 1 + res.chains.shape[1]
+    assert back.send_from.count() == 2 + res.chains.shape[1]   # MAP, median
     assert back.btn_map.isEnabled()
     copies = [p for w, p in used if w is back]
     assert len(copies) == 1 and copies[0] is not back.problem
