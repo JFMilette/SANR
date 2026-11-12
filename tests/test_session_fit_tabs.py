@@ -184,3 +184,43 @@ def test_dream_tab_round_trip(app, monkeypatch):
     assert len(copies) == 1 and copies[0] is not back.problem
     assert copies[0].fit.stack is not back.problem.fit.stack
     assert back.problem(x) == pp(x)
+
+
+def test_fit_tab_saved_before_the_chi2_column(app):
+    """A fit tab of a session saved before the chi^2/N column (plan
+    chi2_column C6, T4): the saved form is unchanged, its cost label and
+    report were the old ones ('χ² + prior'); it opens with the column,
+    computed from the restored problem."""
+    sim = SimulationTab()
+    e = sim.stack.layers[1].fit_entry('thickness')
+    e['vary'] = True
+    e['prior'] = {'kind': 'gauss', 'mu': e['min'] + 0.3 * (e['max']
+                                                          - e['min']),
+                  'tau': 0.05 * (e['max'] - e['min'])}
+    exp = ExperimentalTab(simulation=sim)
+    exp.sets = [dict(name='d', visible=True,
+                     channels={'+': channel(1.0), '-': channel(0.8)})]
+    exp.refresh_tree()
+    exp.fit_set.setCurrentIndex(0)
+    exp.fit_workers.setValue(1)
+    tabs = QtWidgets.QTabWidget()
+    tabs.addTab(QtWidgets.QWidget(), 'tool')
+    exp.page_tabs = tabs
+    exp.lb_maxiter.setValue(10)
+    exp.start_lbfgs()
+    wait_fit(app, exp)
+    states, _ = exp.fit_tabs_state()
+    old = through_file(states)
+    old[0]['cost_label'] = 'χ² + prior'
+    old[0]['status'] = '<b>Done</b> after 10 iteration(s) — best 1.23'
+    other = tab()
+    assert other.restore_fit_tabs(old) == []
+    back = other.page_tabs.widget(1)
+    h, p = back.history, back.problem
+    assert h.headerItem().text(1) == 'cost (χ²/N + prior/N)'
+    assert h.headerItem().text(2) == 'χ²/N' and not h.isColumnHidden(2)
+    assert h.topLevelItemCount() == len(back.entries) > 1
+    for k, (_, cost, x) in enumerate(back.entries):
+        assert h.topLevelItem(k).text(2) == '%.6g' % (
+            cost - p.prior_penalty(x) / p.npoints)
+    assert back.status.text() == old[0]['status']      # as it was left
