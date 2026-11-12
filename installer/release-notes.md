@@ -1,19 +1,25 @@
-## What's new in 0.6
+## What's new in 0.7
 
-### Sessions in one file
-- **Sessions are saved as a `.zip`** that holds everything: the session itself, a copy of every imported data file, and a file for each open fit or DREAM tab, named after its algorithm (e.g. `tabs/1_L-BFGS-B.json`, `tabs/2_DREAM.npz`). A session now opens on any computer, without the folders the data came from. A `.zip` session is an ordinary zip file: any unzip tool opens it.
-- `.json` sessions still open, and **Save session** still offers `.json` (data files by path) if you prefer it.
-- **Opening a session shows an "Opening session…" window** until everything is ready. A session with a large DREAM run no longer freezes the program ("Not responding"): the run's summary is computed in the background.
-- Sessions now also keep the settings of the **DREAM**, **NPE** and **multistart** pages.
+### DREAM: more effective samples, stricter convergence
+- **About twice the effective samples for the same run time.** At the end of the adaptation phase, DREAM now drops the early burn-in states it kept for its jumps (they made most later jumps too long to be accepted). It always keeps at least 10 states per parameter.
+- **Adaptation** is a setting on the DREAM page: **auto** (the default) is 10 % of the generations, at least 5000 and at most half the run; or type a number of generations. The tempered burn-in now ends halfway through the adaptation phase.
+- **Samples:** choose **last half** (the default, safe) or **after adaptation** (more samples, for chains started at a fitted optimum). R̂, ESS, the Summary, the bands and the plots all follow the run's choice.
+- **Stricter R̂:** convergence uses the rank-normalised split R̂ (Vehtari et al. 2021), which also sees chains that are still drifting. The default **R̂ target is 1.05** (it was 1.1).
+- **ESS target** (new, 400 by default): **stop when converged** now also waits until every parameter has that many effective samples, and R̂ must stay below its target (a rise starts the count again). A run that ends with fewer gets a warning.
+- **Burn-in warning:** if log p was still rising after the adaptation phase, the Summary says so and **Prune & continue** counts those generations as burn-in, drops them, and continues the run.
+- **Continue** works on any ended run (stopped, converged or done; not one reopened from a session), for the number of generations in the **+ gen.** box beside it.
+- Runs saved by 0.6 or earlier open as before and show the R̂ they were computed with (the older Gelman–Rubin R̂).
 
-### Fitting
-- **DREAM:** a new **R̂** tab plots the largest R̂ over the parameters against generation, live while the run goes and for a finished or reopened run, with the run's R̂ target as a dashed line and the generation where it was first reached. The **Summary** gives each parameter's unit, with the values in that unit (as in the Simulation tab), and the 68 % interval (16 % and 84 %) beside ±1σ and the 95 % interval. The **median** can be sent to the model: it is in the list beside **Load into model** (with its χ²/N, to compare with the MAP). The Chains box (and NPE's Seeds) starts at 8 and can be typed into freely; "auto" is gone. **Apply ±σ to bounds** and **Load into model** apply to every dataset of a joint run, each in its own model: the Dataset box is gone. The error scale is no longer ticked automatically after a fit.
-- **Multistart:** the local fit "short DE" is now **DE** and uses the DE page's settings (Max iter, Pop, Tol, mutation, strategy, polish) instead of fixed ones. The minima are listed in the multistart's fit tab, where you select one and send it to the Simulation tab. The table on the multistart page, its buttons and the DREAM start "multistart minimum" are gone: to start DREAM there, send the minimum and use **Start = current values**. DE's **Restarts** box is gone too.
-- **Licorne resolution:** when the channels are not on the same Q points, the Q-grid dialog now suggests a channel (the one covering the others' Q range, unless another is much denser).
-- Fit and DREAM tabs are numbered by their place among the tabs open (1, 2, 3…), renumbered when one is closed.
-- The **independent** interface order computes profiles about 25 % faster.
+### Fits: χ²/N beside the cost
+- Every fit window (DE, L-BFGS-B, least squares, basin hopping, dual annealing, SHGO, DIRECT, multistart) shows the **data-only χ²/N** in its own column beside the cost it minimises. With priors the cost is "cost (χ²/N + prior/N)"; without priors both are the same and one column "χ²/N" is shown. It is the same χ²/N DREAM reports, so fits and DREAM compare directly.
+- The status lines give both, e.g. "best cost 1.35068 (χ²/N 1.34276 + priors 0.00791)", and at the end of a fit **χ²/ν**, χ² per degree of freedom.
+- The **multistart** report gave the cost as "χ²/N": it now reads "best χ²/N … (cost …)".
+- The **Residuals** plot gives the dataset's χ²/N under the plot and, in a joint fit, every dataset's together, noting the error floor when one is set.
 
-Everything in 0.5.1 (export datasets as CSV), 0.5 (a Q range per model, monochromator resolution, faster fits with the Licorne resolution), 0.4.1 and 0.4 is included.
+### Sessions
+- **Opening a session (or importing a Licorne one) no longer asks about unsaved changes**: only quitting SANR does.
+
+Everything in 0.6 (sessions in one `.zip`, the R̂ tab), 0.5.1, 0.5, 0.4.1 and 0.4 is included.
 
 ## Downloads
 
