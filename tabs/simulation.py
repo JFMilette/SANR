@@ -276,8 +276,38 @@ def empty_stack():
     return Stack([st.layers[0], st.layers[-1]])
 
 
+class ValueSpinBox(QtWidgets.QDoubleSpinBox):
+    """A spin box that shows `dec` decimals and keeps MORE further ones of
+    the value it is given: a fitted or loaded value put in the box and read
+    back (the tab writes its boxes to the model) is that value to 1e-6 of
+    the last decimal shown, not the number shown.  (Not every digit: the
+    boxes hold converted units, %, degrees, 1e-6 A^-2, and the rounding is
+    what makes a value read back the one that was set.)  A value typed in
+    is the one typed."""
+
+    MORE = 6                             # decimals kept beyond those shown
+
+    def __init__(self, dec):
+        super().__init__()
+        self._shown = int(dec)
+        super().setDecimals(self._shown + self.MORE)
+
+    def decimals(self):
+        return self._shown
+
+    def setDecimals(self, dec):
+        v = self.value()
+        self._shown = int(dec)
+        super().setDecimals(self._shown + self.MORE)
+        self.setValue(v)                 # shown again
+
+    def textFromValue(self, v):
+        return self.locale().toString(float(v), 'f', self._shown).replace(
+            self.locale().groupSeparator(), '')
+
+
 def dspin(lo, hi, dec, step, suffix=''):
-    w = QtWidgets.QDoubleSpinBox()
+    w = ValueSpinBox(dec)
     w.setRange(lo, hi)
     w.setDecimals(dec)
     w.setSingleStep(step)
@@ -1917,6 +1947,12 @@ class SimulationTab(QtWidgets.QWidget):
         self.res_pages.addWidget(data)
         f.addRow(self.res_pages)
 
+        # Q max stays above Q min: an edit that crosses the other box is
+        # undone (with a note), so the model's range is never inverted
+        self._q_prev = {self.qmin: self.qmin.value(),
+                        self.qmax: self.qmax.value()}
+        for w in (self.qmin, self.qmax):
+            w.valueChanged.connect(lambda _, w=w: self._q_edited(w))
         for w in (self.qmin, self.qmax, self.tail,
                   self.background, self.res_tof_dl, self.res_mono_lam,
                   self.res_mono_dl, self.res_mono_dth):
@@ -2008,36 +2044,6 @@ class SimulationTab(QtWidgets.QWidget):
         self.btn_del.clicked.connect(self.remove_layer)
         self.btn_up.clicked.connect(lambda: self.move_layer(-1))
         self.btn_dn.clicked.connect(lambda: self.move_layer(+1))
-        lv.addLayout(row)
-        self.btn_untick = QtWidgets.QPushButton('Untick all Fit')
-        self.btn_untick.setToolTip(
-            'Untick Fit on every parameter of every layer and of the general '
-            'parameters (ties follow);\nvalues and fit bounds are kept')
-        self.btn_untick.clicked.connect(self.untick_all)
-        # tick one quantity on every layer it belongs to (Stack.tick_all)
-        self.btn_tick = {}
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(self.btn_untick)
-        for attr, label, tip in (
-                ('thickness', 'Tick thickness',
-                 'Tick Fit on the thickness of every film layer'),
-                ('NSLD_real', 'Tick NSLD',
-                 'Tick Fit on the real NSLD of every film layer and of the '
-                 'substrate (not the fronting)'),
-                ('roughness_sigma', 'Tick roughness',
-                 'Tick Fit on the roughness σ of every interface, the '
-                 'substrate\'s included (not those with roughness model '
-                 '"none")')):
-            b = self.btn_tick[attr] = QtWidgets.QPushButton(label)
-            b.setToolTip(tip + ';\nvalues and fit bounds are kept, as when '
-                         'ticked by hand')
-            b.clicked.connect(lambda _, a=attr: self.tick_all(a))
-            row.addWidget(b)
-        for b in [self.btn_untick] + list(self.btn_tick.values()):
-            b.hide()                    # the Fit tab has its own
-            b.setMinimumWidth(0)
-            b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
-                            QtWidgets.QSizePolicy.Policy.Fixed)
         lv.addLayout(row)
         v.addWidget(lay)
 
@@ -2186,11 +2192,6 @@ class SimulationTab(QtWidgets.QWidget):
         note.setWordWrap(True)
         note.setProperty('role', 'muted')
         lv.addWidget(note)
-        self.mix_layers = QtWidgets.QWidget()
-        QtWidgets.QVBoxLayout(self.mix_layers).setContentsMargins(0, 0, 0, 0)
-        self._mix_layer_key = None
-        lv.addWidget(self.mix_layers)
-        self.mix_layers.hide()          # ticked in the Fit tab
         v.addWidget(box)
         v.addStretch(1)
 
@@ -2445,8 +2446,7 @@ class SimulationTab(QtWidgets.QWidget):
         removing / moving layers), but layers can still be selected and
         their values read, the tool-box pages switched and the plots used."""
         self._locked = bool(locked)
-        for w in (self.gen_box, self.pol_box, self.btn_add, self.btn_untick,
-                  *self.btn_tick.values(), self.model_box,
+        for w in (self.gen_box, self.pol_box, self.btn_add, self.model_box,
                   *self.model_btns.values(), self.spread_panel):
             w.setEnabled(not self._locked)
         if not self._locked:
@@ -2455,35 +2455,6 @@ class SimulationTab(QtWidgets.QWidget):
             QtWidgets.QAbstractItemView.DragDropMode.NoDragDrop if self._locked
             else QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
         self._on_select(self.list.currentRow())   # editor, move buttons
-
-    def untick_all(self):
-        """The Untick all Fit button (Stack.untick_all)."""
-        if self._locked:
-            return
-        self.recompute()                   # the general rows' ticks first
-        n = self.stack.untick_all()
-        self._load_stack_fit()
-        self.refresh_list(select=self.list.currentRow())
-        self.schedule()
-        msg = 'Fit unticked on %d parameter%s.' % (n, '' if n == 1 else 's')
-        win = self.window()
-        if isinstance(win, QtWidgets.QMainWindow):
-            win.statusBar().showMessage(msg, 8000)
-
-    def tick_all(self, attr):
-        """A Tick … button (Stack.tick_all)."""
-        if self._locked:
-            return
-        n = self.stack.tick_all(attr)
-        self.refresh_list(select=self.list.currentRow())
-        self.schedule()
-        msg = 'Fit ticked on %d more %s.' % (n, {
-            'thickness': 'thickness' if n == 1 else 'thicknesses',
-            'NSLD_real': 'NSLD' if n == 1 else 'NSLDs',
-            'roughness_sigma': 'roughness' if n == 1 else 'roughnesses'}[attr])
-        win = self.window()
-        if isinstance(win, QtWidgets.QMainWindow):
-            win.statusBar().showMessage(msg, 8000)
 
     def add_layer(self):
         row = self.list.currentRow()
@@ -3240,6 +3211,20 @@ class SimulationTab(QtWidgets.QWidget):
         return next((m['model'] for m in self._models if m['name'] == name),
                     None)
 
+    def _q_edited(self, box):
+        """Q min or Q max edited: undone if Q max is no longer above Q
+        min (see the boxes' connection)."""
+        if self.qmax.value() > self.qmin.value():
+            self._q_prev = {self.qmin: self.qmin.value(),
+                            self.qmax: self.qmax.value()}
+            return
+        box.blockSignals(True)
+        box.setValue(self._q_prev[box])
+        box.blockSignals(False)
+        win = self.window()
+        if isinstance(win, QtWidgets.QMainWindow):
+            win.statusBar().showMessage('Q max must be above Q min.', 8000)
+
     def _q_now(self):
         """The Q min, Q max and Q points boxes (the shown model's)."""
         return dict(qmin=self.qmin.value(), qmax=self.qmax.value(),
@@ -3359,9 +3344,14 @@ class SimulationTab(QtWidgets.QWidget):
         # they are
         state['simulation'] = dict(sim, selected_layer=new['selected_layer'],
                                    **self.q_settings(new['name']))
+        # the other tabs hear of it once it is shown under its own name (the
+        # recompute below): not while the stack is the new model's and the
+        # name still the old one's
+        self.blockSignals(True)
         try:
             self.restore_state(state, models=False)
         except Exception as exc:
+            self.blockSignals(False)
             QtWidgets.QMessageBox.critical(
                 self, 'Switch model', 'Could not load %s:\n%s'
                 % (new['name'], exc))
@@ -3369,6 +3359,7 @@ class SimulationTab(QtWidgets.QWidget):
             self.restore_state(d, models=False)
             self._refresh_models()
             return
+        self.blockSignals(False)
         cur.update(model=d, selected_layer=sim['selected_layer'],
                    q={k: sim[k] for k in ('qmin', 'qmax', 'nq')})
         new.update(model=None)
@@ -3706,12 +3697,15 @@ class SimulationTab(QtWidgets.QWidget):
     def _mix_edited(self, *_):
         """The table into Stack.mixture, in the Model box's order."""
         mix = []
+        # what the table does not show (a prior) is kept
+        before = {e['name']: e.get('fit') or {} for e in self.stack.mixture}
         for name, use, w, lo, hi, cb in self._mix_rows:
             for widget in (w, lo, hi, cb):
                 widget.setEnabled(use.isChecked())
             if use.isChecked():
                 mix.append(dict(name=name, weight=w.value(), fit=dict(
-                    vary=cb.isChecked(), min=lo.value(), max=hi.value())))
+                    before.get(name, {}), vary=cb.isChecked(),
+                    min=lo.value(), max=hi.value())))
         self.stack.mixture = mix
         self.schedule()
 
@@ -3726,7 +3720,6 @@ class SimulationTab(QtWidgets.QWidget):
         name = self._models[self._model_index]['name']
         self.mix_w0.setText('Weight of %s (this model): w₀ = %.4g' % (name, w0)
                             if parts else 'No other model mixed in.')
-        self._refresh_mixture_layers()
         bits = []
         if st.thickness_spread:
             bits.append('%.3g %% (%s, %s)' % (
@@ -3735,45 +3728,6 @@ class SimulationTab(QtWidgets.QWidget):
         if st.mixture:
             bits.append('mixture of %d models' % (len(st.mixture) + 1))
         self.spread_summary.setText('; '.join(bits) or 'none')
-
-    def _refresh_mixture_layers(self):
-        """A tick per film layer: its thickness Fit, and which mixed
-        models have a layer of that name."""
-        mixed = {n: st for n, st in self.stack._mix_stacks.items()
-                 if any(e['name'] == n for e in self.stack.mixture)}
-        rows = []
-        for i, l in enumerate(self.stack.layers[1:-1], 1):
-            also = [n for n, st in mixed.items()
-                    if any(x.name == l.name for x in st.layers)]
-            rows.append((i, l.name, tuple(also)))
-        lay = self.mix_layers.layout()
-        if rows != self._mix_layer_key:
-            self._mix_layer_key = rows
-            while lay.count():
-                w = lay.takeAt(0).widget()
-                if w is not None:
-                    w.hide()
-                    w.deleteLater()
-            self._mix_layer_boxes = []
-            for i, name, also in rows:
-                cb = QtWidgets.QCheckBox('%s thickness%s' % (
-                    name, '  (also in %s)' % ', '.join(also) if also else
-                    '  (only in this model)' if mixed else ''))
-                cb.toggled.connect(lambda on, i=i: self._shared_toggled(i, on))
-                lay.addWidget(cb)
-                self._mix_layer_boxes.append((i, cb))
-        for i, cb in self._mix_layer_boxes:
-            cb.blockSignals(True)
-            cb.setChecked(bool(self.stack.layers[i].fit.get(
-                'thickness', {}).get('vary')))
-            cb.blockSignals(False)
-
-    def _shared_toggled(self, i, on):
-        if self._locked:
-            return
-        self.stack.layers[i].fit_entry('thickness')['vary'] = on
-        self._on_select(self.list.currentRow())     # the editor's Fit box
-        self.schedule()
 
     def _link_mixture(self):
         """Stack._mix_stacks: a Stack per mixed model, from its stored
@@ -3903,9 +3857,12 @@ class SimulationTab(QtWidgets.QWidget):
             w.blockSignals(True)
         self.qmin.setValue(sim.get('qmin', self.qmin.value()))
         self.qmax.setValue(sim.get('qmax', self.qmax.value()))
+        self._q_prev = {self.qmin: self.qmin.value(),
+                        self.qmax: self.qmax.value()}
         self.nq.setValue(sim.get('nq', self.nq.value()))
         self.tail.setValue(new.tail)
-        self.pol.set_vectors(sim.get('polarisation', default_vectors()))
+        if 'simulation' in d:            # a plain model keeps the tab's
+            self.pol.set_vectors(sim.get('polarisation', default_vectors()))
         self._load_stack_fit()
         self.q_fronting.setChecked(new.q_in_fronting)
         self.msmear.setCurrentIndex(

@@ -113,20 +113,6 @@ def test_session_A_landscape(tmp_path):
     assert m[0]['chi2'] <= 4.93 and m[0]['from_current']
 
 
-def test_de_restarts():
-    from fit.de.de_fit import run_de_restarts
-    from fit.multistart import merge
-    p = TwoMinima()
-    seen = []
-    (x, cost, gen, msg), ends = run_de_restarts(
-        p, restarts=3, seed=0, maxiter=20, popsize=10, polish=True,
-        callback=lambda x, c, g: seen.append(g))
-    assert len(ends) == 3 and cost == min(c for _, _, c in ends)
-    assert gen == len(seen) and seen == sorted(seen)
-    assert msg.startswith('best of 3 runs')
-    assert sum(m['hits'] for m in merge(p, ends)) == 3
-
-
 def test_panel_multistart_done():
     """The end of a multistart: a line in the page's report; the DREAM
     error scale is left as it was, whatever chi^2/N."""
@@ -156,24 +142,6 @@ def test_panel_multistart_done():
         'Multistart: 5 end(s) in %d distinct' % len(m))
     # this flat data leaves chi^2/N > 2: still not ticked for the user
     assert not exp.dream_sigma.isChecked()
-
-
-@pytest.mark.slow
-def test_session_A_de_restarts():
-    """A: three short DE runs, every end listed, the result the best of
-    them.  With tol 1e-6 and the polish, all three reach the session's
-    4.927 (their populations hold its values); at tol 1e-3 one run
-    stopped "successfully" at 10.28."""
-    from fit.de.de_fit import run_de_restarts
-    from fit.multistart import merge
-    from test_licorne_sessions import problem
-    p, _ = problem('session_A', untie=True)
-    (x, cost, gen, msg), ends = run_de_restarts(
-        p, restarts=3, seed=0, maxiter=50, popsize=5, tol=1e-6, init='sobol')
-    m = merge(p, ends)
-    assert sum(r['hits'] for r in m) == 3
-    assert cost == m[0]['chi2'] and np.allclose(p.to_u(x), m[0]['u'])
-    assert cost <= 4.93
 
 
 def test_progress(monkeypatch):

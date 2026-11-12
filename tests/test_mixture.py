@@ -182,10 +182,8 @@ def test_window_mixes_and_shares(app):
         [('one extra', 0.3), ('none', 0.2)]
     assert 'w₀ = 0.5' in sim.mix_w0.text()
     L2 = [l.name for l in st.layers].index('L2')
-    box = dict((i, cb) for i, cb in sim._mix_layer_boxes)[L2]
-    assert 'also in one extra, none' in box.text()
-    box.setChecked(True)                      # the shared thickness
-    assert st.layers[L2].fit['thickness']['vary']
+    # the shared thickness: its Fit tick (in the Fit tab, or the editor)
+    st.layers[L2].fit_entry('thickness')['vary'] = True
     st.layers[L2].thickness = 111.0
     sim.recompute()
     for m in sim._models[1:]:

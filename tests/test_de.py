@@ -210,9 +210,8 @@ def test_status_reports_generations_and_polish():
 def test_stop_and_continue():
     """A fit stopped mid-way goes on from its last population (fit.de.de_fit
     CONTINUE): the generations count on, the cost never goes back up, and
-    it reaches the same optimum; with restarts, the stopped run resumes and
-    the runs left follow."""
-    from fit.de.de_fit import run_de_restarts
+    it reaches the same optimum; stopped before its first generation, it
+    leaves nothing to continue."""
     Q = np.linspace(0.004, 0.12, 200)
     prob = FitProblem(_varied(), measure(film(), Q, in_plane(0.0)))
     calls = [0]
@@ -234,19 +233,9 @@ def test_stop_and_continue():
     assert gens[0][0] == gen + 1 and gens[0][1] <= cost
     assert np.all(np.diff([c for _, c in gens]) <= 0)
     assert np.allclose(x2, [80.0], rtol=1e-4) and c2 < 1e-6
-    # restarts: stopped in run 1 of 2, continued with one run left
-    calls[0] = 0
     state = {}
-    (x, cost, gen, msg), ends = run_de_restarts(
-        prob, restarts=2, seed=0, tol=1e-8, polish=False,
-        cancelled=after(300), state=state)
-    assert msg == 'stopped' and state['run'] == 0 and ends[0][0] == 0
-    info = []
-    (x2, c2, g2, msg2), ends2 = run_de_restarts(
-        prob, restarts=2, seed=5, tol=1e-8, polish=False, resume=state,
-        status=info.append)
-    assert info[0]['run'] == 1 and info[0]['generation'] == gen + 1
-    assert [k for k, *_ in ends2] == [0, 1] and c2 < 1e-6
+    run_de(prob, seed=0, cancelled=lambda: True, state=state)
+    assert state == {}
 
 
 def test_lbfgs_alone_from_the_current_values():
@@ -290,3 +279,94 @@ def test_each_strategy_recovers_phi(strategy):
     assert abs(x[0] - 0.1) <= 1e-3 and cost < 1e-6
     with pytest.raises(ValueError, match='unknown strategy'):
         run_de(prob, strategy='best3bin')
+
+
+def test_stopped_before_the_first_evaluation():
+    """Stop before any cost was computed: every method returns the start,
+    its cost and 'stopped' (not a cost of None, nor a TypeError)."""
+    from fit.de.de_fit import run_lsq
+    from fit.de.global_fit import METHODS, run_global
+    Q = np.linspace(0.004, 0.12, 60)
+    prob = FitProblem(_varied(), measure(film(), Q, in_plane(0.0)))
+    u0 = prob.x0()
+    runs = [lambda: run_de(prob, cancelled=lambda: True),
+            lambda: run_lbfgs(prob, cancelled=lambda: True),
+            lambda: run_lsq(prob, cancelled=lambda: True)]
+    runs += [lambda m=m: run_global(prob, m, cancelled=lambda: True)
+             for m in METHODS]
+    for run in runs:
+        x, cost, steps, msg = run()
+        assert msg == 'stopped' and steps == 0
+        assert np.allclose(x, prob.to_x(u0))
+        assert isinstance(cost, float) and cost == pytest.approx(prob(u0))
+
+
+class _Valley:
+    """A cheap stand-in for a FitProblem: Rosenbrock's valley in n
+    normalised parameters, slow enough for L-BFGS-B to need a few hundred
+    iterations."""
+
+    def __init__(self, n):
+        self.params = [None] * n
+        self.calls = 0
+
+    def x0(self):
+        return (np.tile([-1.2, 1.0], len(self.params))[:len(self.params)]
+                + 3) / 6
+
+    def to_x(self, u):
+        return np.array(u, dtype=float)
+
+    to_u = to_x
+
+    def __call__(self, u):
+        from scipy.optimize import rosen
+        self.calls += 1
+        return float(rosen(6 * np.asarray(u) - 3))
+
+
+def test_lbfgs_stops_on_its_iterations_only(monkeypatch):
+    """fit.de.de_fit L-BFGS-B LIMITS: scipy's default 15000 evaluations
+    stopped a 62-parameter run after 200 iterations whatever Max iter
+    said; the iterations are now the only limit, in run_lbfgs, the DE
+    polish and the multistart, and a run that ends on it says so."""
+    import fit.de.de_fit as D
+    import fit.multistart as M
+    assert D.lbfgs_maxfun(1000, 3) == 84000
+    assert D.lbfgs_maxfun(10, 3) == 15000              # scipy's, at least
+    assert D.lbfgs_maxfun(1000, 62) == 1000 * 63 * 21
+    p = _Valley(62)
+    x, cost, it, msg = run_lbfgs(p, maxiter=1000)
+    assert msg.startswith('CONVERGENCE') and cost < 1e-6
+    assert it > 250 and p.calls > 15000        # past scipy's default limit
+    # Max iter is what stops a run, and the message says so
+    x, cost, it, msg = run_lbfgs(_Valley(62), maxiter=40)
+    assert it == 40 and D.LIMIT in msg and 'Max iter (40' in msg
+    # the multistart's L-BFGS-B: converged, not cut
+    k, u, c, limited = M._Local(p, 'lbfgs', 0, None)((0, p.x0()))
+    assert c < 1e-6 and not limited
+    monkeypatch.setattr(M, 'LBFGS_MAXITER', 30)
+    k, u, c, limited = M._Local(p, 'lbfgs', 0, None)((0, p.x0()))
+    assert limited
+    m = M.merge(p, [(0, u, c, True), (1, u, c, False), (2, 1 - u, c + 1)])
+    assert [(r['hits'], r['unfinished']) for r in m] == [(2, 1), (1, 0)]
+    # the DE polish: its iterations and the same evaluation limit
+    seen = []
+    minimize = D.minimize
+
+    def spy(*a, **k):
+        seen.append(k['options'])
+        return minimize(*a, **k)
+    monkeypatch.setattr(D, 'minimize', spy)
+    small = _Valley(3)
+    *_, msg = run_de(small, maxiter=3, seed=0, polish_maxiter=7)
+    assert seen[-1]['maxiter'] == 7 and seen[-1]['maxfun'] == 15000
+    assert D.LIMIT in msg and 'polish' in msg
+    *_, msg = run_de(small, maxiter=3, seed=0)
+    assert seen[-1]['maxiter'] == D.POLISH_MAXITER
+    assert seen[-1]['maxfun'] == D.lbfgs_maxfun(D.POLISH_MAXITER, 3)
+    assert D.LIMIT not in msg
+    monkeypatch.setattr(D, 'minimize', minimize)
+    k, u, c, limited = M._Local(small, 'de', 0, dict(
+        maxiter=3, polish_maxiter=2))((0, small.x0()))
+    assert limited

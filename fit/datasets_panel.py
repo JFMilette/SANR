@@ -301,15 +301,21 @@ class DatasetsPanel(QtWidgets.QWidget):
 
     def selection(self):
         """{'sets': the ticked datasets, 'modes': {dataset: {parameter:
-        mode}} of theirs that are not the default (fit.joint
-        default_mode), 'sources': {parameter: model} of the shared ones
-        whose From was chosen}."""
+        mode}} that are not the default (fit.joint default_mode), of every
+        dataset listed, ticked or not (an unticked one keeps its modes for
+        when it is ticked again; fit.joint ignores them), 'sources':
+        {parameter: model} of the shared ones whose From was chosen}."""
         sets = self.chosen()
         modes = {n: {a: m for a, m in self.modes[n].items()
-                     if m != default_mode(a)} for n in sets}
+                     if m != default_mode(a)} for n in self.names}
         return {'sets': sets,
                 'modes': {n: m for n, m in modes.items() if m},
                 'sources': dict(self.sources)}
+
+    def rename(self, old, new):
+        """Dataset `old` is now called `new`: its modes follow."""
+        if old in self.modes:
+            self.modes[new] = self.modes.pop(old)
 
     def mode(self, dataset, param):
         return self.modes[dataset].get(param, default_mode(param))

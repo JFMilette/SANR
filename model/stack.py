@@ -391,6 +391,7 @@ scalar per spin.
 
 import copy
 import warnings
+from collections.abc import Sequence
 
 import numpy as np
 from scipy.special import erf, erfc
@@ -481,6 +482,9 @@ RES_EDGE_WIDTH = 8
 # Q points per block of the transfer-matrix product (see
 # Stack.build_transfer_matrix); set from a benchmark
 TM_BLOCK = 256
+# 4x4 matrices (256 bytes each) held at once when the thickness-spread
+# nodes' products are built together (Stack._ideal): 16 MB
+NODE_BLOCK = 1 << 16
 # the compiled product (model/_transfer.pyx) when it is built; False forces
 # the numpy one (the tests compare them)
 USE_COMPILED = True
@@ -736,6 +740,55 @@ def _res_grid(Qn, sigma, bins=2048, edges_q=(), step=None):
 
 
 # ---------------------------------------------------------------- Layer ----
+class _Slabs(Sequence):
+    """The slabs of build_sublayers as a read-only sequence of Layers, made
+    from their arrays the first time one is read: a fit builds the slabs
+    thousands of times and only ever multiplies the arrays
+    (Stack._slab_arrays), the profile plots and exports read the Layers."""
+
+    def __init__(self, name, th, v_n, v_rho, v_theta, v_phi):
+        self._name = name
+        self._values = (th, v_n, v_rho, v_theta, v_phi)
+        self._layers = None
+
+    def _all(self):
+        if self._layers is None:
+            th, v_n, v_rho, v_theta, v_phi = self._values
+            self._layers = [
+                Layer(name='%s_%03d' % (self._name, i),
+                      thickness=float(th[i]), NSLD_real=v_n[i].real,
+                      NSLD_img=v_n[i].imag, MSLD_rho=float(v_rho[i]),
+                      MSLD_theta=float(v_theta[i]), MSLD_phi=float(v_phi[i]),
+                      roughness_sigma=0.0, roughness_sublayer=1)
+                for i in range(len(th))]
+        return self._layers
+
+    def __len__(self):
+        return len(self._values[0])
+
+    def __getitem__(self, i):
+        return self._all()[i]
+
+    def __iter__(self):
+        return iter(self._all())
+
+    def __eq__(self, other):
+        if isinstance(other, _Slabs):
+            other = other._all()
+        return self._all() == other
+
+    __hash__ = None
+
+    def __add__(self, other):
+        return self._all() + list(other)
+
+    def __radd__(self, other):
+        return list(other) + self._all()
+
+    def __repr__(self):
+        return repr(self._all())
+
+
 class Layer:
     """A single homogeneous medium.
 
@@ -1583,20 +1636,19 @@ class Stack:
 
     def _set_sublayers(self, th, v_n, v_rho, v_theta, v_phi):
         self._sub_gen = getattr(self, '_sub_gen', 0) + 1
-        self.sublayers = [
-            Layer(name='%s_%03d' % (self.layers[0].name or 'slab', i),
-                  thickness=float(th[i]), NSLD_real=v_n[i].real,
-                  NSLD_img=v_n[i].imag, MSLD_rho=float(v_rho[i]),
-                  MSLD_theta=float(v_theta[i]), MSLD_phi=float(v_phi[i]),
-                  roughness_sigma=0.0, roughness_sublayer=1)
-            for i in range(len(th))]
+        th = np.asarray(th, dtype=float)
+        v_n = np.asarray(v_n, dtype=complex)
+        v_rho = np.asarray(v_rho, dtype=float)
+        v_theta = np.asarray(v_theta, dtype=float)
+        v_phi = np.asarray(v_phi, dtype=float)
+        # the Layers themselves only when they are read (_Slabs)
+        self.sublayers = _Slabs(self.layers[0].name or 'slab', th, v_n,
+                                v_rho, v_theta, v_phi)
         # the same slabs as the arrays build_transfer_matrix multiplies (the
         # in-plane rho of inplane_rho), so that it need not read them back
-        # one Layer at a time; valid while self.sublayers is this list
+        # one Layer at a time; valid while self.sublayers is this object
         self._slab_arrays = (self.sublayers, (
-            np.asarray(v_n, dtype=complex),
-            np.asarray(v_rho, dtype=float) * cos_turns(v_phi),
-            np.asarray(v_theta, dtype=float), np.asarray(th, dtype=float)))
+            v_n, v_rho * cos_turns(v_phi), v_theta, th))
         return self.sublayers
 
     def profile(self, z):
@@ -2112,11 +2164,29 @@ class Stack:
         return np.array([float(cos_turns(f.MSLD_theta)),
                          float(sin_turns(f.MSLD_theta)), 0.0])
 
-    def _reflect(self, Q2, seq=None):
+    def _node_matrices(self, Q2, seqs):
+        """The transfer matrix of each thickness-spread node (seqs of
+        _spread_sequences) at the squared vacuum Q, what
+        build_transfer_matrix(sqrt(Q2), seq) gives for each, from one
+        compiled call that multiplies the slabs the nodes share at the top
+        once (model/_transfer.pyx products); None for each without the
+        compiled kernel (or one built before it had products): _reflect
+        then builds its own."""
+        if (_transfer is None or not USE_COMPILED
+                or not hasattr(_transfer, 'products')
+                or any(not seq[0] or seq[1] is None for _, seq in seqs)):
+            return [None] * len(seqs)
+        q = np.sqrt(Q2 + 0j)
+        return [M.reshape(q.shape + (4, 4)) for M in _transfer.products(
+            [seq[1] for _, seq in seqs], q.ravel())]
+
+    def _reflect(self, Q2, seq=None, M=None):
         """Reflection matrix r [:, out, in] in the film-normal (z) basis for
         the squared vacuum Q, plus the fronting's q+- (see _surround_K);
-        seq: see build_transfer_matrix."""
-        M = self.build_transfer_matrix(np.sqrt(Q2 + 0j), seq)
+        seq: see build_transfer_matrix; M: that sequence's transfer matrix
+        when it is already built (_node_matrices)."""
+        if M is None:
+            M = self.build_transfer_matrix(np.sqrt(Q2 + 0j), seq)
         A, B = M[:, :2, :2], M[:, :2, 2:]
         C, D = M[:, 2:, :2], M[:, 2:, 2:]
         Kf, qf_p, qf_m = self._surround_K(self.fronting, Q2)
@@ -2216,8 +2286,21 @@ class Stack:
         # THICKNESS SPREAD: the nodes' average ideal reflectivity
         seqs = self._spread_sequences(qmax)
 
+        def block(q, pairs):
+            Ms = iter(self._node_matrices(self._trace_q2(q), seqs))
+            return _node_sum(seqs, lambda seq: self._trace(q, pairs, seq,
+                                                           next(Ms)))
+
         def trace(q, pairs):
-            return _node_sum(seqs, lambda seq: self._trace(q, pairs, seq))
+            # every node's matrices are held at once (_node_matrices): in
+            # blocks of Q, so that a fine resolution grid with many nodes
+            # stays within NODE_BLOCK matrices
+            q = np.atleast_1d(np.asarray(q, dtype=float))
+            n = max(NODE_BLOCK // len(seqs), 1)
+            if len(q) <= n:
+                return block(q, pairs)
+            return np.concatenate([block(q[i:i + n], pairs)
+                                   for i in range(0, len(q), n)])
 
         def lab(q):
             return _node_sum(seqs, lambda seq: self._lab_channels(q, seq))
@@ -2400,16 +2483,21 @@ class Stack:
         R[order] = Rs
         return R
 
-    def _trace(self, Q, pairs, seq=None):
-        """Non-magnetic fronting: Tr{rho r rho0 r^+} of every pair from ONE
-        transfer-matrix evaluation, any backing; no background or resolution.
-        Shape (nQ, len(pairs)).  seq: see build_transfer_matrix."""
+    def _trace_q2(self, Q):
+        """The squared vacuum Q of _trace's Q (the fronting's if
+        q_in_fronting)."""
         Q = np.atleast_1d(np.asarray(Q, dtype=float))
         f = self.fronting
         Q2 = Q**2 + 0j
         if self.q_in_fronting:
             Q2 = Q2 + 16*np.pi*(f.NSLD_real + 1j*f.NSLD_img)
-        r = self._reflect(Q2, seq)[0]
+        return Q2
+
+    def _trace(self, Q, pairs, seq=None, M=None):
+        """Non-magnetic fronting: Tr{rho r rho0 r^+} of every pair from ONE
+        transfer-matrix evaluation, any backing; no background or resolution.
+        Shape (nQ, len(pairs)).  seq, M: see _reflect."""
+        r = self._reflect(self._trace_q2(Q), seq, M)[0]
         rho0 = np.stack([_density(P0) for P0, _ in pairs])
         rho = np.stack([np.eye(2) if P is None else _density(P)
                         for _, P in pairs])

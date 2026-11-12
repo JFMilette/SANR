@@ -146,3 +146,26 @@ def test_frozen_copy_sends_its_model_back(app, monkeypatch):
     live = live_set(exp)
     assert np.allclose(live['channels']['+']['R'],
                        frozen['channels']['+']['R'])
+
+
+def test_send_model_keeps_the_polarisation(app, monkeypatch):
+    """Send model to Simulation replaces the layers and model settings,
+    not the Simulation tab's polarisation (it used to reset to the
+    default); a session without one still opens with the default."""
+    from model.polarisation import default_vectors
+    sim, exp = tab()
+    exp.freeze_simulation(exp.sets.index(live_set(exp)))
+    frozen = next(s for s in exp.sets if s.get('model'))
+    vec = sim.pol.vectors()
+    vec['+'] = [[0.98, 0.0, 0.0], [0.0, 0.0, 0.0]]
+    vec['-'] = [[-0.98, 0.0, 0.0], [0.0, 0.0, 0.0]]
+    sim.pol.set_vectors(vec)
+    monkeypatch.setattr(QtWidgets.QMessageBox, 'question', lambda *a: (
+        QtWidgets.QMessageBox.StandardButton.Yes))
+    exp.send_model(exp.sets.index(frozen))
+    assert sim.pol.vectors()['+'] == vec['+']
+    assert sim.pol.vectors()['-'] == vec['-']
+    state = sim.session_state()
+    del state['simulation']['polarisation']          # an older session
+    sim.restore_state(state)
+    assert sim.pol.vectors() == default_vectors()

@@ -137,9 +137,10 @@ class NPEThread(QtCore.QThread):
                     callback=self._callback, cancelled=lambda: self._stop)
                 if self.calibrate and not self._stop:
                     self.stage.emit('Calibration of round 1…')
-                    cal = npe_train.calibrate(res, res.simulator,
-                                              seed=o['seed'],
-                                              n_workers=o['n_workers'])
+                    cal = npe_train.calibrate(
+                        res, res.simulator, seed=o['seed'],
+                        n_workers=o['n_workers'],
+                        cancelled=lambda: self._stop)
             else:
                 cal = res.meta.get('calibration')
             self.stage.emit('Seeding: the exact posterior of the network\'s '

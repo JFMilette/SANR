@@ -229,11 +229,12 @@ class _Unit(Wrapper):
         return self.problem.split(self.problem.to_x(u))
 
 
-def _de_start(problem, n_chains, seed, de_options):
+def _de_start(problem, n_chains, seed, de_options, cancelled=None):
     """n_chains starting states from a DE fit's final population (physical
-    units, best first); the sigma parameter, if any, starts at 0."""
+    units, best first); the sigma parameter, if any, starts at 0.
+    cancelled() True stops the DE fit (RuntimeError)."""
     *_, pop = run_de(problem.fit, seed=seed, full_output=True,
-                     **(de_options or {}))
+                     cancelled=cancelled, **(de_options or {}))
     if pop is None:
         raise RuntimeError('the DE start was stopped')
     if len(pop) < n_chains:
@@ -264,10 +265,12 @@ def jittered_start(problem, n_chains, seed=None, x=None):
 def sample(problem, *, n_gen=30000, archive=True, n_chains=None, x0=None,
            n_workers=1, seed=None, stop_when_converged=True,
            min_gen_after_converged=5000, callback=None, de_options=None,
-           resume=None, rhat_target=1.1, p_snooker=0.1, beta_start=1e-3,
-           temper_until=None, z0=None):
+           resume=None, rhat_target=1.05, p_snooker=0.1, beta_start=1e-3,
+           temper_until=None, z0=None, cancelled=None, ess_target=400,
+           archive_keep=0.25):
     """DREAM posterior sample of `problem` (a PosteriorProblem), chains in
-    physical units.
+    physical units.  cancelled() True stops the DE fit of x0 = 'de'
+    (RuntimeError); the sampling itself is stopped by callback.
 
     x0: None (Latin hypercube in the bounds), an (n_chains, d) array,
         'de' to start from the best members of a fit.de.de_fit.run_de final
@@ -287,8 +290,14 @@ def sample(problem, *, n_gen=30000, archive=True, n_chains=None, x0=None,
     callback(generation, X, logp, rhat or None) is called after every
         generation, X in physical units; returning True stops the run and
         returns the generations done so far.
-    rhat_target: converged once R-hat < rhat_target for every parameter
+    rhat_target: converged once the rank-normalised split R-hat
+        (fit.dream.dream.split_rhat) < rhat_target for every parameter
         (stop_when_converged, and the flag and warning of the GUI).
+    ess_target: stop_when_converged also waits until every parameter has
+        at least this effective sample size (0: no such condition); 400
+        gives stable 2.5 / 97.5 % percentiles.
+    archive_keep: the archive pruning of fit.dream.dream at the end of the
+        adaptation phase (None: none).
     resume: a result of sample() on the same problem (or load_run of it):
         go on from its last generation up to n_gen generations in all, as
         if it had never stopped; its chains, archive and settings are kept
@@ -311,7 +320,7 @@ def sample(problem, *, n_gen=30000, archive=True, n_chains=None, x0=None,
         p_snooker = 0.0
     if isinstance(x0, str):
         if x0 == 'de':
-            x0 = _de_start(problem, n_chains, seed, de_options)
+            x0 = _de_start(problem, n_chains, seed, de_options, cancelled)
         elif x0 == 'current':
             x0 = jittered_start(problem, n_chains, seed)
         else:
@@ -344,7 +353,7 @@ def sample(problem, *, n_gen=30000, archive=True, n_chains=None, x0=None,
                     resume=state, rhat_target=rhat_target,
                     p_snooker=p_snooker, beta_start=beta_start,
                     temper_until=temper_until, logpdf_split=unit.split,
-                    z0=uz)
+                    z0=uz, ess_target=ess_target, archive_keep=archive_keep)
     finally:
         if pool is not None:
             stop_pool(pool, unit.token)
@@ -374,11 +383,13 @@ def data_hash(problem):
 
 
 # DreamResult.state: scalars (JSON meta) and arrays (state_<name> in .npz)
-# (a state saved before snooker and tempering lacks theirs: neither)
+# (a state saved before snooker, tempering or archive pruning lacks
+# theirs: none of them)
 _STATE_SCALARS = ('t', 'n_gen', 'cancelled', 'rhat_target', 'd', 'N',
                   'archive', 'thin',
                   'outlier', 'adapt_until', 'archive_every', 'n_evals', 'm',
-                  'rng', 'p_snooker', 'beta_start', 'temper_until')
+                  'rng', 'p_snooker', 'beta_start', 'temper_until',
+                  'ess_target', 'archive_keep', 'm0', 'z_head')
 _STATE_ARRAYS = ('X', 'logp_X', 'Z', 'pCR', 'J', 'n_id', 'hist_logp', 'acc',
                  'chains', 'logps', 'gens', 'lp_X', 'll_X')
 
@@ -642,10 +653,8 @@ def chains_split(result, discard=0.5, split_nats=10):
     differ by more than split_nats: they sit in different minima, which
     R-hat can miss.  Chains all in one wrong minimum are not detected
     this way (hence the tempered burn-in of fit.dream.dream)."""
-    g_max = result.generations[-1]
-    g0 = discard * g_max if discard < 1 else discard
-    keep = result.generations >= max(g0, result.adapt_until)
-    if keep.sum() < 1 or g_max <= result.adapt_until:
+    keep = result.keep(discard)
+    if keep.sum() < 1 or result.generations[-1] <= result.adapt_until:
         return False
     with np.errstate(invalid='ignore'):
         m = result.logp[keep].mean(axis=0)
@@ -656,9 +665,7 @@ def chains_split(result, discard=0.5, split_nats=10):
 def chain_best(result, discard=0.5):
     """Each chain's best kept state (highest log posterior after `discard`
     and the adaptation phase), (N, d) in physical units."""
-    g_max = result.generations[-1]
-    g0 = discard * g_max if discard < 1 else discard
-    keep = result.generations >= max(g0, result.adapt_until)
+    keep = result.keep(discard)
     lp = np.where(np.isfinite(result.logp[keep]), result.logp[keep], -np.inf)
     best = lp.argmax(axis=0)
     X = result.chains[keep]
@@ -672,8 +679,9 @@ def chain_chi2(result, problem, discard=0.5):
 
 def posterior_warnings(result, bounds=None, discard=0.5, rhat_max=1.1,
                        acc_min=0.05, edge=0.01, edge_frac=0.05,
-                       problem=None, split_nats=10, chi2=None):
-    """Texts for: R-hat above rhat_max at the end, chains in different
+                       problem=None, split_nats=10, chi2=None, ess_min=0):
+    """Texts for: R-hat above rhat_max at the end, an effective sample
+    size below ess_min (0: not checked), chains in different
     minima (chains_split; chi^2/N of each with `problem`, or `chi2` when
     chain_chi2 was already computed), acceptance below
     acc_min after adaptation, a parameter with more than edge_frac of its
@@ -690,6 +698,13 @@ def posterior_warnings(result, bounds=None, discard=0.5, rhat_max=1.1,
                                                        ', '.join(bad)))
     else:
         out.append('No R̂ yet: the run ended within the adaptation phase.')
+    if ess_min > 0 and result.generations[-1] > result.adapt_until:
+        n_eff = ess(result, discard)
+        low = [n for n, e in zip(names, n_eff) if not e >= ess_min]
+        if low:
+            out.append('Few effective samples (ESS < %g): %s — the 2.5 / '
+                       '97.5 %% percentiles are rough; continue the run'
+                       % (ess_min, ', '.join(low)))
     if chains_split(result, discard, split_nats):
         if chi2 is None and problem is not None:
             chi2 = chain_chi2(result, problem, discard)

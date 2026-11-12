@@ -32,6 +32,22 @@ import shutil
 import tempfile
 import zipfile
 
+
+def sessions_dir():
+    """Where the session dialogs (and Save chains) open first: sessions/
+    of the repo, or Documents/SANR for a built program (its folder is not
+    writable), the home folder if that cannot be made."""
+    import sys
+    if getattr(sys, 'frozen', False):
+        d = os.path.join(os.path.expanduser('~'), 'Documents', 'SANR')
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            d = os.path.expanduser('~')
+        return d
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        'sessions')
+
 SESSION_NAME = 'session.json'
 DATA_DIR = 'data/'
 TABS_DIR = 'tabs/'

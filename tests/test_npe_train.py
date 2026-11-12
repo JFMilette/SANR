@@ -152,6 +152,16 @@ def test_save_load(trained, tmp_path):
     other.hi = other.hi * 1.01
     with pytest.raises(ValueError, match='bounds'):
         back.check(other)
+    # the same parameters and data, another model (the substrate's NSLD,
+    # kept fixed): refused; another start of the fitted ones: taken
+    from fit.saved import problem_from_state, problem_state
+    d = problem_state(toy())
+    d['stack']['layers'][2]['NSLD_real'] = 2.2e-6
+    with pytest.raises(ValueError, match='another model'):
+        back.check(problem_from_state(d))
+    d = problem_state(toy())
+    d['stack']['layers'][1]['thickness'] *= 1.05
+    back.check(problem_from_state(d))
 
 
 def test_calibration(trained):
@@ -161,6 +171,47 @@ def test_calibration(trained):
     assert cal['round'] == 1 and len(cal['ks_pvals']) == 2
     assert res.meta['calibration'] is cal
     assert isinstance(cal['passed'], bool)
+    calls = [0]
+
+    def stop():
+        calls[0] += 1
+        return calls[0] > 3
+    with pytest.raises(RuntimeError, match='stopped'):
+        calibrate(res, res.simulator, n=200, n_posterior=300, seed=1,
+                  cancelled=stop)
+
+
+def test_each_simulation_keeps_its_split():
+    """fit.npe.train ROUNDS: a simulation in the training set stays
+    there in the later rounds (sbi alone splits all of them again each
+    round), the new ones are split in the fraction asked."""
+    import torch
+    from fit.npe import train as T
+
+    class Fake:
+        def __init__(self):
+            self.n, self.seen = 0, []
+
+        def get_simulations(self, starting_round=0):
+            return (torch.zeros(self.n, 1),)
+
+        def get_dataloaders(self, starting_round=0, training_batch_size=200,
+                            validation_fraction=0.1, resume_training=False,
+                            dataloader_kwargs=None):
+            assert resume_training          # the indices are already set
+            self.seen.append((self.train_indices.clone(),
+                              self.val_indices.clone()))
+    f = Fake()
+    T._fixed_split(f)
+    for n in (1000, 2000, 3000):
+        f.n = n
+        f.get_dataloaders(validation_fraction=0.1)
+    (t1, v1), (t2, v2), (t3, v3) = f.seen
+    assert len(v1) == 100 and len(v2) == 200 and len(v3) == 300
+    assert set(v1.tolist()) <= set(v2.tolist()) <= set(v3.tolist())
+    assert set(t1.tolist()) <= set(t2.tolist()) <= set(t3.tolist())
+    assert not set(t3.tolist()) & set(v3.tolist())
+    assert len(t3) + len(v3) == 3000
 
 
 def test_fitted_error_scale():

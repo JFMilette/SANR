@@ -145,6 +145,53 @@ Q_IN_FILE, Q_SEPARATE = 0, 1
 Q_FILE_NAMES = ('q.dat', 'q.txt', 'Q.dat', 'Q.txt')
 
 
+# a number written with a decimal comma (1,5e-3), alone between separators
+_COMMA_NUMBER = re.compile(r'[-+]?(\d+,?\d*|,\d+)([eE][-+]?\d+)?')
+_COMMA_SPLIT = re.compile(r'[\s;]+')
+
+
+def decimal_comma(lines):
+    """Whether the data lines of a file write their numbers with a decimal
+    comma (0,01 1,5e-3 ...): every one of them has a comma, none a point,
+    and each holds two numbers or more, separated by blanks or ';', every
+    one of the decimal-comma form.  A comma-separated file (0.01,1.5e-3)
+    has points; integers only ("1,2") are not taken as decimals."""
+    rows = [s for s in (l.strip() for l in lines)
+            if s and not s.startswith('#') and (s[0].isdigit() or s[0] in '+-,')]
+    if not rows:
+        return False
+    for s in rows:
+        if ',' not in s or '.' in s:
+            return False
+        parts = [t for t in _COMMA_SPLIT.split(s) if t]
+        if len(parts) < 2 or not all(_COMMA_NUMBER.fullmatch(t)
+                                     for t in parts):
+            return False
+    return True
+
+
+def clean_lines(text):
+    """The lines of a data file's text: a byte order mark at its start
+    removed (as Python reads one, or as cp1252 shows it), and decimal
+    commas made points when the data lines use them (decimal_comma); the
+    comment lines are left as they are."""
+    for bom in ('\ufeff', '\u00ef\u00bb\u00bf'):
+        if text.startswith(bom):
+            text = text[len(bom):]
+            break
+    lines = text.splitlines()
+    if decimal_comma(lines):
+        lines = [l if l.lstrip().startswith('#') else
+                 l.replace(',', '.') for l in lines]
+    return lines
+
+
+def read_lines(path):
+    """clean_lines of the file at path."""
+    with open(path, errors='replace') as f:
+        return clean_lines(f.read())
+
+
 def parse_row(line):
     """Floats of one data line, or None if it is not numeric."""
     parts = [p for p in SPLIT.split(line.strip()) if p]
@@ -179,8 +226,7 @@ def first_row(lines, start):
 def read_q_file(path):
     """Q values of a separate Q file: first number of each numeric line,
     comment / text lines skipped."""
-    with open(path, errors='replace') as f:
-        lines = f.read().splitlines()
+    lines = read_lines(path)
     Q = []
     for line in lines:
         s = line.strip()
@@ -283,8 +329,7 @@ def quicknxs_stitch_priors(path):
     error), 'options' ([Global Options])} of a QuickNXS export (see
     QUICKNXS), None if it has no such header."""
     try:
-        with open(path, errors='replace') as f:
-            lines = [l for l in f.read().splitlines() if l.startswith('#')]
+        lines = [l for l in read_lines(path) if l.startswith('#')]
     except OSError:
         return None
     runs = _header_table(lines, 'Data Runs')
@@ -503,7 +548,8 @@ class ImportDialog(QtWidgets.QDialog):
         self.setWindowTitle('Import — %s' % os.path.basename(path))
         with open(path, errors='replace') as f:
             text = f.read()
-        self.lines = text.splitlines()
+        # the file as it is in the view, its lines as they are parsed
+        self.lines = clean_lines(text)
         self.path = path
         self.data = None
         self.q_path = None
@@ -935,8 +981,12 @@ class DataTree(QtWidgets.QTreeWidget):
 def file_ref(path, base):
     """A file as saved in a session: absolute, and relative to the session
     folder `base` so a moved folder still finds it."""
-    return {'path': os.path.abspath(path),
-            'relative': os.path.relpath(path, base)}
+    path = os.path.abspath(path)
+    try:
+        relative = os.path.relpath(path, base)
+    except ValueError:        # on another drive: no relative path to it
+        relative = path
+    return {'path': path, 'relative': relative}
 
 
 def find_file(ref, base):
@@ -953,8 +1003,7 @@ def read_channel(ref, q_ref, start, base, q_shift=0.0, q_mult=1.0,
     a Licorne session's Q_mult / Rexp_mult)."""
     path = find_file(ref, base)
     q_path = find_file(q_ref, base) if q_ref else None
-    with open(path, errors='replace') as f:
-        lines = f.read().splitlines()
+    lines = read_lines(path)
     Q = read_q_file(q_path) if q_path else None
     data, _ = parse_data(lines, start, Q, q_shift, q_mult, r_mult)
     return dict(data, path=path, q_path=q_path, start=start, q_shift=q_shift,
@@ -1380,6 +1429,12 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         self.btn_remove.setEnabled(sel is not None and
                                    not self.sets[sel[0]].get('live'))
 
+    def _note(self, msg):
+        """msg in the main window's status bar (a few seconds)."""
+        win = self.window()
+        if isinstance(win, QtWidgets.QMainWindow):
+            win.statusBar().showMessage(msg, 8000)
+
     def _on_item_changed(self, item, _col):
         i, ch = item.data(0, ROLE)
         if ch is not None:
@@ -1389,6 +1444,10 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
         name = item.text(0).strip()
         if name and name != s['name'] and self._set_index(name) is not None:
             name = s['name']                 # another dataset's name: kept
+        if name and name != s['name'] and self.busy():
+            # a running fit sends its result to its datasets by name
+            name = s['name']
+            self._note('Datasets cannot be renamed while a fit runs.')
         if name and name != s['name']:
             old = s['name']
             self._rename_fit_set(old, name)
@@ -1844,6 +1903,10 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
             del self.sets[i]['channels'][ch]
             self.refresh_tree((i, None))
         else:
+            if self.busy():
+                # a running fit sends its result to its datasets by name
+                self._note('Datasets cannot be removed while a fit runs.')
+                return
             s = self.sets[i]
             sim = self.simulation
             own = sim is not None and self.is_dataset_model(s['name']) and \
@@ -1914,6 +1977,7 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
                          corrected=self.show_corrected.isChecked()),
             fit=dict(dataset=self.fit_set.currentText(), joint=self._joint,
                      cost=self.fit_cost.currentIndex(),
+                     floor=self.fit_floor.value(),
                      target=self.fit_target.currentData(),
                      maxiter=self.fit_maxiter.value(),
                      mutation=[self.fit_mut_lo.value(),
@@ -1995,6 +2059,8 @@ class ExperimentalTab(FitPanel, QtWidgets.QWidget):
             self.fit_set.setCurrentIndex(max(0, self.fit_set.findText(
                 fit.get('dataset', ''))))
             self.fit_cost.setCurrentIndex(fit.get('cost', 0))
+            # (sessions before the floor was saved: off, the default)
+            self.fit_floor.setValue(fit.get('floor', 0.0))
             self.fit_target.setCurrentIndex(max(0, self.fit_target.findData(
                 fit.get('target', 'channels'))))
             self.fit_maxiter.setValue(fit.get('maxiter', 200))

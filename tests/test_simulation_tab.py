@@ -244,19 +244,11 @@ def test_new_layer_copies_the_layer_above(app):
         not any(e['vary'] for e in st.layers[1].fit.values())
 
 
-def test_untick_all_fit(qtbot=None):
-    """Untick all Fit: nothing varied afterwards (layers, general rows, a
-    tie through its members), even once the boxes are read back; values and
-    bounds kept; greyed out while a fit runs."""
-    import os
-    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-    from PyQt6 import QtWidgets
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    assert app is not None
-    from tabs import SimulationTab
-    win = QtWidgets.QMainWindow()
+def test_untick_all_fit(app):
+    """Stack.untick_all: nothing varied afterwards (layers, general rows, a
+    tie through its members), even once the tab's boxes are read back;
+    values and bounds kept."""
     sim = SimulationTab()
-    win.setCentralWidget(sim)
     st = sim.stack
     for i, attr in ((1, 'thickness'), (1, 'NSLD_real'), (2, 'thickness')):
         e = st.layers[i].fit_entry(attr)
@@ -270,7 +262,9 @@ def test_untick_all_fit(qtbot=None):
     sim.refresh_list(select=1)
     sim.recompute()
     assert len(st.free_parameters()) == 6
-    sim.btn_untick.click()
+    assert st.untick_all() == 6
+    sim._load_stack_fit()
+    sim.refresh_list(select=1)
     assert st.free_parameters() == []
     sim.recompute()                          # the boxes agree
     assert st.free_parameters() == []
@@ -278,21 +272,15 @@ def test_untick_all_fit(qtbot=None):
     fit_boxes = [row[3] for row in sim.editor.rows.values()]
     assert fit_boxes and not any(b.isChecked() for b in fit_boxes)
     assert st.layers[1].fit['thickness']['max'] == 99.0     # bounds kept
-    assert 'Fit unticked on 6 parameters' in win.statusBar().currentMessage()
-    sim.set_locked(True)
-    assert not sim.btn_untick.isEnabled()
-    sim.set_locked(False)
 
 
-def test_tick_all_buttons(app):
-    """Tick thickness / NSLD / roughness: Fit on that quantity of every
-    layer it belongs to (thickness of the film layers only, NSLD of the
-    film layers and the substrate, roughness of every interface but those with model 'none'), the editor
-    showing it, bounds kept; greyed out while a fit runs."""
+def test_tick_all(app):
+    """Stack.tick_all: Fit on that quantity of every layer it belongs to
+    (thickness of the film layers only, NSLD of the film layers and the
+    substrate, roughness of every interface but those with model 'none'),
+    the editor showing it, bounds kept."""
     from model.stack import Layer
-    win = QtWidgets.QMainWindow()
     sim = SimulationTab()
-    win.setCentralWidget(sim)
     st = sim.stack
     st.layers = [Layer('air', 0), Layer('a', 50, roughness_sigma=3),
                  Layer('b', 80, roughness_model='none'),
@@ -300,11 +288,10 @@ def test_tick_all_buttons(app):
                  Layer('Si', 0, NSLD_real=2.07e-6, roughness_sigma=4)]
     st.layers[1].fit_entry('thickness').update(vary=True, max=99.0)
     sim.refresh_list(select=1)
-    sim.btn_tick['thickness'].click()
-    assert 'Fit ticked on 2 more thicknesses' in \
-        win.statusBar().currentMessage()
-    sim.btn_tick['NSLD_real'].click()
-    sim.btn_tick['roughness_sigma'].click()
+    assert st.tick_all('thickness') == 2
+    st.tick_all('NSLD_real')
+    st.tick_all('roughness_sigma')
+    sim.refresh_list(select=1)
     free = {(i, a) for i, a, *_ in st.free_parameters()}
     assert free == {(1, 'thickness'), (2, 'thickness'), (3, 'thickness'),
                     (1, 'NSLD_real'), (2, 'NSLD_real'), (3, 'NSLD_real'),
@@ -315,9 +302,6 @@ def test_tick_all_buttons(app):
     assert sim.editor.rows['thickness'][3].isChecked()
     assert sim.editor.rows['NSLD_real'][3].isChecked()
     assert st.tick_all('thickness') == 0                    # all ticked
-    sim.set_locked(True)
-    assert not any(b.isEnabled() for b in sim.btn_tick.values())
-    sim.set_locked(False)
 
 
 def test_models_switch_copy_new_delete_and_session(app, monkeypatch):
@@ -708,3 +692,31 @@ def test_selected_band_repaints(app):
                                       shown.sizeInBytes()))
     finally:
         w.close()
+
+
+def test_boxes_keep_the_value_they_are_given(app):
+    """A value put in a box and read back (the tab writes its boxes to the
+    stack) is that value, not the rounded one shown: a fitted or loaded
+    scale, Q shift or TOF dlambda is not rounded on its way to the model."""
+    from tabs.simulation import dspin
+    w = dspin(0, 100, 4, 0.01, ' Å')
+    w.setValue(0.987654321)
+    assert w.value() == 0.987654321 and w.decimals() == 4
+    assert w.cleanText().replace(',', '.') == '0.9877'
+    w.stepBy(1)
+    assert w.value() == pytest.approx(0.997654321, abs=1e-12)
+    w.lineEdit().setText('1.5 Å')            # typed: the value typed
+    w.interpretText()
+    assert w.value() == 1.5
+    w.setValue(5.000000000000001)            # unit-conversion noise: gone
+    assert w.value() == 5.0
+    sim = SimulationTab()
+    d = sim.stack.to_dict()
+    d.update(scale=0.98765432, q_shift=0.00012345678)
+    d['resolution']['tof_dlambda'] = 0.0054449
+    sim.restore_state(d)
+    sim.recompute()
+    st = sim.stack
+    assert (st.scale, st.q_shift) == (0.98765432, 0.00012345678)
+    assert st.resolution['tof_dlambda'] == 0.0054449
+    assert sim.session_state()['scale'] == 0.98765432

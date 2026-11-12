@@ -37,7 +37,7 @@ def test_page_defaults_and_options(app, monkeypatch):
                   theta=np.nan * one, path='x.dat')})]
     exp.refresh_tree()
     exp.fit_set.setCurrentIndex(0)
-    assert exp.dream_rhat.value() == 1.1
+    assert exp.dream_rhat.value() == 1.05 and exp.dream_ess.value() == 400
     assert exp.dream_snooker.value() == 0.1 and exp.dream_temper.isChecked()
     exp.dream_start.setCurrentIndex(exp.dream_start.findData('current'))
     seen = {}
@@ -45,6 +45,7 @@ def test_page_defaults_and_options(app, monkeypatch):
                         lambda problem, options, report: seen.update(options))
     exp.start_dream()
     assert seen['p_snooker'] == 0.1 and seen['x0'] == 'current'
+    assert seen['rhat_target'] == 1.05 and seen['ess_target'] == 400
     assert seen['beta_start'] == pytest.approx(1e-3)
     exp.dream_temper.setChecked(False)
     exp.start_dream()
@@ -247,4 +248,42 @@ def test_log_p_line_never_widens_the_window(app):
     app.processEvents()
     assert 'χ²/N per chain now' in win.trace.info.text()
     assert win.minimumSizeHint().width() == base and win.width() == 900
+    win.close()
+
+
+def test_continue_any_ended_run(app, monkeypatch):
+    """Continue, with the '+ gen.' box beside it, adds that many
+    generations to any ended run (not only one stopped with Stop), all of
+    them; a stopped run's box starts at what it had left."""
+    sim = SimulationTab()
+    sim.stack.layers[1].fit_entry('thickness')['vary'] = True
+    exp = ExperimentalTab(simulation=sim)
+    Q = np.linspace(0.01, 0.1, 40)
+    one = np.ones_like(Q)
+    exp.sets = [dict(name='d', visible=True, channels={
+        '+': dict(Q=Q, R=0.1 * one, dR=0.01 * one, dQ=0 * one,
+                  theta=np.nan * one, path='x.dat')})]
+    exp.refresh_tree()
+    exp.fit_set.setCurrentIndex(0)
+    seen = {}
+    monkeypatch.setattr(exp, '_launch_dream',
+                        lambda problem, options, report: seen.update(options))
+    exp.start_dream()
+    win, pp = exp.dream_window, exp._dream_problem
+    assert not win.continue_gen.isEnabled()
+    # a run that went to its end
+    res = sample(pp, n_gen=300, seed=0, stop_when_converged=False)
+    win.finish(res)
+    assert win.btn_continue.isEnabled() and win.continue_gen.isEnabled()
+    win.continue_gen.setValue(500)
+    seen.clear()
+    win.btn_continue.click()
+    assert seen['resume'] is res and seen['n_gen'] == 800
+    assert seen['stop_when_converged'] is False
+    assert not win.continue_gen.isEnabled()          # running again
+    # a run stopped with Stop: the box offers what it had left
+    stopped = sample(pp, n_gen=1000, seed=0, stop_when_converged=False,
+                     callback=lambda t, *a: t >= 200)
+    win.finish(stopped)
+    assert win.continue_gen.value() == 800 and win.btn_continue.isEnabled()
     win.close()

@@ -18,7 +18,10 @@ normalised coordinate and to MERGE_COST in cost: one minimum, its best
 member kept, `hits` how many starts reached it, `from_current` whether the
 current values' start is among them.  Sorted by cost (the problem's: chi^2/N
 for the 'chi2' cost).  A parameter within EDGE of either end of its bounds
-is `at_bound`: the bound, not the data, holds it there.
+is `at_bound`: the bound, not the data, holds it there.  `unfinished`: how
+many of its starts ended on their iteration limit, not converged (the
+L-BFGS-B's, the least squares', the short DE's polish: fit.de.de_fit
+L-BFGS-B LIMITS); such an end is where the fit was cut, not a minimum.
 
 run_multistart(workers > 1) runs the starts in that many 'spawn' processes;
 cancelled() is polled between starts (at every cost evaluation with one
@@ -33,8 +36,8 @@ evaluated), 'polish' after each iteration of its
 polish (maxiter None), 'lbfgs' after each L-BFGS-B iteration, 'lsq' after
 each least-squares iteration, at most every
 PROGRESS_EVERY s per start besides 'begin', each generation's end and the
-polish's first; then 'done' (best: its end cost, u: its end point) once
-its end is in.
+polish's first; then 'done' (best: its end cost, u: its end point,
+limited: whether it ended on its iteration limit) once its end is in.
 'best' is the lowest cost of the start so far (None before any).  A
 start's reports may arrive after its 'done'.
 """
@@ -48,7 +51,8 @@ import numpy as np
 from scipy.optimize import minimize
 from scipy.stats import qmc
 
-from fit.de.de_fit import FitCancelled, run_de, run_lsq
+from fit.de.de_fit import (LIMIT, FitCancelled, lbfgs_limited,
+                           lbfgs_options, run_de, run_lsq)
 
 METHODS = ('lbfgs', 'lsq', 'de')
 EDGE = 0.005              # normalised distance from a bound: on it
@@ -93,7 +97,8 @@ def starting_points(problem, n_starts, seed=None):
 
 
 class _Local:
-    """One local fit from (k, u0) -> (k, u, cost); picklable."""
+    """One local fit from (k, u0) -> (k, u, cost, whether it ended on
+    its iteration limit); picklable."""
 
     def __init__(self, problem, method, seed, de_options, cancelled=None,
                  progress=None):
@@ -126,14 +131,15 @@ class _Local:
         return self.problem(u)
 
     def _lsq(self, k, u0):
-        """The 'lsq' local fit of start k from u0: its end, normalised."""
+        """The 'lsq' local fit of start k from u0: its end, normalised,
+        and whether it ended on its iteration limit."""
         x, _, _, msg = run_lsq(
             self.problem, maxiter=LSQ_MAXITER, cancelled=self.cancelled,
             x0=u0, status=lambda info: self._report(
                 k, 'lsq', info['iteration'], info['maxiter'], info['best']))
         if msg == 'stopped':
             raise FitCancelled
-        return self.problem.to_u(x)
+        return self.problem.to_u(x), LIMIT in str(msg)
 
     def __call__(self, item):
         k, u0 = item
@@ -147,12 +153,12 @@ class _Local:
                              intermediate_result.fun)
             r = minimize(self._cost, u0, method='L-BFGS-B',
                          bounds=[(0.0, 1.0)] * len(u0), callback=cb,
-                         options={'maxiter': LBFGS_MAXITER})
+                         options=lbfgs_options(LBFGS_MAXITER, len(u0)))
             u = np.clip(r.x, 0.0, 1.0)
-            return k, u, float(self.problem(u))
+            return k, u, float(self.problem(u)), lbfgs_limited(r)
         if self.method == 'lsq':
-            u = self._lsq(k, u0)
-            return k, u, float(self.problem(u))
+            u, limited = self._lsq(k, u0)
+            return k, u, float(self.problem(u)), limited
         opts = dict(dict(maxiter=100, polish=True), **self.de_options)
         # scipy's population: popsize x d, a power of 2 for Sobol
         size = opts.get('popsize', 15) * len(u0)
@@ -190,23 +196,26 @@ class _Local:
             seed=None if self.seed is None else self.seed + k, **opts)
         if msg == 'stopped':
             raise FitCancelled
-        return k, self.problem.to_u(x), float(cost)
+        return k, self.problem.to_u(x), float(cost), LIMIT in str(msg)
 
 
 def merge(problem, ends):
-    """Distinct minima of ends [(start k, u, cost)] (see MINIMA)."""
+    """Distinct minima of ends [(start k, u, cost)], or [(k, u, cost,
+    whether it ended on its iteration limit)] (see MINIMA)."""
     out = []
-    for k, u, cost in sorted(ends, key=lambda e: e[2]):
+    for k, u, cost, *limited in sorted(ends, key=lambda e: e[2]):
+        limited = bool(limited and limited[0])
         for m in out:
             if np.max(np.abs(u - m['u'])) < MERGE_U and \
                     abs(cost - m['chi2']) < MERGE_COST:
                 m['hits'] += 1
+                m['unfinished'] += limited
                 m['from_current'] |= k == 0
                 break
         else:
             out.append(dict(chi2=cost, x=problem.to_x(u), u=np.array(u),
                             hits=1, at_bound=(u < EDGE) | (u > 1 - EDGE),
-                            from_current=k == 0))
+                            from_current=k == 0, unfinished=int(limited)))
     return out
 
 
@@ -215,7 +224,7 @@ def run_multistart(problem, n_starts=24, method='lbfgs', seed=None,
                    callback=None, progress=None):
     """Local fits from the current values and n_starts Sobol points:
     [{'chi2' (the cost), 'x' (physical), 'u', 'hits', 'at_bound' (bool per
-    parameter), 'from_current'}], best first.  callback(done, total) after
+    parameter), 'from_current', 'unfinished'}], best first.  callback(done, total) after
     each start; progress(info): see PROGRESS."""
     if method not in METHODS:
         raise ValueError('method must be one of %s' % ', '.join(METHODS))
@@ -226,7 +235,8 @@ def run_multistart(problem, n_starts=24, method='lbfgs', seed=None,
         ends.append(end)
         if progress is not None:
             progress(dict(start=end[0], phase='done', step=None,
-                          maxiter=None, best=end[2], u=end[1]))
+                          maxiter=None, best=end[2], u=end[1],
+                          limited=end[3]))
         if callback is not None:
             callback(len(ends), len(items))
     if workers > 1:

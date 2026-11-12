@@ -581,3 +581,73 @@ def test_live_dataset_per_model():
     exp.tree.setCurrentItem(exp.tree.topLevelItem(len(exp.sets) - 1))
     exp.remove_selected()
     assert len(live()) == 2
+
+
+def test_saved_joint_of_models_with_other_parameter_counts():
+    """A joint fit whose datasets do not fit the same number of parameters
+    is saved and read back (fit.saved; its fixed values are one row per
+    dataset, of different lengths)."""
+    from fit.saved import problem_from_state, problem_state
+    a, b = stack(), stack()
+    b.layers[1].fit['MSLD_rho']['vary'] = False
+    jp = JointProblem([('A', FitProblem(a, data(RHO['A']), 'chi2')),
+                       ('B', FitProblem(b, data(RHO['B']), 'chi2'))],
+                      {'A': {'Fe.MSLD_rho': 'own'}})
+    assert [len(p.params) for p in jp.parts] == [2, 1]
+    back = problem_from_state(problem_state(jp))
+    assert back.names == jp.names
+    for u in (jp.x0(), np.full(len(jp.names), 0.3)):
+        assert back(u) == jp(u)
+    # the rows given as they are, and one row for all
+    again = JointProblem([(n, p) for n, p in zip(jp.part_names, jp.parts)],
+                         jp.modes, [list(f) for f in jp.fixed])
+    assert again(jp.x0()) == jp(jp.x0())
+    same = joint()
+    one = JointProblem([(n, p) for n, p in zip(same.part_names, same.parts)],
+                       None, list(same.fixed[0]))
+    assert one(same.x0()) == same(same.x0())
+
+
+def test_renamed_dataset_stays_the_one_fitted():
+    """Renaming the dataset shown in the Dataset box keeps it chosen (the
+    box used to fall back to the first dataset)."""
+    from PyQt6 import QtCore
+    sim, exp = gui()
+    exp.fit_set.setCurrentIndex(exp.fit_set.findText('B'))
+    exp.tree.topLevelItem(1).setText(0, 'B2')          # itemChanged
+    QtCore.QTimer.singleShot(50, APP[-1].quit)
+    APP[-1].exec()
+    assert [s['name'] for s in exp.sets][:2] == ['A', 'B2']
+    assert exp.fit_set.currentText() == 'B2'
+    assert [s['name'] for s in exp._fit_sets()] == ['B2']
+
+
+def test_error_floor_in_the_session(tmp_path):
+    """The Error floor box is saved with the fit settings; a session from
+    before it was saved opens with the floor off."""
+    sim, exp = gui()
+    exp.fit_floor.setValue(5.0)
+    state = exp.session_state(str(tmp_path))
+    assert state['fit']['floor'] == 5.0
+    exp.fit_floor.setValue(0.0)
+    exp.restore_state(state, str(tmp_path))
+    assert exp.fit_floor.value() == 5.0
+    del state['fit']['floor']
+    exp.restore_state(state, str(tmp_path))
+    assert exp.fit_floor.value() == 0.0
+
+
+def test_file_reference_on_another_drive(monkeypatch):
+    """A data file on another drive than the session folder (no relative
+    path exists): the reference holds the absolute path twice, and is
+    found again."""
+    import os
+    from tabs import experimental as E
+
+    def relpath(path, start):
+        raise ValueError("path is on mount 'D:', start on mount 'C:'")
+    monkeypatch.setattr(os.path, 'relpath', relpath)
+    here = os.path.abspath(__file__)
+    ref = E.file_ref(here, os.path.dirname(here))
+    assert ref == {'path': here, 'relative': here}
+    assert E.find_file(ref, 'elsewhere') == here

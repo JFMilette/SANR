@@ -24,7 +24,11 @@ region at x_o, the measured data (TSNPE, Deistler et al. 2022): the region
 estimated from SUPPORT_SAMPLES samples (as sbi's get_density_thresholder,
 without its progress bar), and the network is trained on every round so far
 with the plain maximum-likelihood loss (force_first_round_loss), which the
-truncation leaves unbiased.  The truncated prior is drawn by rejection from the
+truncation leaves unbiased.  Each simulation is in the training or the
+validation set for good (_fixed_split): sbi 0.27 draws a new split of all
+the rounds' simulations every round, which put draws the network had
+already been trained on in the next round's validation set, and its
+early stopping then saw an optimistic validation loss.  The truncated prior is drawn by rejection from the
 prior while at least PRIOR_ACCEPT of its draws are kept; below that (sharp
 posteriors in many dimensions) by importance resampling from a defensive
 envelope: ENVELOPE_PRIOR of the prior and the rest the posterior q itself,
@@ -93,6 +97,7 @@ ENVELOPE_PRIOR = 0.3
 SUPPORT_SAMPLES = 100_000       # posterior samples for the threshold
 CHUNK = 100_000                 # rows of one log q evaluation
 SBC_PASS = 0.05
+SBC_CHUNK = 50          # calibration draws between two looks at Stop
 FORMAT = 'sanr-npe-1'
 # sbi / nflows warnings that say nothing here: the features of draws whose
 # critical edge crosses a low-Q point are far from the others (asinh keeps
@@ -364,7 +369,10 @@ class NPEResult:
 
     def check(self, problem):
         """ValueError unless problem (a PosteriorProblem, or a FitProblem
-        or JointProblem) has these names, bounds and data."""
+        or JointProblem) has these names, bounds and data, and its model
+        the one the network was trained on (model_hash: the fixed values,
+        the Q points and channels, the resolution, ...; a network saved
+        before the hash was stored is not checked for it)."""
         from fit.dream.dream_fit import data_hash
         sim = Simulator(problem)
         if sim.names != list(self.names):
@@ -375,6 +383,12 @@ class NPEResult:
                                             self.meta['hi'], sim.lo, sim.hi))
         if data_hash(sim.posterior) != self.meta['data_hash']:
             raise ValueError('the network was trained on other data')
+        if 'model_hash' in self.meta and \
+                model_hash(sim.posterior.fit) != self.meta['model_hash']:
+            raise ValueError(
+                'the network was trained on another model: the fitted '
+                'parameters are the same, but not the values kept fixed, '
+                'the Q points, the channels or the resolution')
 
     def posterior_problem(self):
         """The PosteriorProblem it was trained for, rebuilt from the
@@ -383,6 +397,37 @@ class NPEResult:
         from fit.saved import problem_from_state
         return PosteriorProblem(problem_from_state(self.meta['problem']),
                                 **self.meta.get('noise', {}))
+
+
+def model_hash(fit):
+    """A hash of fit problem `fit` (fit.saved.problem_state: its stack with
+    every value, kept fixed or not, at the start, its channels, Q points
+    and Licorne grid, resolution, cost and target) that is the same for
+    the same model whatever the values it was last evaluated at."""
+    import hashlib
+    from fit.saved import problem_state
+    d = problem_state(fit)
+    text = json.dumps(_drop_fitted(d), sort_keys=True, default=_plain)
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _drop_fitted(d):
+    """problem_state d without the names of the model and dataset (a
+    rename does not change the model) and with the fitted parameters at 0
+    (where a fit starts from is no part of the model; the values kept
+    fixed are)."""
+    if 'parts' in d:
+        return dict(d, parts=[[n, _drop_fitted(p)] for n, p in d['parts']],
+                    fixed=None)
+    import warnings
+    from fit.saved import problem_from_state, problem_state, stack_state
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        p = problem_from_state(d)       # its data as a saved problem has it
+    out = problem_state(p)
+    for i, attr, *_ in p.params:
+        setattr(p.stack.owner(i), attr, 0.0)
+    return dict(out, model=None, dataset=None, stack=stack_state(p.stack))
 
 
 def _names_differ(trained, now):
@@ -491,6 +536,7 @@ def train(simulator, *, rounds=5, sims_per_round=20_000, truncation=True,
         embedding_net=embedding_net(len(x_o), *embedding), **flow)
     inference = NPE(prior=prior, density_estimator=builder,
                     show_progress_bars=False, tracker=_NoTracker())
+    _fixed_split(inference)
     opts = dict(training or {})
     opts['force_first_round_loss'] = True
     patience = opts.get('stop_after_epochs', 20)    # sbi's default
@@ -523,7 +569,7 @@ def train(simulator, *, rounds=5, sims_per_round=20_000, truncation=True,
     opts['dataloader_kwargs'] = dict(opts.get('dataloader_kwargs') or {},
                                      collate_fn=collate)
     meta = dict(names=list(full.names), lo=full.lo, hi=full.hi,
-                data_hash=data_hash(full),
+                data_hash=data_hash(full), model_hash=model_hash(full.fit),
                 noise=dict(sigma_free=full.sigma_free,
                            floor_free=full.floor_free),
                 problem=problem_state(full.fit), coarse=coarse,
@@ -576,6 +622,34 @@ def train(simulator, *, rounds=5, sims_per_round=20_000, truncation=True,
     return NPEResult(networks, prior, x_o, meta)
 
 
+def _fixed_split(inference):
+    """Make inference (an sbi NPE) keep each simulation in the training or
+    the validation set it was put in the first time (see ROUNDS): only the
+    simulations appended since are split, in the fraction asked."""
+    own = inference.get_dataloaders
+    split = {'val': torch.zeros(0, dtype=torch.bool)}
+
+    def get_dataloaders(starting_round=0, training_batch_size=200,
+                        validation_fraction=0.1, resume_training=False,
+                        dataloader_kwargs=None):
+        if not resume_training:
+            n = inference.get_simulations(starting_round)[0].size(0)
+            old = split['val']
+            new = n - len(old)
+            if new < 0:                    # fewer than before: start over
+                old, new = old[:0], n
+            fresh = torch.zeros(new, dtype=torch.bool)
+            n_val = new - int((1 - validation_fraction) * new)
+            fresh[torch.randperm(new)[:n_val]] = True
+            split['val'] = torch.cat([old, fresh])
+            idx = torch.arange(n)
+            inference.train_indices = idx[~split['val']]
+            inference.val_indices = idx[split['val']]
+        return own(starting_round, training_batch_size, validation_fraction,
+                   True, dataloader_kwargs)
+    inference.get_dataloaders = get_dataloaders
+
+
 def run_npe(problem, *, coarse=True, threshold=None, fidelity_draws=100,
             seed=None, n_workers=1, callback=None, cancelled=None, **kw):
     """choose_coarse (when `coarse`), then train on the chosen simulator:
@@ -606,20 +680,32 @@ def run_npe(problem, *, coarse=True, threshold=None, fidelity_draws=100,
 
 @quiet
 def calibrate(result, simulator, n=300, n_posterior=500, round=0, seed=None,
-              n_workers=1):
+              n_workers=1, cancelled=None):
     """Simulation-based calibration of a round's network (see
     CALIBRATION): {'round', 'n', 'ks_pvals' [per parameter], 'c2st_ranks',
-    'c2st_dap', 'passed'}; stored in result.meta['calibration']."""
+    'c2st_dap', 'passed'}; stored in result.meta['calibration'].
+    cancelled() True stops it (RuntimeError 'stopped'): asked while the
+    draws are simulated and between chunks of the posterior samples."""
+    stop = cancelled or (lambda: False)
     rng = np.random.default_rng(seed)
     if seed is not None:
         torch.manual_seed(seed)
     u = simulator.prior.sample(n, rng)
-    u, x = simulator.draw(u, rng, n_workers=n_workers)
+    u, x = simulator.draw(u, rng, n_workers=n_workers, cancelled=stop)
+    if stop():
+        raise RuntimeError('stopped')
     theta = torch.as_tensor(to_theta(u), dtype=torch.float32)
     post = DirectPosterior(result.networks[round], result.prior)
-    ranks, dap = run_sbc(theta, torch.as_tensor(x), post,
-                         num_posterior_samples=n_posterior,
-                         show_progress_bar=False)
+    X = torch.as_tensor(x)
+    parts = []
+    for i in range(0, len(theta), SBC_CHUNK):     # a stop between chunks
+        if stop():
+            raise RuntimeError('stopped')
+        parts.append(run_sbc(theta[i:i + SBC_CHUNK], X[i:i + SBC_CHUNK],
+                             post, num_posterior_samples=n_posterior,
+                             show_progress_bar=False))
+    ranks = torch.cat([r for r, _ in parts])
+    dap = torch.cat([a for _, a in parts])
     check = check_sbc(ranks, theta, dap, num_posterior_samples=n_posterior)
     ks = check['ks_pvals'].numpy().astype(float)
     out = dict(round=round + 1, n=len(u), ks_pvals=ks.tolist(),

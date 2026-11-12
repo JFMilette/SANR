@@ -38,7 +38,10 @@ the MAP (the best state visited) or one chain's best kept state;
 "Apply ±σ to bounds" sets Min / Max of every sampled parameter there to
 median -/+ k sigma (16 / 84 % widths); in a joint fit both write the
 values as the dataset chosen beside them sees them.  "Save chains..."
-writes the run with fit.dream.dream_fit.save_result.
+writes the run with fit.dream.dream_fit.save_result.  Continue (with the
+"+ gen." box beside it) runs that many more generations of an ended run
+(stopped, converged or done; not one reopened from a session), as if it
+had never stopped.
 """
 
 import base64
@@ -54,6 +57,8 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+from fit.dream.dream import kept_from
+from session_file import sessions_dir
 from fit.dream.dream_fit import (FLOOR_NAME, SIGMA_NAME, chain_best,
                          chain_chi2, chain_curves,
                          chains_split, format_summary, load_run,
@@ -66,9 +71,8 @@ import style
 from tabs.simulation import (PARAM_DISPLAY, PROFILE_QUANTITIES, Crosshair,
                              fmt, shown_names)
 
-# where saved chains go, with the sessions (sessions/ of the repo)
-SESSIONS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)))), 'sessions')
+# where saved chains go, with the sessions (session_file.sessions_dir)
+SESSIONS_DIR = sessions_dir()
 
 OK, BAD = '#4ade80', '#f87171'
 PROGRESS_EVERY = 0.2                     # s between progress signals
@@ -219,7 +223,10 @@ class DreamThread(QtCore.QThread):
             if last['X'] is not None:
                 moved.append(np.mean(np.any(X != last['X'], axis=1)))
             last['X'] = X
-            if rhat is not None and rhat is not rh['last']:   # a new R-hat
+            # a new R-hat (a continued run's first is a copy of the last)
+            if rhat is not None and rhat is not rh['last'] and not (
+                    rh['last'] is not None
+                    and np.array_equal(rhat, rh['last'])):
                 rh['last'] = rhat
                 rh['g'].append(t)
                 rh['r'].append(float(np.max(rhat)))
@@ -245,6 +252,7 @@ class DreamThread(QtCore.QThread):
 
         try:
             self.result = sample(self.problem, callback=callback,
+                                 cancelled=lambda: self._stop,
                                  **self.options)
         except Exception as exc:              # report, don't kill the app
             msg = 'stopped' if self._stop else \
@@ -376,7 +384,7 @@ class TracePanel(QtWidgets.QWidget):
                 c.setData([], [])
         self.p.setLabel('left', label)
         # kept samples: after the adaptation phase and the first half
-        keep = g >= max(self.adapt_until, g[-1] / 2)
+        keep = g >= kept_from(g, self.adapt_until)
         vals = Y[keep].ravel()
         vals = vals[np.isfinite(vals)]
         if self.bars is not None:
@@ -579,9 +587,10 @@ class CornerPanel(QtWidgets.QWidget):
     def set_result(self, result, infos, discard=0.5):
         """The posterior samples of a finished run."""
         s = result.samples(discard)
-        g0 = discard * result.generations[-1] if discard < 1 else discard
         self.set_samples(s, infos, 'Final: %d samples, from generation %d '
-                         'on.' % (len(s), max(g0, result.adapt_until)))
+                         'on.' % (len(s), kept_from(
+                             result.generations, result.adapt_until,
+                             discard)))
 
     def set_samples(self, s, infos, note):
         """Samples s (M, d) in stored units; `note` above the plots.  The
@@ -981,11 +990,24 @@ class DreamWindow(QtWidgets.QWidget):
         self.btn_stop = QtWidgets.QPushButton('Stop')
         self.btn_stop.setToolTip('Stop and keep the generations done so far')
         self.btn_stop.clicked.connect(self.stopRequested)
+        # how many more generations Continue runs (set to what a stopped
+        # run had left when it ends)
+        self.continue_gen = QtWidgets.QSpinBox()
+        self.continue_gen.setRange(100, 1_000_000)
+        self.continue_gen.setSingleStep(1000)
+        self.continue_gen.setValue(10000)
+        self.continue_gen.setPrefix('+ ')
+        self.continue_gen.setSuffix(' gen.')
+        self.continue_gen.setToolTip(
+            'Generations Continue adds to the ended run (all of them: '
+            '"stop when converged" does not cut them short)')
+        self.continue_gen.setEnabled(False)
         self.btn_continue = QtWidgets.QPushButton('Continue')
         self.btn_continue.clicked.connect(self.continueRequested)
         self.btn_continue.setEnabled(False)
         top = QtWidgets.QHBoxLayout()
         top.addWidget(self.bar, 1)
+        top.addWidget(self.continue_gen)
         top.addWidget(self.btn_continue)
         top.addWidget(self.btn_stop)
 
@@ -1141,7 +1163,7 @@ class DreamWindow(QtWidgets.QWidget):
         self.btn_stop.setEnabled(True)
         for b in (self.btn_save, self.btn_map,
                   self.btn_bounds,
-                  self.btn_continue):
+                  self.btn_continue, self.continue_gen):
             b.setEnabled(False)
         self.send_from.clear()
         self._send_states = []
@@ -1168,7 +1190,7 @@ class DreamWindow(QtWidgets.QWidget):
         self.btn_stop.setEnabled(True)
         for b in (self.btn_save, self.btn_map,
                   self.btn_bounds,
-                  self.btn_continue):
+                  self.btn_continue, self.continue_gen):
             b.setEnabled(False)
 
     def show_loaded(self, result, problem, header, sources=(), datasets=(),
@@ -1209,6 +1231,7 @@ class DreamWindow(QtWidgets.QWidget):
         self.setWindowTitle(d['title'])
         self.tab_name = d['tab_name']
         self.btn_continue.setEnabled(False)
+        self.continue_gen.setEnabled(False)
         self.btn_continue.setToolTip('A run reopened from a session cannot '
                                      'be continued')
 
@@ -1250,7 +1273,7 @@ class DreamWindow(QtWidgets.QWidget):
             return
         gens, X = self._live
         adapt = self.trace.adapt_until
-        keep = gens >= max(adapt, gens[-1] / 2)
+        keep = gens >= kept_from(gens, adapt)
         page = self.pages['Corner']
         if keep.sum() < 2 or gens[-1] <= adapt:
             page.widget(0).setText(
@@ -1289,12 +1312,17 @@ class DreamWindow(QtWidgets.QWidget):
                                                               1.2))
         self.btn_save.setEnabled(True)
         st = result.state or {}
-        can = bool(st.get('cancelled')) and st.get('n_gen', 0) > st['t']
+        can = bool(st)
+        if can and st.get('cancelled') and st.get('n_gen', 0) > st['t']:
+            # a run stopped with Stop: by default, what it had left
+            self.continue_gen.setValue(int(st['n_gen'] - st['t']))
         self.btn_continue.setEnabled(can)
+        self.continue_gen.setEnabled(can)
         self.btn_continue.setToolTip(
-            'Go on with this stopped run up to the %d generations it was '
-            'started with, as if it had never stopped' % st['n_gen'] if can
-            else 'Only a run stopped with Stop can be continued')
+            'Run the generations set beside it more, from where this run '
+            'ended, as if it had never stopped (the same chains and archive, '
+            'no new adaptation phase)' if can
+            else 'This run has no sampler state: it cannot be continued')
         if last <= result.adapt_until:
             msg = ('Stopped within the adaptation phase (the first %d '
                    'generations): no posterior sample.' % result.adapt_until)
@@ -1355,8 +1383,10 @@ class DreamWindow(QtWidgets.QWidget):
         target = float((result.state or {}).get('rhat_target', 1.2))
         best = chain_best(result)
         chi2 = chain_chi2(result, problem)
-        warn = posterior_warnings(result, problem.bounds, rhat_max=target,
-                                  problem=problem, chi2=chi2)
+        warn = posterior_warnings(
+            result, problem.bounds, rhat_max=target, problem=problem,
+            chi2=chi2,
+            ess_min=float((result.state or {}).get('ess_target', 0)))
         x_map = result.best()[0]
         # each parameter's median over the kept samples, as in the Summary
         x_med = np.median(result.samples(), axis=0)

@@ -241,6 +241,16 @@ def test_de_start():
                  de_options=dict(maxiter=30))
     # every chain starts at a DE population member: near the optimum
     assert np.all(np.abs(res.chains[0][:, 0] - 80.0) < 5.0)
+    # Stop reaches the DE fit of the start (it used to run to its end)
+    calls = [0]
+
+    def cancelled():
+        calls[0] += 1
+        return calls[0] > 20
+    with pytest.raises(RuntimeError, match='DE start was stopped'):
+        sample(pp, **OLD, n_gen=200, seed=0, x0='de', cancelled=cancelled,
+               de_options=dict(maxiter=30))
+    assert calls[0] < 40
 
 
 def test_load_run_rebuilds_the_problem(tmp_path):

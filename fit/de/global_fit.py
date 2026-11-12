@@ -51,7 +51,7 @@ import time
 import numpy as np
 from scipy.optimize import basinhopping, direct, dual_annealing, shgo
 
-from fit.de.de_fit import FitCancelled, _Cost, _PoolMap
+from fit.de.de_fit import FitCancelled, _Cost, _PoolMap, _stopped
 
 METHODS = ('basinhopping', 'direct', 'shgo', 'dual_annealing')
 LABELS = {'basinhopping': 'Basin hopping', 'direct': 'DIRECT',
@@ -184,7 +184,8 @@ def run_global(problem, method, callback=None, status=None, cancelled=None,
                 callback=lambda x, f, context: entry(x, f))
     except FitCancelled:
         u, c = cost.best
-        return problem.to_x(u), float(c), step[0], 'stopped'
+        return _stopped(problem, [problem.to_x(u0 if u is None else u),
+                                  None if u is None else float(c), step[0]])
     finally:
         if pool is not None:
             pool.close()

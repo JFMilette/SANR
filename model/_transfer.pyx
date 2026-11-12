@@ -69,10 +69,75 @@ cdef inline void _chan(cplx S, double d, cplx *c, cplx *sS,
         sdS[0] = sh*S.conjugate() / n2
 
 
-cdef void _general(const cplx[::1] nsld, const double[::1] rho,
-                   const double[::1] theta, const double[::1] d,
-                   const cplx[::1] Q, cplx[:, :, ::1] out) noexcept nogil:
-    cdef Py_ssize_t nS = nsld.shape[0], k, s, i, j
+cdef inline void _step(cplx *a, cplx c, cplx sS, cplx sdS) noexcept nogil:
+    """a <- [[c, sdS], [sS, c]] a for a 2x2 channel product a."""
+    cdef cplx t0 = c*a[0] + sdS*a[2], t1 = c*a[1] + sdS*a[3]
+    a[2] = sS*a[0] + c*a[2]
+    a[3] = sS*a[1] + c*a[3]
+    a[0] = t0
+    a[1] = t1
+
+
+cdef void _collinear_run(const cplx[::1] nsld, const double[::1] rho,
+                         const double[::1] d, Py_ssize_t s0, Py_ssize_t s1,
+                         const cplx[::1] Q, const cplx[:, ::1] src,
+                         cplx[:, ::1] dst, bint fresh) noexcept nogil:
+    """The two channel products (see COLLINEAR) over the slabs s0 <= s < s1,
+    rho signed along the common axis, started from the identity (fresh) or
+    from src[k] (a then b, 8 numbers per Q), left in dst[k]."""
+    cdef Py_ssize_t k, s, i
+    cdef double fp = 4*M_PI
+    cdef cplx q2, c, sS, sdS
+    cdef cplx a[4]
+    cdef cplx b[4]
+    for k in range(Q.shape[0]):
+        q2 = Q[k]*Q[k] / 4
+        if fresh:
+            a[0] = 1; a[1] = 0; a[2] = 0; a[3] = 1
+            b[0] = 1; b[1] = 0; b[2] = 0; b[3] = 1
+        else:
+            for i in range(4):
+                a[i] = src[k, i]
+                b[i] = src[k, 4 + i]
+        for s in range(s0, s1):
+            _chan(_csqrt(fp*(nsld[s] + rho[s]) - q2), d[s], &c, &sS, &sdS)
+            _step(a, c, sS, sdS)
+            if rho[s] != 0:
+                _chan(_csqrt(fp*(nsld[s] - rho[s]) - q2), d[s], &c, &sS, &sdS)
+            _step(b, c, sS, sdS)
+        for i in range(4):
+            dst[k, i] = a[i]
+            dst[k, 4 + i] = b[i]
+
+
+cdef void _collinear_out(const cplx[:, ::1] st, double theta,
+                         cplx[:, :, ::1] out) noexcept nogil:
+    """The 4x4 of the channel products st (_collinear_run), the axis at
+    angle theta."""
+    cdef Py_ssize_t k, i, j
+    cdef double ang = 2*M_PI*theta
+    cdef cplx m = cos(ang) + 1j*sin(ang), mc = m.conjugate()
+    cdef cplx al, be
+    for k in range(st.shape[0]):
+        for i in range(2):
+            for j in range(2):
+                al = 0.5*(st[k, 2*i + j] + st[k, 4 + 2*i + j])
+                be = 0.5*(st[k, 2*i + j] - st[k, 4 + 2*i + j])
+                out[k, 2*i, 2*j] = al
+                out[k, 2*i, 2*j + 1] = mc*be
+                out[k, 2*i + 1, 2*j] = m*be
+                out[k, 2*i + 1, 2*j + 1] = al
+
+
+cdef void _general_run(const cplx[::1] nsld, const double[::1] rho,
+                       const double[::1] theta, const double[::1] d,
+                       Py_ssize_t s0, Py_ssize_t s1, const cplx[::1] Q,
+                       const cplx[:, ::1] src, cplx[:, ::1] dst,
+                       bint fresh) noexcept nogil:
+    """The 4x4 product over the slabs s0 <= s < s1 (any angles), started
+    from the identity (fresh) or from src[k] (16 numbers per Q), left in
+    dst[k]."""
+    cdef Py_ssize_t k, s, i, j
     cdef double fp = 4*M_PI, ang
     cdef cplx q2, m, mc, c1, sS1, s1S, c3, sS3, s3S
     cdef cplx cp, cm, sp, sm, tp, tm
@@ -81,9 +146,13 @@ cdef void _general(const cplx[::1] nsld, const double[::1] rho,
     cdef cplx T[16]
     for k in range(Q.shape[0]):
         q2 = Q[k]*Q[k] / 4
-        for i in range(16):
-            P[i] = 1 if i % 5 == 0 else 0
-        for s in range(nS):
+        if fresh:
+            for i in range(16):
+                P[i] = 1 if i % 5 == 0 else 0
+        else:
+            for i in range(16):
+                P[i] = src[k, i]
+        for s in range(s0, s1):
             _chan(_csqrt(fp*(nsld[s] + rho[s]) - q2), d[s], &c1, &sS1, &s1S)
             _chan(_csqrt(fp*(nsld[s] - rho[s]) - q2), d[s], &c3, &sS3, &s3S)
             ang = 2*M_PI*theta[s]
@@ -106,49 +175,8 @@ cdef void _general(const cplx[::1] nsld, const double[::1] rho,
                                   + A[4*i + 3]*P[12 + j])
             for i in range(16):
                 P[i] = T[i]
-        for i in range(4):
-            for j in range(4):
-                out[k, i, j] = P[4*i + j]
-
-
-cdef inline void _step(cplx *a, cplx c, cplx sS, cplx sdS) noexcept nogil:
-    """a <- [[c, sdS], [sS, c]] a for a 2x2 channel product a."""
-    cdef cplx t0 = c*a[0] + sdS*a[2], t1 = c*a[1] + sdS*a[3]
-    a[2] = sS*a[0] + c*a[2]
-    a[3] = sS*a[1] + c*a[3]
-    a[0] = t0
-    a[1] = t1
-
-
-cdef void _collinear(const cplx[::1] nsld, const double[::1] rho, double theta,
-                     const double[::1] d, const cplx[::1] Q,
-                     cplx[:, :, ::1] out) noexcept nogil:
-    """rho signed along the common axis at angle theta (see COLLINEAR)."""
-    cdef Py_ssize_t nS = nsld.shape[0], k, s, i, j
-    cdef double fp = 4*M_PI, ang = 2*M_PI*theta
-    cdef cplx m = cos(ang) + 1j*sin(ang), mc = m.conjugate()
-    cdef cplx q2, c, sS, sdS, al, be
-    cdef cplx a[4]
-    cdef cplx b[4]
-    for k in range(Q.shape[0]):
-        q2 = Q[k]*Q[k] / 4
-        a[0] = 1; a[1] = 0; a[2] = 0; a[3] = 1
-        b[0] = 1; b[1] = 0; b[2] = 0; b[3] = 1
-        for s in range(nS):
-            _chan(_csqrt(fp*(nsld[s] + rho[s]) - q2), d[s], &c, &sS, &sdS)
-            _step(a, c, sS, sdS)
-            if rho[s] != 0:
-                _chan(_csqrt(fp*(nsld[s] - rho[s]) - q2), d[s], &c, &sS, &sdS)
-            _step(b, c, sS, sdS)
-        # block (i, j) of the 4x4: al I + be J
-        for i in range(2):
-            for j in range(2):
-                al = 0.5*(a[2*i + j] + b[2*i + j])
-                be = 0.5*(a[2*i + j] - b[2*i + j])
-                out[k, 2*i, 2*j] = al
-                out[k, 2*i, 2*j + 1] = mc*be
-                out[k, 2*i + 1, 2*j] = m*be
-                out[k, 2*i + 1, 2*j + 1] = al
+        for i in range(16):
+            dst[k, i] = P[i]
 
 
 def axis(rho, theta):
@@ -176,16 +204,99 @@ def product(nsld, rho, theta, d, Q):
     cdef const cplx[::1] q = np.ascontiguousarray(Q, dtype=np.complex128)
     cdef const double[::1] r
     cdef double angle
-    out = np.empty((q.shape[0], 4, 4), dtype=np.complex128)
-    cdef cplx[:, :, ::1] o = out
+    cdef Py_ssize_t nS = n.shape[0], nQ = q.shape[0]
+    cdef cplx[:, ::1] w
+    cdef cplx[:, :, ::1] o
     col = axis(rho, theta)
     if col is None:
         r = np.ascontiguousarray(rho, dtype=float)
+        work = np.empty((nQ, 16), dtype=np.complex128)
+        w = work
         with nogil:
-            _general(n, r, t, th, q, o)
-    else:
-        r = np.ascontiguousarray(col[1], dtype=float)
-        angle = col[0]
+            _general_run(n, r, t, th, 0, nS, q, w, w, True)
+        return work.reshape(nQ, 4, 4)
+    r = np.ascontiguousarray(col[1], dtype=float)
+    angle = col[0]
+    work = np.empty((nQ, 8), dtype=np.complex128)
+    out = np.empty((nQ, 4, 4), dtype=np.complex128)
+    w = work
+    o = out
+    with nogil:
+        _collinear_run(n, r, th, 0, nS, q, w, w, True)
+        _collinear_out(w, angle, o)
+    return out
+
+
+def _shared(first, other):
+    """Number of leading slabs `other` has exactly as `first` (tuples of
+    arrays, one entry per slab)."""
+    n = min(len(first[0]), len(other[0]))
+    for a, b in zip(first, other):
+        diff = np.flatnonzero(a[:n] != b[:n])
+        if diff.size:
+            n = int(diff[0])
+    return n
+
+
+def products(slabs, Q):
+    """[product(*s, Q) for s in slabs] for several slab sets (the
+    thickness-spread nodes: each a (nsld, rho, theta, d) as product takes
+    it), the slabs they all start with -- everything above the first slab
+    that differs -- multiplied once instead of once per set.  Each matrix
+    is the one product returns: the same operations in the same order,
+    continued from the shared part's result."""
+    cdef const cplx[::1] q = np.ascontiguousarray(Q, dtype=np.complex128)
+    cdef const cplx[::1] n
+    cdef const double[::1] r, t, th
+    cdef Py_ssize_t nQ = q.shape[0], L, nS
+    cdef double angle
+    cdef bint fresh, collinear
+    cdef cplx[:, ::1] p, w
+    cdef cplx[:, :, ::1] o
+    slabs = [tuple(s) for s in slabs]
+    cols = [axis(s[1], s[2]) for s in slabs]
+    collinear = all(c is not None for c in cols)
+    if len(slabs) < 2 or not (collinear
+                              or all(c is None for c in cols)):
+        return [product(*s, Q) for s in slabs]
+    sets = []
+    for s, c in zip(slabs, cols):
+        sets.append((np.ascontiguousarray(s[0], dtype=np.complex128),
+                     np.ascontiguousarray(s[1] if c is None else c[1],
+                                          dtype=float),
+                     np.ascontiguousarray(s[2], dtype=float),
+                     np.ascontiguousarray(s[3], dtype=float)))
+    # collinear: the channels only see the signed rho (the angle enters at
+    # the end), so theta need not agree for a slab to be shared
+    keys = [(s[0], s[1], s[3]) if collinear else s for s in sets]
+    L = min(_shared(keys[0], k) for k in keys[1:])
+    width = 8 if collinear else 16
+    pre = np.empty((nQ, width), dtype=np.complex128)
+    work = np.empty((nQ, width), dtype=np.complex128)
+    p = pre
+    w = work
+    fresh = L == 0
+    if L:
+        n, r, t, th = sets[0]
         with nogil:
-            _collinear(n, r, angle, th, q, o)
+            if collinear:
+                _collinear_run(n, r, th, 0, L, q, p, p, True)
+            else:
+                _general_run(n, r, t, th, 0, L, q, p, p, True)
+    out = []
+    for s, c in zip(sets, cols):
+        n, r, t, th = s
+        nS = n.shape[0]
+        if collinear:
+            M = np.empty((nQ, 4, 4), dtype=np.complex128)
+            o = M
+            angle = c[0]
+            with nogil:
+                _collinear_run(n, r, th, L, nS, q, p, w, fresh)
+                _collinear_out(w, angle, o)
+        else:
+            with nogil:
+                _general_run(n, r, t, th, L, nS, q, p, w, fresh)
+            M = work.reshape(nQ, 4, 4).copy()
+        out.append(M)
     return out

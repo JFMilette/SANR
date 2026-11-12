@@ -140,3 +140,47 @@ def test_two_modes_found():
     print('mode-2 weights', np.round(w, 3))
     assert np.all((w >= 0.05) & (w <= 0.95)), w
     assert abs(w.mean() - 0.70) <= 0.10, w
+
+
+def test_split_rhat_sees_drift():
+    """Chains that all drift the same way agree with each other, so the
+    classic R-hat is ~1; the split R-hat sees the drift."""
+    from dream import gelman_rubin, split_rhat
+    rng = np.random.default_rng(0)
+    n = 2000
+    good = rng.normal(size=(n, 4, 2))
+    drift = good + np.linspace(0, 3, n)[:, None, None]
+    assert split_rhat(good).max() < 1.01
+    assert gelman_rubin(drift).max() < 1.01 and split_rhat(drift).min() > 1.2
+
+
+def test_archive_pruned_at_end_of_adaptation():
+    """At adapt_until the archive keeps only the states archived in the
+    last archive_keep of the adaptation phase (no prior draws); z0's rows
+    stay; archive_keep None keeps everything."""
+    kw = dict(n_gen=200, n_chains=4, vectorized=True, seed=1,
+              adapt_until=200, archive_every=10)
+    r = dream(two_modes, [(0, 1)] * 10, **kw)
+    st = r.state
+    # events after generation 150: 160 .. 200, 4 rows each
+    assert st['m'] == 20 and st['archive_keep'] == 0.25
+    assert np.array_equal(st['Z'], np.concatenate(
+        [r.chains[r.generations == g][0] for g in range(160, 201, 10)]))
+    full = dream(two_modes, [(0, 1)] * 10, archive_keep=None, **kw)
+    assert full.state['m'] == 100 + 20 * 4
+    z0 = np.random.default_rng(2).uniform(0.2, 0.8, (30, 10))
+    zr = dream(two_modes, [(0, 1)] * 10, z0=z0, **kw)
+    assert zr.state['m'] == 30 + 20 and np.array_equal(zr.state['Z'][:30], z0)
+
+
+def test_stop_needs_ess():
+    """stop_when_converged stops once R-hat is below the target, but not
+    before the effective sample size reaches ess_target."""
+    kw = dict(n_gen=4000, n_chains=4, vectorized=True, seed=1,
+              stop_when_converged=True, rhat_target=1.2,
+              min_gen_after_converged=0)
+    f = lambda X: -0.5 * ((X - 0.5) / 0.1) ** 2 @ np.ones(2)   # noqa: E731
+    early = dream(f, [(0, 1)] * 2, **kw)
+    assert early.generations[-1] < 4000
+    never = dream(f, [(0, 1)] * 2, ess_target=1e9, **kw)
+    assert never.generations[-1] == 4000

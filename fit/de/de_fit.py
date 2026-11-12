@@ -21,16 +21,28 @@ is better and inside the bounds; unlike scipy, also when L-BFGS-B reports
 a failure (e.g. a line search that gives up): its cost is evaluated exactly
 at that point, so better is better (a Cr2Te3 run dropped 76.7 -> 57.6).
 
+L-BFGS-B LIMITS -- scipy's L-BFGS-B stops on maxiter iterations or on
+maxfun cost evaluations, 15000 by default, whichever comes first.  Without
+an analytic gradient every step of its line search costs a whole
+finite-difference gradient, n + 1 evaluations for n parameters, and an
+iteration takes one or more steps (about 1.2 on average, at most scipy's
+maxls = 20): a 62-parameter fit used the 15000 up in 200 iterations,
+whatever maxiter said, and ended unconverged.  Every L-BFGS-B run here
+(run_lbfgs, the DE polish, fit.multistart) is therefore given the maxfun
+no run of maxiter iterations can reach (lbfgs_maxfun): the iterations are
+the only limit, the one set in the GUI.  A run that ends on it says so
+(lbfgs_message, LIMIT); the DE polish takes polish_maxiter, the L-BFGS-B
+page's Max iter in the GUI.  (basin hopping's and dual annealing's local
+searches keep scipy's own limits: they run many of them.)
+
 CONTINUE -- run_de(state=d) keeps in the dict d, after every generation,
 the population ('population', normalised, best first), its costs
 ('energies') and the generation count ('generation'); run_de(resume=d)
 starts from that population instead of a new one (scipy's init), counting
 on from that generation: a stopped fit goes on where it was.  The scipy
 random state is not kept (a new seed draws the next generations), and the
-population's costs are evaluated again once.  run_de_restarts adds the run
-('run'), the generations of the runs before it ('done') and their ends
-('ends') to d, and resumes that run (from scratch if it was stopped
-before its first generation), then any runs left.
+population's costs are evaluated again once.  A fit stopped before its
+first generation leaves d empty: there is nothing to continue.
 
 STATUS -- status(info) is called after every generation with info = {
 'phase': 'de', 'generation', 'maxiter', 'best', 'median' (of the
@@ -94,6 +106,49 @@ class _Cost(Wrapper):
         return self.problem(u)
 
 
+LBFGS_MAXLS = 20           # scipy's maxls: line-search steps per iteration
+POLISH_MAXITER = 1000      # the DE polish's iterations when not given
+# in the message of a run that ended on its iteration limit
+LIMIT = 'not converged'
+
+
+def lbfgs_maxfun(maxiter, n):
+    """scipy's maxfun that maxiter L-BFGS-B iterations on n parameters
+    cannot reach (see L-BFGS-B LIMITS); never below scipy's default."""
+    return max(15000, int(maxiter) * (int(n) + 1) * (LBFGS_MAXLS + 1))
+
+
+def lbfgs_options(maxiter, n, pool=None):
+    """minimize's options of an L-BFGS-B run of at most maxiter
+    iterations on n parameters, its gradients through pool if any."""
+    return dict(maxiter=int(maxiter), maxfun=lbfgs_maxfun(maxiter, n),
+                **({} if pool is None else {'workers': pool}))
+
+
+def lbfgs_limited(res):
+    """Whether the L-BFGS-B result res ended on a limit (its iterations:
+    see L-BFGS-B LIMITS), not on convergence."""
+    return getattr(res, 'status', 0) == 1
+
+
+def lbfgs_message(res, maxiter):
+    """scipy's message of the L-BFGS-B result res, in plain words when
+    the run ended on its iteration limit."""
+    if lbfgs_limited(res):
+        return ('stopped at Max iter (%d iterations), %s: fit again from '
+                'here, or raise Max iter' % (maxiter, LIMIT))
+    return str(res.message)
+
+
+def _stopped(problem, best):
+    """What a run stopped by cancelled() returns, from its best = [x, cost,
+    iteration]: (x, cost, iteration, 'stopped'), the cost of x computed
+    now when the run was stopped before its first evaluation."""
+    if best[1] is None:
+        best[1] = float(problem(problem.to_u(best[0])))
+    return best[0], best[1], best[2], 'stopped'
+
+
 def lsq_residuals(problem, u):
     """Residuals at normalised u whose sum of squares is problem(u) (see
     LEAST SQUARES)."""
@@ -148,7 +203,8 @@ class _PoolMap:
 def run_de(problem, maxiter=200, popsize=15, tol=1e-3, mutation=(0.5, 1),
            polish=True, seed=None, callback=None, cancelled=None, workers=1,
            full_output=False, x0=None, atol=0.0, init='latinhypercube',
-           status=None, state=None, resume=None, strategy='best1bin'):
+           status=None, state=None, resume=None, strategy='best1bin',
+           polish_maxiter=POLISH_MAXITER):
     """Differential evolution on `problem`.
 
     callback(x, cost, generation) is called after every generation with the
@@ -226,14 +282,18 @@ def run_de(problem, maxiter=200, popsize=15, tol=1e-3, mutation=(0.5, 1),
             pr = minimize(cost, np.copy(res.x), method='L-BFGS-B',
                           bounds=[(0.0, 1.0)] * len(problem.params),
                           callback=polish_cb,
-                          options={} if pool is None else {'workers': pool})
+                          options=lbfgs_options(polish_maxiter,
+                                                len(problem.params), pool))
             if pr.fun < res.fun and np.all((pr.x >= 0.0) & (pr.x <= 1.0)):
                 polished = pr
                 res.x, res.fun = pr.x, pr.fun
+            if lbfgs_limited(pr):
+                res.message = (
+                    "%s; the polish stopped at its %d iterations, %s (the "
+                    "L-BFGS-B page's Max iter)" % (res.message,
+                                                   polish_maxiter, LIMIT))
     except FitCancelled:
-        if best[1] is None:                  # stopped before one generation
-            best[1] = problem(problem.to_u(best[0]))
-        out = best[0], best[1], best[2], 'stopped'
+        out = _stopped(problem, best)
         return out + (None,) if full_output else out
     finally:
         if pool is not None:
@@ -281,16 +341,15 @@ def run_lbfgs(problem, maxiter=1000, callback=None, cancelled=None,
         else None
         res = minimize(cost, np.copy(u0), method='L-BFGS-B',
                        bounds=[(0.0, 1.0)] * len(problem.params), callback=cb,
-                       options=dict(maxiter=maxiter, **(
-                           {} if pool is None else {'workers': pool})))
+                       options=lbfgs_options(maxiter, len(problem.params),
+                                             pool))
     except FitCancelled:
-        if best[1] is None:                  # stopped before the start's cost
-            best[1] = problem(problem.to_u(best[0]))
-        return best[0], best[1], best[2], 'stopped'
+        return _stopped(problem, best)
     finally:
         if pool is not None:
             pool.close()
-    return problem.to_x(res.x), float(res.fun), best[2], str(res.message)
+    return (problem.to_x(res.x), float(res.fun), best[2],
+            lbfgs_message(res, maxiter))
 
 
 def run_lsq(problem, maxiter=1000, callback=None, cancelled=None,
@@ -336,59 +395,10 @@ def run_lsq(problem, maxiter=1000, callback=None, cancelled=None,
             resid, np.copy(u0), bounds=(0.0, 1.0), method='trf',
             callback=cb, jac='2-point' if pool is None else jac)
     except FitCancelled:
-        return best[0], best[1], best[2], 'stopped'
+        return _stopped(problem, best)
     finally:
         if pool is not None:
             pool.close()
-    msg = 'maximum number of iterations reached' if res.status == -2 \
-        else str(res.message)
+    msg = 'maximum number of iterations reached, %s' % LIMIT \
+        if res.status == -2 else str(res.message)
     return problem.to_x(res.x), 2 * float(res.cost), best[2], msg
-
-
-def run_de_restarts(problem, restarts=1, seed=None, callback=None,
-                    cancelled=None, status=None, state=None, resume=None,
-                    **options):
-    """run_de `restarts` times, with seeds seed + k: (x, cost, generations,
-    message) of the best run, and [(k, u, cost)] of every run's end (for
-    fit.multistart.merge).  callback(x, cost, generation) counts the
-    generations over the runs, status(info) gets run_de's info with 'run'
-    (1, 2, ...) and 'runs' added; a stop ends them all.  A converged DE can
-    still sit in a local minimum (session A: 'success' at chi^2/N 10.28
-    with tol 1e-3, against 4.93): the spread of the runs shows it.  state,
-    resume: see CONTINUE."""
-    ends, best, done, first = [], None, 0, 0
-    if resume is not None:
-        resume = dict(resume)            # state may be the same dict
-        ends = list(resume.get('ends', []))
-        done, first = resume.get('done', 0), resume.get('run', 0)
-        if ends:
-            k, u, c = min(ends, key=lambda e: e[2])
-            best = [problem.to_x(u), c, 0, '']
-    for k in range(first, restarts):
-        def cb(x, cost, gen, done=done):
-            if callback is not None:
-                callback(x, cost, done + gen)
-        def st(info, k=k):
-            if status is not None:
-                status(dict(info, run=k + 1, runs=restarts))
-
-        run = {} if state is None else state
-        if state is not None:
-            state.clear()
-            state.update(run=k, done=done, ends=list(ends))
-        x, cost, gen, msg = run_de(
-            problem, seed=None if seed is None else seed + k, callback=cb,
-            cancelled=cancelled, status=st, state=run,
-            resume=resume if k == first and resume is not None
-            and 'population' in resume else None, **options)
-        ends.append((k, problem.to_u(x), cost))
-        if best is None or cost < best[1]:
-            best = [x, cost, 0, str(msg)]
-        done += gen
-        if msg == 'stopped':
-            best[3] = 'stopped'
-            break
-    best[2] = done
-    if restarts > 1 and best[3] != 'stopped':
-        best[3] = 'best of %d runs: %s' % (len(ends), best[3])
-    return tuple(best), ends

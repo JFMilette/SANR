@@ -36,7 +36,7 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from fit.de.de_fit import run_de_restarts, run_lbfgs, run_lsq
+from fit.de.de_fit import run_de, run_lbfgs, run_lsq
 from fit.de import global_fit
 from fit.joint import JointProblem, part_x, parts
 from fit.multistart import merge
@@ -63,9 +63,7 @@ def at_bound(v, lo, hi):
 
 
 class DEThread(QtCore.QThread):
-    """Runs fit.de.de_fit.run_de_restarts on a FitProblem off the GUI
-    thread; with restarts > 1, `minima` gives the distinct ends of the runs
-    (fit.multistart.merge) before finished_fit gives the best.  With
+    """Runs fit.de.de_fit.run_de on a FitProblem off the GUI thread.  With
     method='lbfgs' or 'lsq', fit.de.de_fit.run_lbfgs or run_lsq instead
     (progress then counts iterations; nothing to continue); with a method
     of fit.de.global_fit, global_fit.run_global (its UNITS; `minima` gives
@@ -105,15 +103,13 @@ class DEThread(QtCore.QThread):
             self.finished_fit.emit(x, cost, it, msg)
             return
         try:
-            (x, cost, gen, msg), ends = run_de_restarts(
+            x, cost, gen, msg = run_de(
                 self.problem, callback=self.progress.emit,
                 status=self.status.emit, cancelled=lambda: self._stop,
                 state=self.state, **self.options)
         except Exception as exc:                  # report, don't kill the app
             self.failed.emit('%s: %s' % (type(exc).__name__, exc))
             return
-        if len(ends) > 1:
-            self.minima.emit(merge(self.problem, ends))
         self.finished_fit.emit(x, cost, gen, str(msg))
 
 
@@ -297,7 +293,8 @@ class DEWindow(QtWidgets.QWidget):
         # a multistart: (done, total), the running starts' last reports
         # and the ended ones' costs (set_starts, set_start_status)
         self._ms_count, self._ms_run, self._ms_ended = (0, 0), {}, {}
-        self._ms_ends = []          # (start, u, cost) of the ended starts
+        # (start, u, cost, on its limit) of the ended starts
+        self._ms_ends = []
         self._end_minima = None     # the minima a fit ends with (set_minima)
         self.btn_stop.setEnabled(True)
         self.btn_continue.setEnabled(False)
@@ -325,8 +322,6 @@ class DEWindow(QtWidgets.QWidget):
         """A fit.de.de_fit STATUS report of the running fit."""
         if not self.running:
             return
-        run = ('Run %d / %d — ' % (info['run'], info['runs'])
-               if info.get('runs', 1) > 1 else '')
         c = self.cost_label
         if info['phase'] in ('lbfgs', 'lsq'):
             self.progress.setText('%s iteration %d / %d — %s %.6g' % (
@@ -345,8 +340,8 @@ class DEWindow(QtWidgets.QWidget):
             return
         if info['phase'] == 'polish':
             self.progress.setText(
-                '%sPolishing (L-BFGS-B)%s — %s %.6g' % (
-                    run, ', iteration %d' % info['iteration']
+                'Polishing (L-BFGS-B)%s — %s %.6g' % (
+                    ', iteration %d' % info['iteration']
                     if info['iteration'] else '…', c, info['best']))
             return
         t = self._gen_times
@@ -355,9 +350,9 @@ class DEWindow(QtWidgets.QWidget):
         rate = ' — %.2g s per generation' % ((t[-1] - t[0]) / (len(t) - 1)) \
             if len(t) > 1 else ''
         self.progress.setText(
-            '%sGeneration %d / %d — best %s %.6g, population median %.6g<br>'
+            'Generation %d / %d — best %s %.6g, population median %.6g<br>'
             'Spread of the population\'s %s %.2g (stops at ≤ tol %.2g)%s'
-            % (run, info['generation'], info['maxiter'], c, info['best'],
+            % (info['generation'], info['maxiter'], c, info['best'],
                info['median'], c, info['spread'], info['tol'], rate))
 
     def set_minima(self, minima):
@@ -482,7 +477,8 @@ class DEWindow(QtWidgets.QWidget):
             if self.running and info.get('u') is not None:
                 # the list of minima as the ended starts give it so far
                 self._ms_ends.append((k, np.asarray(info['u']),
-                                      info['best']))
+                                      info['best'],
+                                      info.get('limited', False)))
                 self._fill_minima(merge(self.problem, self._ms_ends))
         elif k not in self._ms_ended:         # not a late report
             self._ms_run[k] = info
@@ -525,12 +521,16 @@ class DEWindow(QtWidgets.QWidget):
         self.progress.hide()
         self._fill_minima(minima)
         hits = sum(m['hits'] for m in minima)
+        cut = sum(m.get('unfinished', 0) for m in minima)
         self.status.setText(
             '<b>%s</b> — %d start(s) ended in %d distinct minim%s, best %s '
-            '%.6g<br>Select a minimum and send it to the Simulation tab.' % (
+            '%.6g%s<br>Select a minimum and send it to the Simulation tab.' % (
                 'Stopped' if stopped else 'Done', hits, len(minima),
                 'um' if len(minima) == 1 else 'a', self.cost_label,
-                minima[0]['chi2']) if minima else
+                minima[0]['chi2'],
+                '<br>%d start(s) ended on their iteration limit, not '
+                'converged: where one was cut is not a minimum (fit on '
+                'from it)' % cut if cut else '') if minima else
             '<b>Stopped</b> before any start ended.')
         self.btn_stop.setEnabled(False)
         self.btn_send.setEnabled(self.history.currentItem() is not None)
@@ -547,9 +547,12 @@ class DEWindow(QtWidgets.QWidget):
         self.history.clear()
         self.entries = []
         for k, m in enumerate(minima):
-            self._append(label(k, m) if label else '%d — %d start%s%s' % (
+            cut = m.get('unfinished', 0)
+            self._append(label(k, m) if label else '%d — %d start%s%s%s' % (
                 k + 1, m['hits'], '' if m['hits'] == 1 else 's',
-                ' ✓' if m['from_current'] else ''), m['chi2'], m['x'])
+                ' ✓' if m['from_current'] else '',
+                ' — %snot converged' % ('' if m['hits'] == 1 else '%d ' % cut)
+                if cut else ''), m['chi2'], m['x'])
         self.history.setCurrentItem(None)
         self.history.blockSignals(False)
         if minima:

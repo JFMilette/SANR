@@ -33,11 +33,27 @@ its detailed balance): outside them it is rejected without evaluating
 logpdf.  Snooker moves do not enter the crossover adaptation.
 
 Tempered burn-in (beta_start < 1, needs logpdf_split(x) -> (log prior,
-log likelihood)): up to generation temper_until (default adapt_until, never
-past it) the chains target prior x likelihood^beta, beta rising
-geometrically from beta_start to 1, so they cross between distant modes
-before they settle.  It lies inside the adaptation phase, whose samples are
-never returned, so the posterior stays exact.
+log likelihood)): up to generation temper_until (default adapt_until // 2,
+never past adapt_until) the chains target prior x likelihood^beta, beta
+rising geometrically from beta_start to 1, so they cross between distant
+modes before they settle.  It lies inside the adaptation phase, whose
+samples are never returned, so the posterior stays exact; the rest of that
+phase adapts the crossover at beta = 1.
+
+Archive pruning (DREAM(ZS), archive_keep, default 0.25): at the end of the
+adaptation phase the archive drops its M0 prior draws and the states
+archived before the last archive_keep of that phase (and before
+temper_until): far from the posterior, they made most jumps too long to be
+accepted for the rest of the run (half the effective sample size on a
+10-d Gaussian).  States of z0 are kept.  The archive only grows after
+that, as in DREAM(ZS).
+
+Convergence: rank-normalised split R-hat (Vehtari et al., Bayesian Anal.
+16, 667 (2021)), the larger of the bulk and tail values, over the samples
+kept (kept_from).  stop_when_converged stops once R-hat < rhat_target has
+held for min_gen_after_converged generations (a rise above the target
+starts the count again) and, with ess_target, the effective sample size
+(ess) of every parameter is at least ess_target.
 
 Both pCR adaptation and outlier-chain resetting break reversibility, so they
 are restricted to the adaptation phase (first `adapt_until` generations).
@@ -59,11 +75,25 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
 
 import numpy as np
+from scipy import special, stats
+
+# R-hat and the stopping ESS use at most this many samples per chain
+# (evenly thinned): their cost stays bounded on very long runs
+CONVERGENCE_ROWS = 5000
 
 
 # ----------------------------------------------------------------------------
 # Result container
 # ----------------------------------------------------------------------------
+def kept_from(generations, adapt_until, discard=0.5):
+    """The first generation kept as a posterior sample of the stored
+    `generations`: after `discard` (a fraction < 1 of the last generation,
+    or a generation number >= 1), and never in the adaptation phase, its
+    last generation adapt_until included."""
+    g0 = discard * generations[-1] if discard < 1 else discard
+    return max(g0, adapt_until + 1)
+
+
 @dataclass
 class DreamResult:
     chains: np.ndarray            # (n_stored, N, d) chain states
@@ -83,11 +113,13 @@ class DreamResult:
         discard: fraction (<1) or generation number (>=1) to drop.  Never
         keeps anything from the adaptation phase.
         """
-        g_max = self.generations[-1]
-        g0 = discard * g_max if discard < 1 else discard
-        g0 = max(g0, self.adapt_until)
-        keep = self.generations >= g0
-        return self.chains[keep].reshape(-1, self.chains.shape[-1])
+        return self.chains[self.keep(discard)].reshape(
+            -1, self.chains.shape[-1])
+
+    def keep(self, discard: float | int = 0.5) -> np.ndarray:
+        """Which stored generations are posterior samples (kept_from)."""
+        return self.generations >= kept_from(self.generations,
+                                             self.adapt_until, discard)
 
     def best(self) -> tuple[np.ndarray, float]:
         """Maximum-a-posteriori state visited (not a posterior summary)."""
@@ -156,19 +188,62 @@ def gelman_rubin(x: np.ndarray) -> np.ndarray:
     return R
 
 
+def _rhat_basic(x: np.ndarray) -> np.ndarray:
+    """sqrt(var+ / W) of x (n, M, d), M chains (BDA3 Eq. 11.4)."""
+    n = x.shape[0]
+    W = x.var(axis=0, ddof=1).mean(axis=0)
+    B_n = x.mean(axis=0).var(axis=0, ddof=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.sqrt(((n - 1) / n * W + B_n) / W)
+
+
+def _rank_normal(x: np.ndarray) -> np.ndarray:
+    """x (n, M, d) replaced, parameter by parameter, by the normal scores of
+    its ranks over all n M draws (Vehtari et al. 2021, Eq. 14)."""
+    n, M, d = x.shape
+    r = stats.rankdata(x.reshape(n * M, d), axis=0)       # ties: average
+    return special.ndtri((r - 0.375) / (n * M + 0.25)).reshape(n, M, d)
+
+
+def split_rhat(x: np.ndarray) -> np.ndarray:
+    """Rank-normalised split R-hat of Vehtari et al. (2021): each chain
+    cut in two halves (2N chains), the draws replaced by the normal scores
+    of their ranks; the larger of the bulk value and the tail value (the
+    same on |x - median|).  Unlike gelman_rubin it also sees a chain still
+    drifting, and it does not need finite moments.
+
+    x: (n, N, d) -- n samples per chain, N chains.  inf below 4 samples;
+    nan for a parameter that never moved.
+    """
+    n, N, d = x.shape
+    if n < 4:
+        return np.full(d, np.inf)
+    h = n // 2
+    s = np.concatenate([x[:h], x[n - h:]], axis=1)          # (h, 2N, d)
+    bulk = _rhat_basic(_rank_normal(s))
+    fold = np.abs(s - np.median(s.reshape(-1, d), axis=0))
+    tail = _rhat_basic(_rank_normal(fold))
+    return np.fmax(bulk, tail)
+
+
+def _thinned(x: np.ndarray) -> np.ndarray:
+    """x (n, N, d) evenly thinned to at most CONVERGENCE_ROWS rows."""
+    step = -(-len(x) // CONVERGENCE_ROWS)
+    return x[::step] if step > 1 else x
+
+
 def ess(result: DreamResult, discard: float | int = 0.5) -> np.ndarray:
     """Effective sample size of each parameter over the pooled chains kept
     by result.samples(discard): multi-chain autocorrelation (Gelman et al.,
     BDA3 Sec. 11.5) summed with Geyer's initial positive sequence."""
-    g_max = result.generations[-1]
-    g0 = discard * g_max if discard < 1 else discard
-    x = result.chains[result.generations >= max(g0, result.adapt_until)]
+    return ess_of(result.chains[result.keep(discard)])
+
+
+def ess_of(x: np.ndarray) -> np.ndarray:
+    """ess of the samples x (n, N, d), n per chain."""
     n, N, d = x.shape
     if n < 4:
         return np.full(d, np.nan)
-    xc = x - x.mean(axis=0)
-    f = np.fft.rfft(xc, n=2 * n, axis=0)
-    acov = np.fft.irfft(f * f.conj(), axis=0)[:n] / n        # (n, N, d), biased
     W = x.var(axis=0, ddof=1).mean(axis=0)
     var_plus = (n - 1) / n * W + x.mean(axis=0).var(axis=0, ddof=1)
     out = np.empty(d)
@@ -176,7 +251,12 @@ def ess(result: DreamResult, discard: float | int = 0.5) -> np.ndarray:
         if var_plus[j] <= 0:
             out[j] = np.nan
             continue
-        rho = 1.0 - (W[j] - acov[:, :, j].mean(axis=1)) / var_plus[j]
+        # one parameter at a time: the transform of all d at once needs
+        # 32 n N d bytes
+        xc = x[:, :, j] - x[:, :, j].mean(axis=0)
+        f = np.fft.rfft(xc, n=2 * n, axis=0)
+        acov = np.fft.irfft(f * f.conj(), axis=0)[:n] / n    # (n, N), biased
+        rho = 1.0 - (W[j] - acov.mean(axis=1)) / var_plus[j]
         rho[0] = 1.0
         pairs = rho[: n - n % 2].reshape(-1, 2).sum(axis=1)
         k = np.flatnonzero(pairs <= 0)
@@ -234,6 +314,8 @@ def dream(
     temper_until: Optional[int] = None,
     beta_start: float = 1.0,
     z0: Optional[np.ndarray] = None,
+    archive_keep: Optional[float] = 0.25,
+    ess_target: float = 0.0,
 ) -> DreamResult:
     """Run DREAM.
 
@@ -253,8 +335,9 @@ def dream(
              adapt_until, thin, outlier and x0 are then ignored); the same
              logpdf and bounds must be given.  Convergence is detected
              afresh, so stop_when_converged runs at least
-             min_gen_after_converged more generations.  Its p_snooker and
-             tempering are kept too.
+             min_gen_after_converged more generations.  Its p_snooker,
+             tempering and archive pruning are kept too (a state saved
+             before pruning: none).
     p_snooker : probability of a snooker update per chain and generation
              (archive only; see the module docstring).
     logpdf_split : x (d,) -> (log prior, log likelihood), or X (N, d) ->
@@ -264,7 +347,14 @@ def dream(
     z0     : optional (M0, d) initial archive (archive only), e.g. samples
              of a neural posterior (fit.npe), instead of M0 prior draws;
              ignored with resume.
+    archive_keep : archive pruning (module docstring): the fraction of the
+             adaptation phase whose archived states stay; None: no pruning.
+    rhat_target, min_gen_after_converged, ess_target : the stopping rule
+             of stop_when_converged (module docstring); ess_target 0: no
+             ESS condition.
     """
+    if archive_keep is not None and not 0 < archive_keep <= 1:
+        raise ValueError('archive_keep must lie in (0, 1], or be None')
     rng = np.random.default_rng(seed)
     lo, hi = (np.asarray(b, float) for b in zip(*bounds))
     d = lo.size
@@ -290,8 +380,10 @@ def dream(
         p_snooker = st.get('p_snooker', 0.0)
         beta_start = st.get('beta_start', 1.0)
         temper_until = st.get('temper_until', 0)
+        # states from before archive pruning: none
+        archive_keep = st.get('archive_keep')
     if temper_until is None:
-        temper_until = adapt_until
+        temper_until = max(adapt_until // 2, 1)
     temper = beta_start < 1.0
     if temper:
         if logpdf_split is None:
@@ -339,8 +431,12 @@ def dream(
             logp_X = evaluate(X)
         n_evals = N
 
+    # m0: rows the archive started with; z_head of them (z0's) survive the
+    # pruning
+    m0 = z_head = 0
     if archive and resume is not None:
         m = st['m']
+        m0, z_head = st.get('m0', 0), st.get('z_head', 0)
         Z = np.empty((m + (n_gen // archive_every + 1) * N, d))
         Z[:m] = st['Z']
     elif archive and z0 is not None:
@@ -348,7 +444,7 @@ def dream(
         if z0.ndim != 2 or z0.shape[1] != d or len(z0) < 2 * delta + 1:
             raise ValueError(f"z0 must have shape (M0 >= {2 * delta + 1}, "
                              f"{d})")
-        m = m0 = len(z0)
+        m = m0 = z_head = len(z0)
         Z = np.empty((m0 + (n_gen // archive_every + 1) * N, d))
         Z[:m0] = z0
     elif archive:
@@ -388,6 +484,7 @@ def dream(
         rhat_hist = [(int(g), np.array(r)) for g, r in st['rhat_hist']]
     others = [np.delete(np.arange(N), i) for i in range(N)]
 
+    t = t0
     for t in range(t0 + 1, n_gen + 1):
         # ---------- proposals (Eq. 23, 24) ------------------------------------
         std_X = (Z[m // 2:m] if archive else X).std(axis=0)
@@ -476,6 +573,20 @@ def dream(
         if archive and t % archive_every == 0:
             Z[m:m + N] = X
             m += N
+        if archive and archive_keep is not None and t == adapt_until:
+            # archive pruning (module docstring): keep z0's rows and those
+            # archived after generation g_cut (event k, at generation
+            # k * archive_every, wrote rows m0 + (k - 1) N .. m0 + k N),
+            # at least `need` rows in all
+            g_cut = adapt_until - int(np.ceil(archive_keep * adapt_until))
+            if temper:
+                g_cut = max(g_cut, temper_until)
+            need = max(2 * delta + 1, 2 * d)
+            first = m0 + (g_cut // archive_every) * N
+            first = max(min(first, m - need), z_head, 0)
+            kept = Z[first:m].copy()
+            Z[z_head:z_head + len(kept)] = kept
+            m = z_head + len(kept)
         if outlier and t <= adapt_until and t % outlier_every == 0:
             mean_lp = hist_logp[t // 2: t + 1].mean(axis=0)
             bad = _iqr_outliers(mean_lp)
@@ -494,13 +605,20 @@ def dream(
 
         # ---------- convergence ----------------------------------------------
         if t % rhat_every == 0 and t > adapt_until:
-            sel = gens[:k_store] >= max(t // 2, adapt_until)
-            R = gelman_rubin(chains[:k_store][sel])
+            sel = gens[:k_store] >= kept_from(gens[:k_store], adapt_until)
+            kept = _thinned(chains[:k_store][sel])
+            R = split_rhat(kept)
             rhat_hist.append((t, R))
-            if converged_at is None and np.all(R < rhat_target):
+            # converged since converged_at, as long as R-hat stays below
+            # the target
+            if not np.all(R < rhat_target):
+                converged_at = None
+            elif converged_at is None:
                 converged_at = t
             if (stop_when_converged and converged_at is not None
-                    and t - converged_at >= min_gen_after_converged):
+                    and t - converged_at >= min_gen_after_converged
+                    and (ess_target <= 0
+                         or np.all(ess_of(kept) >= ess_target))):
                 acc = acc[:t]
                 break
         if callback is not None:
@@ -510,11 +628,19 @@ def dream(
                 cancelled = True
                 break
 
+    if t > adapt_until and (not rhat_hist or rhat_hist[-1][0] != t):
+        # the R-hat of the samples the run ends with (stopped, or at an
+        # n_gen that is not a multiple of rhat_every), not of the last
+        # multiple of rhat_every
+        sel = gens[:k_store] >= kept_from(gens[:k_store], adapt_until)
+        rhat_hist.append((t, split_rhat(_thinned(chains[:k_store][sel]))))
+
     state = dict(
         t=t, n_gen=n_gen, cancelled=cancelled,     # planned total, stopped?
-        rhat_target=rhat_target,
+        rhat_target=rhat_target, ess_target=ess_target,
         d=d, N=N, archive=archive, thin=thin, outlier=outlier,
         adapt_until=adapt_until, archive_every=archive_every,
+        archive_keep=archive_keep, m0=m0, z_head=z_head,
         p_snooker=p_snooker, beta_start=beta_start, temper_until=temper_until,
         X=X.copy(), logp_X=logp_X.copy(), n_evals=n_evals,
         lp_X=None if lp_X is None else lp_X.copy(),

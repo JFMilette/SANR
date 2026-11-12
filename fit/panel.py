@@ -332,8 +332,9 @@ class FitPanel:
             'Also used by the multistart\'s DE and DREAM\'s DE start.')
         self.fit_polish = QtWidgets.QCheckBox('polish (L-BFGS-B)')
         self.fit_polish.setChecked(True)
-        self.fit_polish.setToolTip('Refine the best member with a local '
-                                   'gradient minimiser at the end')
+        self.fit_polish.setToolTip(
+            'Refine the best member with a local gradient minimiser at the '
+            'end\n(at most Max iter of the L-BFGS-B page iterations)')
 
         self.btn_revert = QtWidgets.QPushButton('Revert')
         self.btn_revert.setToolTip(
@@ -478,7 +479,9 @@ class FitPanel:
         self.lb_maxiter = QtWidgets.QSpinBox()
         self.lb_maxiter.setRange(1, 100000)
         self.lb_maxiter.setValue(1000)
-        self.lb_maxiter.setToolTip('Maximum number of L-BFGS-B iterations')
+        self.lb_maxiter.setToolTip(
+            'Maximum number of L-BFGS-B iterations: of this fit, and of '
+            'the polish that ends a DE fit')
         f.addRow(self._grid([('Max iter', self.lb_maxiter)]))
         f.addRow(QtWidgets.QLabel(
             '<i>A gradient descent from the current values of the '
@@ -676,7 +679,8 @@ class FitPanel:
             return dict(
                 archive=self.dream_archive, generations=self.dream_gen,
                 chains=self.dream_chains, seed=self.dream_seed,
-                rhat_target=self.dream_rhat, snooker=self.dream_snooker,
+                rhat_target=self.dream_rhat, ess_target=self.dream_ess,
+                snooker=self.dream_snooker,
                 beta_start=self.dream_beta, start=self.dream_start,
                 sigma_free=self.dream_sigma, floor_free=self.dream_floor,
                 stop_when_converged=self.dream_stop,
@@ -779,10 +783,7 @@ class FitPanel:
         self._ms.failed.connect(self.fit_window.fail)
         self._ms.finished.connect(self._ms_cleanup)
         sim.set_locked(True)
-        for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
-                  *self._global_buttons, self.btn_sample, self.btn_npe_train,
-                  self.btn_revert, self.btn_ms_run):
-            b.setEnabled(False)
+        self._set_run_buttons(False)
         self.btn_ms_stop.setEnabled(True)
         self.ms_report.setText(self._ms_note + 'Fitting from %d starts…'
                                % (self.ms_starts.value() + 1))
@@ -796,7 +797,8 @@ class FitPanel:
                     popsize=self.fit_pop.value(), tol=self.fit_tol.value(),
                     mutation=lo if lo == hi else (lo, hi), atol=0.0,
                     init='sobol', strategy=self.fit_strategy.currentData(),
-                    polish=self.fit_polish.isChecked())
+                    polish=self.fit_polish.isChecked(),
+                    polish_maxiter=self.lb_maxiter.value())
 
     def stop_multistart(self):
         if self._ms is not None:
@@ -812,10 +814,7 @@ class FitPanel:
         self._ms.deleteLater()
         self._ms = None
         self.simulation.set_locked(False)
-        for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
-                  *self._global_buttons, self.btn_sample, self.btn_npe_train,
-                  self.btn_ms_run):
-            b.setEnabled(True)
+        self._set_run_buttons(True)
         self.btn_ms_stop.setEnabled(False)
 
     def _ms_done(self, minima):
@@ -878,19 +877,29 @@ class FitPanel:
         self.dream_stop = QtWidgets.QCheckBox('stop when converged')
         self.dream_stop.setChecked(True)
         self.dream_stop.setToolTip(
-            'Stop once R-hat < the R̂ target for every parameter, plus a fifth '
-            'of the generations (at most 5000) more')
+            'Stop once R̂ has stayed below the R̂ target for every parameter '
+            'for a fifth of the generations (at most 5000),\nand every '
+            'parameter has at least the ESS target of effective samples')
         self.dream_rhat = QtWidgets.QDoubleSpinBox()
         self.dream_rhat.setRange(1.001, 2.0)
         self.dream_rhat.setDecimals(3)
         self.dream_rhat.setSingleStep(0.01)
-        self.dream_rhat.setValue(1.1)
+        self.dream_rhat.setValue(1.05)
         self.dream_rhat.setToolTip(
-            'Converged once the Gelman-Rubin R-hat of every parameter is '
-            'below this.\nUsed to stop the run (stop when converged), for '
-            'the convergence flag and for the "Not converged" warning.\n'
-            '1.2 is Vrugt\'s default; 1.1 is stricter, 1.05 stricter still '
-            'and needs longer runs.')
+            'Converged once the rank-normalised split R̂ (Vehtari et al. '
+            '2021) of every parameter is below this.\nUsed to stop the run '
+            '(stop when converged), for the convergence flag and for the '
+            '"Not converged" warning.\n1.05 by default; 1.01 (Vehtari\'s '
+            'recommendation) needs longer runs.')
+        self.dream_ess = QtWidgets.QSpinBox()
+        self.dream_ess.setRange(0, 1_000_000)
+        self.dream_ess.setSingleStep(100)
+        self.dream_ess.setValue(400)
+        self.dream_ess.setSpecialValueText('off')
+        self.dream_ess.setToolTip(
+            'Stop when converged also waits until every parameter has this '
+            'many effective (independent) samples;\n400 gives stable 2.5 / '
+            '97.5 % percentiles.  Fewer at the end: a warning.  0 = off.')
         self.dream_snooker = QtWidgets.QDoubleSpinBox()
         self.dream_snooker.setRange(0.0, 0.5)
         self.dream_snooker.setSingleStep(0.05)
@@ -929,6 +938,7 @@ class FitPanel:
                              ('Chains', self.dream_chains),
                              ('Seed', self.dream_seed),
                              ('R̂ target', self.dream_rhat),
+                             ('ESS target', self.dream_ess),
                              ('Snooker', self.dream_snooker),
                              ('β start', self.dream_beta)]))
         f.addRow('Start', self.dream_start)
@@ -1065,6 +1075,7 @@ class FitPanel:
         self.btn_npe_train.clicked.connect(lambda: self.start_npe())
         self.btn_npe_load.clicked.connect(self.load_npe_network)
         self.btn_npe_window.clicked.connect(self._show_npe_window)
+        self._npe_missing = bool(missing)
         for b in (self.btn_npe_train, self.btn_npe_load):
             b.setEnabled(not missing)
         self.npe_report = QtWidgets.QLabel(wordWrap=True)
@@ -1141,10 +1152,7 @@ class FitPanel:
         self._npe.failed.connect(self._npe_failed)
         self._npe.finished.connect(self._npe_cleanup)
         self.simulation.set_locked(True)
-        for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
-                  *self._global_buttons, self.btn_sample, self.btn_npe_train,
-                  self.btn_npe_load, self.btn_revert, self.btn_ms_run):
-            b.setEnabled(False)
+        self._set_run_buttons(False, self.btn_npe_load)
         self.npe_report.setText(note + ('Seeding from ' if result is not None
                                         else 'Training on ')
                                 + html_escape(what) + '…')
@@ -1260,10 +1268,7 @@ class FitPanel:
         self._npe.deleteLater()
         self._npe = None
         self.simulation.set_locked(False)
-        for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
-                  *self._global_buttons, self.btn_sample, self.btn_npe_train,
-                  self.btn_npe_load, self.btn_ms_run):
-            b.setEnabled(True)
+        self._set_run_buttons(True, self.btn_npe_load)
 
     def _send_npe(self, x, part, w, label):
         """Write a cluster's best state of NPE tab w into the models of its
@@ -1300,10 +1305,12 @@ class FitPanel:
         names = self._fittable()
         if self._joint:
             sets = [n for n in self._joint['sets'] if n in names]
+            # the modes of every dataset still there, fitted or not (one
+            # ticked again gets its own back)
             self._joint = dict(
                 sets=sets, modes={n: m for n, m in
                                   (self._joint.get('modes') or {}).items()
-                                  if n in sets},
+                                  if n in names},
                 sources=dict(self._joint.get('sources') or {})) \
                 if len(sets) > 1 else None
         c.blockSignals(True)
@@ -1326,13 +1333,21 @@ class FitPanel:
         return [self.sets[i] for i in found if i is not None]
 
     def _rename_fit_set(self, old, new):
-        """Dataset `old` is now called `new`: the joint fit follows."""
+        """Dataset `old` is now called `new`: the Dataset box's entry (so
+        that it stays the one chosen when the box is filled again) and the
+        joint fit follow."""
+        i = self.fit_set.findText(old)
+        if i >= 0 and self.fit_set.itemData(i) != JOINT:
+            self.fit_set.blockSignals(True)
+            self.fit_set.setItemText(i, new)
+            self.fit_set.blockSignals(False)
         if self._joint and old in self._joint['sets']:
             self._joint['sets'] = [new if n == old else n
                                    for n in self._joint['sets']]
             d = self._joint.get('modes') or {}
             if old in d:
                 d[new] = d.pop(old)
+        self.datasets_panel.rename(old, new)
         if old in self._grid_choice:
             self._grid_choice[new] = self._grid_choice.pop(old)
 
@@ -2029,6 +2044,7 @@ class FitPanel:
                                  tol=self.fit_tol.value(),
                                  mutation=mut[0] if mut[0] == mut[1] else mut,
                                  polish=self.fit_polish.isChecked(),
+                                 polish_maxiter=self.lb_maxiter.value(),
                                  workers=self.fit_workers.value(),
                                  atol=0.0, init='sobol', resume=resume,
                                  strategy=self.fit_strategy.currentData())
@@ -2043,10 +2059,7 @@ class FitPanel:
         self._fit.finished.connect(self._fit_cleanup)
         # a result is only sent to the stack the fit started from
         sim.set_locked(True)
-        for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
-                  *self._global_buttons, self.btn_sample, self.btn_npe_train,
-                  self.btn_revert, self.btn_ms_run):
-            b.setEnabled(False)
+        self._set_run_buttons(False)
         self._fit_out.setText(
             self._fit_warnings + '%s %d parameter(s) to %d points of %s '
             '(Q %.4g – %.4g Å⁻¹)…' % (
@@ -2082,8 +2095,6 @@ class FitPanel:
         except ValueError as exc:
             self.dream_report.setText(self._error(exc))
             return
-        self._dream_problem = problem
-        self._set_fit_start(fit)
         n_gen = self.dream_gen.value()
         options = dict(
             n_gen=n_gen, archive=self.dream_archive.isChecked(),
@@ -2093,6 +2104,7 @@ class FitPanel:
             n_workers=self.fit_workers.value(),
             stop_when_converged=self.dream_stop.isChecked(),
             rhat_target=self.dream_rhat.value(),
+            ess_target=self.dream_ess.value(),
             min_gen_after_converged=min(5000, n_gen // 5),
             p_snooker=self.dream_snooker.value(),
             beta_start=self.dream_beta.value()
@@ -2102,7 +2114,8 @@ class FitPanel:
             options['de_options'] = dict(
                 maxiter=self.fit_maxiter.value(),
                 popsize=self.fit_pop.value(), tol=self.fit_tol.value(),
-                strategy=self.fit_strategy.currentData())
+                strategy=self.fit_strategy.currentData(),
+                polish_maxiter=self.lb_maxiter.value())
         elif options['x0'] == 'npe':
             seeds = self._npe_seeds
             if seeds is None or seeds[0] != problem.names:
@@ -2118,6 +2131,10 @@ class FitPanel:
                     'Classic DREAM needs 7 chains or more: the network gave '
                     '%d seeds.' % len(seeds[1])))
                 return
+        # only once it starts: a start that fails leaves Revert and the
+        # Continue of the last run as they were
+        self._dream_problem = problem
+        self._set_fit_start(fit)
         self._make_dream_window([s['name'] for s, *_ in inputs])
         header = ('%d parameter(s), %d points of %s (Q %.4g – %.4g Å⁻¹)'
                   % (problem.ndim, problem.fit.npoints,
@@ -2144,29 +2161,26 @@ class FitPanel:
         self._dream.finished.connect(self._dream_cleanup)
         if self.simulation is not None:
             self.simulation.set_locked(True)
-        for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
-                  *self._global_buttons, self.btn_sample, self.btn_npe_train,
-                  self.btn_revert, self.btn_dream_load, self.btn_ms_run):
-            b.setEnabled(False)
+        self._set_run_buttons(False, self.btn_dream_load)
         self.dream_report.setText(report)
         self._dream.start()
 
     def continue_dream(self):
-        """Go on with the stopped run shown in the DREAM window up to the
-        generations it was started with, as if it had never stopped."""
-        prev = self.dream_window.result
+        """Go on with the ended run shown in the DREAM window (stopped,
+        converged or done) for the generations of its "+ gen." box, all of
+        them, as if it had never stopped."""
+        w = self.dream_window
+        prev = w.result
         if self.busy() or prev is None or prev.state is None or \
-                not prev.state.get('cancelled'):
+                self._dream_problem is None:
             return
-        n_gen = int(prev.state['n_gen'])
-        n_more = n_gen - int(prev.generations[-1])
-        if n_more <= 0:
-            return
+        n_more = w.continue_gen.value()
+        n_gen = int(prev.state['t']) + n_more
         options = dict(n_gen=n_gen, resume=prev,
                        n_workers=self.fit_workers.value(),
-                       stop_when_converged=self.dream_stop.isChecked(),
+                       stop_when_converged=False,
                        rhat_target=self.dream_rhat.value(),
-                       min_gen_after_converged=min(5000, n_more // 5))
+                       ess_target=self.dream_ess.value())
         self.dream_window.continue_start(n_gen)
         self._launch_dream(self._dream_problem, options,
                            'Continuing to generation %d…' % n_gen)
@@ -2300,6 +2314,8 @@ class FitPanel:
         w.btn_continue.setEnabled(False)
         w.btn_continue.setToolTip('Only the newest fit or run can be '
                                   'continued')
+        if hasattr(w, 'continue_gen'):          # a DREAM window's
+            w.continue_gen.setEnabled(False)
 
     def load_dream(self):
         """Show a run saved with "Save chains..." in the DREAM window.  Its
@@ -2417,10 +2433,7 @@ class FitPanel:
         self._dream.deleteLater()
         self._dream = None
         self.simulation.set_locked(False)
-        for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
-                  *self._global_buttons, self.btn_sample, self.btn_npe_train,
-                  self.btn_dream_load, self.btn_ms_run):
-            b.setEnabled(True)
+        self._set_run_buttons(True, self.btn_dream_load)
 
     def _send_dream(self, x, w=None, label='MAP'):
         """Write a DREAM state of window w (default: the newest) into the
@@ -2540,10 +2553,24 @@ class FitPanel:
         self._fit.deleteLater()
         self._fit = None
         self.simulation.set_locked(False)
+        self._set_run_buttons(True)
+
+    def _set_run_buttons(self, on, *more):
+        """The buttons that start a run (and `more`: the Load button of the
+        page starting it), off while one goes on and on again after it.
+        Starting one also turns Revert off (the values it would restore
+        are the run's start from then on); Train stays off without the
+        NPE packages."""
         for b in (self.btn_fit, self.btn_lbfgs, self.btn_lsq,
-                  *self._global_buttons, self.btn_sample, self.btn_npe_train,
-                  self.btn_ms_run):
-            b.setEnabled(True)
+                  *self._global_buttons, self.btn_sample, self.btn_ms_run,
+                  *more):
+            b.setEnabled(on)
+        npe = on and not self._npe_missing
+        self.btn_npe_train.setEnabled(npe)
+        if self.btn_npe_load in more:
+            self.btn_npe_load.setEnabled(npe)
+        if not on:
+            self.btn_revert.setEnabled(False)
 
     def _fit_header(self, header):
         """The fit's warnings above a status line; the parameters are in

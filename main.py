@@ -62,17 +62,11 @@ from tabs.simulation import empty_stack
 
 APP_ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icons',
                         'app.png')
-# where the session dialogs open: sessions/ of the repo, or Documents/SANR
-# for a built program (its folder is not writable)
-if getattr(sys, 'frozen', False):
-    SESSIONS_DIR = os.path.join(os.path.expanduser('~'), 'Documents', 'SANR')
-    try:
-        os.makedirs(SESSIONS_DIR, exist_ok=True)
-    except OSError:
-        SESSIONS_DIR = os.path.expanduser('~')
-else:
-    SESSIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                'sessions')
+# where the session dialogs open (session_file.sessions_dir)
+SESSIONS_DIR = session_file.sessions_dir()
+# the folder a session's data paths are taken relative to when comparing
+# states (MainWindow._state_key): any fixed one
+_KEY_BASE = os.path.dirname(os.path.abspath(__file__))
 MODEL_FILTER = 'Sessions (*.zip *.json);;All files (*)'
 SAVE_FILTER = ('Session with its data (*.zip);;'
                'Session, data files by path (*.json)')
@@ -133,21 +127,84 @@ class MainWindow(QtWidgets.QMainWindow):
         act.setMenuRole(QtGui.QAction.MenuRole.NoRole)
 
         self.resize(1600, 950)
+        # the empty session counts as saved: taken again once the window
+        # has settled (models made for datasets, first curves)
+        self._mark_saved()
+        QtCore.QTimer.singleShot(0, self._mark_saved)
 
     def set_dark_mode(self, on):
         theme = 'dark' if on else 'light'
         style.apply(QtWidgets.QApplication.instance(), theme)
         settings().setValue('theme', theme)
 
+    # -- unsaved changes ------------------------------------------------------
+    def _state_key(self):
+        """What a session would save, to compare with the one saved or
+        opened last: the model and data settings as JSON, and the fit and
+        DREAM tabs open; None if it cannot be had."""
+        try:
+            d = self.simulation.session_state()
+            d['experimental'] = self.experimental.session_state(_KEY_BASE)
+            tabs = tuple(id(self.tabs.widget(i))
+                         for i in range(self.tabs.count()))
+            return json.dumps(d, sort_keys=True, default=_plain), tabs
+        except Exception:
+            return None
+
+    def _mark_saved(self):
+        """What the window holds now is saved (or was just opened)."""
+        self._saved_key = self._state_key()
+
+    def _keep_or_lose(self, title):
+        """Before the session is closed or replaced: True to go on
+        (nothing unsaved, or saved, or the user chose to discard it), False
+        to stay.  A window not shown has no one to ask (tests)."""
+        if not self.isVisible():
+            return True
+        key = self._state_key()
+        if key is not None and key == self._saved_key:
+            return True
+        B = QtWidgets.QMessageBox.StandardButton
+        b = QtWidgets.QMessageBox.question(
+            self, title, 'The session has changes that are not saved.\n'
+            'Save them first?', B.Save | B.Discard | B.Cancel, B.Save)
+        if b == B.Save:
+            return self.save_session()
+        return b == B.Discard
+
     def closeEvent(self, ev):
+        if not self._keep_or_lose('Quit SANR'):
+            ev.ignore()
+            return
         self.experimental.shutdown()
         super().closeEvent(ev)
+
+    def _snapshot(self):
+        """The session as it is (the model and data), for _restore to go
+        back to if loading another one fails half way."""
+        d = self.simulation.session_state()
+        d['experimental'] = self.experimental.session_state(_KEY_BASE)
+        return d
+
+    def _replace(self, d, base, snapshot):
+        """_restore(d, base); if it fails, the session it replaced is put
+        back (snapshot, _snapshot) and the error raised."""
+        try:
+            return self._restore(d, base)
+        except Exception:
+            try:
+                self._restore(snapshot, _KEY_BASE)
+            except Exception:
+                pass                    # the error that matters is the first
+            raise
 
     def open_session(self):
         if self.experimental.busy():
             QtWidgets.QMessageBox.information(
                 self, 'Open session',
                 'Stop the running fit or sampling first.')
+            return
+        if not self._keep_or_lose('Open session'):
             return
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, 'Open session', self.session_dir, MODEL_FILTER,
@@ -164,7 +221,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     with open(path, encoding='utf-8') as f:
                         d = json.load(f)
                     base = os.path.dirname(path)
-                missing = self._restore(d, base)
+                missing = self._replace(d, base, self._snapshot())
             except Exception as exc:
                 popup.close()
                 QtWidgets.QMessageBox.critical(
@@ -175,6 +232,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QApplication.processEvents()
             lost = self.experimental.restore_fit_tabs(d.get('fit_tabs', []))
             self._wait_for_tabs()
+            self._mark_saved()
         finally:
             popup.close()
         if missing:
@@ -239,7 +297,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self, 'Import Licorne session folder', '',
             options=DIALOG_OPTIONS
             | QtWidgets.QFileDialog.Option.ShowDirsOnly)
-        if not folder:
+        if not folder or not self._keep_or_lose('Import Licorne session'):
             return
         try:
             lic = load_licorne_session(folder)
@@ -247,7 +305,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 raise ValueError('no measured channel (rexp<k>.dat):\n'
                                  + '\n'.join(lic['notes']))
             d = self._licorne_state(lic, folder)
-            missing = self._restore(d, folder)
+            missing = self._replace(d, folder, self._snapshot())
         except Exception as exc:
             QtWidgets.QMessageBox.critical(
                 self, 'Import Licorne session',
@@ -255,6 +313,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.tabs.setCurrentWidget(self.experimental)
         self.setWindowTitle('SANR — %s (Licorne)' % lic['name'])
+        self._mark_saved()               # as a session just opened
         notes = lic['notes'] + missing
         if notes:
             QtWidgets.QMessageBox.warning(
@@ -333,12 +392,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.experimental.import_data()
 
     def save_session(self):
+        """Save the session to a file the user picks; True once saved."""
         path, chosen = QtWidgets.QFileDialog.getSaveFileName(
             self, 'Save session',
             os.path.join(self.session_dir, 'session.zip'), SAVE_FILTER,
             options=DIALOG_OPTIONS)
         if not path:
-            return
+            return False
         self.session_dir = os.path.dirname(os.path.abspath(path))
         # a name typed without .zip / .json gets the chosen filter's (the
         # dialog only asked about overwriting the name as typed)
@@ -349,7 +409,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self, 'Save session', '%s already exists.\nReplace it?'
                     % os.path.basename(path)) != \
                     QtWidgets.QMessageBox.StandardButton.Yes:
-                return
+                return False
         try:
             d = self.simulation.session_state()
             d['experimental'] = self.experimental.session_state(
@@ -363,21 +423,31 @@ class MainWindow(QtWidgets.QMainWindow):
                         'a .json session would not find them again:\n\n'
                         + '\n'.join(lost) + '\n\nSave as .json anyway?') != \
                         QtWidgets.QMessageBox.StandardButton.Yes:
-                    return
+                    return False
                 text = json.dumps(d, indent=2, default=_plain)
-                with open(path, 'w', encoding='utf-8') as f:
-                    f.write(text)
+                # written next to it, then put in its place: a failed write
+                # leaves the session that was there whole
+                part = path + '.part'
+                try:
+                    with open(part, 'w', encoding='utf-8') as f:
+                        f.write(text)
+                    os.replace(part, path)
+                finally:
+                    if os.path.exists(part):
+                        os.remove(part)
             else:
                 session_file.write_session(path, d, default=_plain)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(
                 self, 'Save session', 'Could not save %s:\n%s' % (path, exc))
-            return
+            return False
         self.setWindowTitle('SANR — %s' % os.path.basename(path))
+        self._mark_saved()
         if running:
             QtWidgets.QMessageBox.information(
                 self, 'Save session', 'Saved without these tabs, whose fit '
                 'or run is still going on:\n\n' + '\n'.join(running))
+        return True
 
 
 def settings():

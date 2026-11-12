@@ -96,7 +96,7 @@ class JointProblem:
                         if n in self.part_names}
         if fixed is None:
             fixed = [[q[2] for q in p.params] for p in self.parts]
-        elif np.ndim(fixed) == 1 and len(fixed) and np.ndim(fixed[0]) == 0:
+        elif len(fixed) and np.ndim(fixed[0]) == 0:
             fixed = [fixed] * len(self.parts)       # one row for all
         self.fixed = [np.array(f, dtype=float) for f in fixed]
         if [len(f) for f in self.fixed] != [len(p.params)

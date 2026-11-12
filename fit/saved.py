@@ -7,12 +7,16 @@ problem_state gives what a fit.problem.FitProblem or fit.joint.JointProblem
 was built from (FitProblem.inputs: every channel's points as given, dQ
 included, the Q range, Licorne grid and error floor; its cost and target;
 its stack as the fit had it, i.e. with the thickness spread's node count
-frozen, and the models of a mixture, which Stack.to_dict leaves out; the
+frozen and the parameters at the values the fit started from (not those
+of the last evaluation, which the fit's stack holds), and the models of a
+mixture, which Stack.to_dict leaves out; the
 names of the model it was taken from and of the dataset fitted,
 FitProblem.model_name and dataset_name), and
 problem_from_state builds the same problem again.  Arrays become lists;
 NaN and ±inf stay floats (Python's json reads its own NaN and Infinity).
 """
+
+import copy
 
 import numpy as np
 
@@ -62,7 +66,10 @@ def problem_state(problem):
                     modes=problem.modes, fixed=plain(problem.fixed),
                     sources=problem.sources)
     i = problem.inputs
-    return plain(dict(stack=stack_state(problem.stack), data=i['data'],
+    # the fit's stack holds its last evaluation: the start, as it was built
+    st = copy.deepcopy(problem.stack)
+    problem.apply([p[2] for p in problem.params], st)
+    return plain(dict(stack=stack_state(st), data=i['data'],
                       model=problem.model_name,
                       dataset=problem.dataset_name,
                       cost=problem.cost, target=problem.target,
