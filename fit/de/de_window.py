@@ -45,7 +45,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from fit.de.de_fit import run_de, run_lbfgs, run_lsq
 from fit.de import global_fit
 from fit.joint import JointProblem, part_x, parts
-from fit.multistart import merge
+from fit.multistart import merge, row_cost
 from fit.saved import plain, problem_from_state, problem_state
 import line_colours
 import style
@@ -413,8 +413,8 @@ class DEWindow(QtWidgets.QWidget):
                 '<br><i>%s</i><br>Select a minimum and send it to the '
                 'Simulation tab.' % (
                     gen, self.unit, len(m), 'um' if len(m) == 1 else 'a',
-                    self._costs(m[0]['chi2'], m[0]['x']),
-                    self._nu(m[0]['chi2'], m[0]['x']),
+                    self._costs(row_cost(m[0]), m[0]['x']),
+                    self._nu(row_cost(m[0]), m[0]['x']),
                     ', %d local' % (len(m) - 1) if len(m) > 1 else '',
                     html_escape(msg)))
             self.btn_stop.setEnabled(False)
@@ -564,8 +564,8 @@ class DEWindow(QtWidgets.QWidget):
             '%s%s<br>Select a minimum and send it to the Simulation tab.' % (
                 'Stopped' if stopped else 'Done', hits, len(minima),
                 'um' if len(minima) == 1 else 'a',
-                self._costs(minima[0]['chi2'], minima[0]['x']),
-                self._nu(minima[0]['chi2'], minima[0]['x']),
+                self._costs(row_cost(minima[0]), minima[0]['x']),
+                self._nu(row_cost(minima[0]), minima[0]['x']),
                 '<br>%d start(s) ended on their iteration limit, not '
                 'converged: where one was cut is not a minimum (fit on '
                 'from it)' % cut if cut else '') if minima else
@@ -590,7 +590,7 @@ class DEWindow(QtWidgets.QWidget):
                 k + 1, m['hits'], '' if m['hits'] == 1 else 's',
                 ' ✓' if m['from_current'] else '',
                 ' — %snot converged' % ('' if m['hits'] == 1 else '%d ' % cut)
-                if cut else ''), m['chi2'], m['x'])
+                if cut else ''), row_cost(m), m['x'])
         self.history.setCurrentItem(None)
         self.history.blockSignals(False)
         if minima:

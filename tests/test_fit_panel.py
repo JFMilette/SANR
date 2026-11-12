@@ -604,3 +604,39 @@ def test_chi2_in_the_status(app):
     win = lbfgs_fit(app, exp)
     _, cost, _ = win.entries[-1]
     assert 'best χ²/N %.6g, χ²/ν' % cost in win.status.text()
+
+
+def test_multistart_reports_chi2(app):
+    """The multistart's report gives the best minimum's data-only chi^2/N
+    and its cost (it said chi^2/N of the cost before); its rows keep the
+    cost as 'cost', 'chi2' still reading it; rows of the old form (only
+    'chi2') still fill a fit tab (T3)."""
+    import time
+    from fit.multistart import Minimum, row_cost
+    exp = tab(QA, QA, licorne=False, prior=True)
+    exp.fit_workers.setValue(1)
+    exp.ms_starts.setValue(2)
+    exp.start_multistart()
+    t0 = time.monotonic()
+    while exp._ms is not None and time.monotonic() - t0 < 60:
+        app.processEvents()
+    win = exp.fit_window
+    p = win.problem
+    _, cost, x = win.entries[0]
+    c2 = p.chi2_per_point(x, cost)
+    assert 'best χ²/N %.5g (cost %.5g)' % (c2, cost) in exp.ms_report.text()
+    assert c2 < cost
+    assert 'best cost %.6g (χ²/N %.6g' % (cost, c2) in win.status.text()
+    from fit.multistart import merge
+    rows = merge(p, [(0, p.x0(), 2.0), (1, 1 - p.x0(), 1.0)])
+    assert isinstance(rows[0], Minimum) and rows[0]['cost'] == 1.0
+    assert rows[0]['chi2'] == 1.0 and row_cost(rows[0]) == 1.0
+    # an older row: 'chi2' only
+    old = [dict(chi2=cost, x=x, hits=2, from_current=True),
+           dict(chi2=cost + 1, x=x, hits=1, from_current=False)]
+    assert row_cost(old[0]) == cost
+    win.show_minima(old)
+    h = win.history
+    assert h.topLevelItemCount() == 2
+    assert h.topLevelItem(0).text(1) == '%.6g' % cost
+    assert h.topLevelItem(0).text(2) == '%.6g' % c2

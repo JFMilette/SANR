@@ -80,7 +80,7 @@ from fit.dream.dream_fit import (ADAPT_MIN, WINDOWS, PosteriorProblem,
 from fit.dream.dream_window import SESSIONS_DIR, DreamThread, DreamWindow
 from fit.joint import (JointProblem, default_mode, part_index, part_x,
                        parts)
-from fit.multistart import run_multistart
+from fit.multistart import row_cost, run_multistart
 from fit.npe import missing as npe_missing
 from fit.npe.npe_window import NPERun, NPEThread, NPEWindow
 
@@ -822,14 +822,22 @@ class FitPanel:
     def _ms_done(self, minima):
         """The end of a multistart: a line in the report (the minima are the
         entries of its fit tab)."""
+        if not minima:
+            self.ms_report.setText(
+                'Multistart: stopped before any start ended.')
+            return
         hits = sum(m['hits'] for m in minima)
-        cost = 'χ²/N' if self._ms_problem.cost == 'chi2' else 'cost'
+        p, m = self._ms_problem, minima[0]
+        cost = row_cost(m)
+        # the data-only chi^2/N; the cost holds the priors' share too
+        c2 = p.chi2_per_point(m['x'], cost)
+        best = 'cost %.5g' % cost if c2 is None else \
+            'χ²/N %.5g (cost %.5g)' % (c2, cost) if any(p.priors) else \
+            'χ²/N %.5g' % c2
         self.ms_report.setText(
             self._ms_note + 'Multistart: %d end(s) in %d distinct minim%s, '
-            'best %s %.5g; the minima are in its fit tab.'
-            % (hits, len(minima), 'um' if len(minima) == 1 else 'a', cost,
-               minima[0]['chi2']) if minima
-            else 'Multistart: stopped before any start ended.')
+            'best %s; the minima are in its fit tab.'
+            % (hits, len(minima), 'um' if len(minima) == 1 else 'a', best))
 
     def _build_dream_page(self):
         """The DREAM options of the fit box."""

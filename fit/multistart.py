@@ -16,8 +16,11 @@ DE page settings; maxiter 100 with the polish where they say nothing, seed
 MINIMA -- the end points are merged when they agree to MERGE_U in every
 normalised coordinate and to MERGE_COST in cost: one minimum, its best
 member kept, `hits` how many starts reached it, `from_current` whether the
-current values' start is among them.  Sorted by cost (the problem's: chi^2/N
-for the 'chi2' cost).  A parameter within EDGE of either end of its bounds
+current values' start is among them.  Sorted by cost (the problem's,
+what was minimised: chi^2/N plus the priors' share for the 'chi2' cost;
+problem.chi2_per_point(x, cost) gives the data-only chi^2/N), kept as
+'cost' (Minimum: 'chi2', its name before, still reads it; row_cost reads
+either).  A parameter within EDGE of either end of its bounds
 is `at_bound`: the bound, not the data, holds it there.  `unfinished`: how
 many of its starts ended on their iteration limit, not converged (the
 L-BFGS-B's, the least squares', the short DE's polish: fit.de.de_fit
@@ -58,6 +61,21 @@ METHODS = ('lbfgs', 'lsq', 'de')
 EDGE = 0.005              # normalised distance from a bound: on it
 MERGE_U = 0.02            # max |u_a - u_b| of one minimum
 MERGE_COST = 1e-3         # max |cost_a - cost_b| of one minimum
+
+
+class Minimum(dict):
+    """A minimum (see MINIMA): 'chi2', the old name of its 'cost' (which
+    always held the cost, priors included), reads as 'cost'."""
+
+    def __missing__(self, key):
+        if key == 'chi2' and 'cost' in self:
+            return self['cost']
+        raise KeyError(key)
+
+
+def row_cost(m):
+    """The cost of a minimum, a Minimum or an older plain row ('chi2')."""
+    return m['cost'] if 'cost' in m else m['chi2']
 LBFGS_MAXITER = 3000
 LSQ_MAXITER = 1000
 PROGRESS_EVERY = 0.2      # s between the reports of one start
@@ -207,15 +225,16 @@ def merge(problem, ends):
         limited = bool(limited and limited[0])
         for m in out:
             if np.max(np.abs(u - m['u'])) < MERGE_U and \
-                    abs(cost - m['chi2']) < MERGE_COST:
+                    abs(cost - m['cost']) < MERGE_COST:
                 m['hits'] += 1
                 m['unfinished'] += limited
                 m['from_current'] |= k == 0
                 break
         else:
-            out.append(dict(chi2=cost, x=problem.to_x(u), u=np.array(u),
-                            hits=1, at_bound=(u < EDGE) | (u > 1 - EDGE),
-                            from_current=k == 0, unfinished=int(limited)))
+            out.append(Minimum(
+                cost=cost, x=problem.to_x(u), u=np.array(u), hits=1,
+                at_bound=(u < EDGE) | (u > 1 - EDGE), from_current=k == 0,
+                unfinished=int(limited)))
     return out
 
 
@@ -223,7 +242,8 @@ def run_multistart(problem, n_starts=24, method='lbfgs', seed=None,
                    workers=1, cancelled=None, de_options=None,
                    callback=None, progress=None):
     """Local fits from the current values and n_starts Sobol points:
-    [{'chi2' (the cost), 'x' (physical), 'u', 'hits', 'at_bound' (bool per
+    [{'cost' ('chi2' reads it too), 'x' (physical), 'u', 'hits',
+    'at_bound' (bool per
     parameter), 'from_current', 'unfinished'}], best first.  callback(done, total) after
     each start; progress(info): see PROGRESS."""
     if method not in METHODS:
