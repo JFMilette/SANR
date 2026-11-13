@@ -38,3 +38,6 @@ sessions/*
 
 # Windows kernel and installer build (make_windows_installer.py)
 *.pyd
+
+# working plans and prototype diffs, kept local
+plans/
